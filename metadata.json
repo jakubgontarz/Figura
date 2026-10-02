@@ -1,0 +1,6 @@
+{
+  "name": "Paint.NET Web - Edytor Graficzny z Warstwami",
+  "description": "Klon Paint.NET z szybkim pipeline renderowania opartym na kafelkach (Tile Grid) i dirty-rect, obsługą warstw, trybami mieszania i architekturą zgodną ze SkiaSharp C# WPF.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
