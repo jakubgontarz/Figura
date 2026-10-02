@@ -178,13 +178,28 @@ export class BrushEngine {
     const dist = Math.hypot(dx, dy);
 
     const pad = Math.max(2, Math.ceil(settings.size / 2) + 2);
-    let minX = Math.min(p0.x, p1.x) - pad;
-    let minY = Math.min(p0.y, p1.y) - pad;
-    let maxX = Math.max(p0.x, p1.x) + pad;
-    let maxY = Math.max(p0.y, p1.y) + pad;
+    const minX = Math.min(p0.x, p1.x) - pad;
+    const minY = Math.min(p0.y, p1.y) - pad;
+    const maxX = Math.max(p0.x, p1.x) + pad;
+    const maxY = Math.max(p0.y, p1.y) + pad;
+
+    // Szybkie pominięcie jeśli cały odcinek leży całkowicie poza płótnem
+    const isTotallyOutside =
+      maxX < 0 || minX > canvasWidth || maxY < 0 || minY > canvasHeight;
 
     if (dist > 0) {
       let d = stepDistance - this.residualDistance;
+
+      if (isTotallyOutside) {
+        const numSteps = Math.floor((dist - d) / stepDistance);
+        if (numSteps >= 0) {
+          d += (numSteps + 1) * stepDistance;
+        }
+        this.residualDistance = dist - (d - stepDistance);
+        this.lastDabPoint = { ...p1 };
+        return { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 };
+      }
+
       while (d <= dist) {
         const t = d / dist;
         const stampX = p0.x + dx * t;
@@ -215,8 +230,17 @@ export class BrushEngine {
     let maxX = Math.max(p1.x, p2.x) + pad;
     let maxY = Math.max(p1.y, p2.y) + pad;
 
+    // Szybkie pominięcie jeśli segment leży całkowicie poza płótnem
+    const isTotallyOutside =
+      maxX < 0 || minX > canvasWidth || maxY < 0 || minY > canvasHeight;
+
+    if (isTotallyOutside) {
+      this.lastDabPoint = { ...p2 };
+      return { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 };
+    }
+
     const chord = Math.hypot(p2.x - p1.x, p2.y - p1.y);
-    const numSubSteps = Math.max(4, Math.ceil(chord));
+    const numSubSteps = Math.min(128, Math.max(4, Math.ceil(chord)));
 
     let prevPt = { ...p1 };
 
@@ -265,8 +289,20 @@ export class BrushEngine {
   }
 
   public stampOnStrokeBuffer(rawX: number, rawY: number, settings: BrushSettings): void {
-    const ctx = this.strokeCtx;
     const size = Math.max(1, Math.round(settings.size));
+    const radius = Math.max(1, size / 2);
+
+    // Szybkie odrzucenie plamki jeśli nie dotyka bufora
+    if (
+      rawX + radius < 0 ||
+      rawX - radius > this.strokeCanvas.width ||
+      rawY + radius < 0 ||
+      rawY - radius > this.strokeCanvas.height
+    ) {
+      return;
+    }
+
+    const ctx = this.strokeCtx;
     const r = settings.color.r;
     const g = settings.color.g;
     const b = settings.color.b;
