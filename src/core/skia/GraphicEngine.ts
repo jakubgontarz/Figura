@@ -12,14 +12,21 @@ import {
   FiguraProjectFile,
   GradientSettings,
   InterpolationMode,
+  LineAndCurveSettings,
   SKBlendMode,
   SKColor,
   SKPoint,
   SKRectI,
   SelectionSettings,
+  VectorShapeSettings,
   WandSampleSource,
   getCanvasCompositeOperation,
 } from './types.ts';
+import {
+  renderVectorBezier,
+  renderVectorLine,
+  renderVectorShape,
+} from './VectorRenderer.ts';
 
 export interface TransformContentSession {
   sourceContentCanvas: HTMLCanvasElement;
@@ -108,12 +115,14 @@ export class GraphicEngine {
   private redoStack: HistoryAction[] = [];
   private maxHistory: number = 30;
 
-  public showTileGridDebug: boolean = false;
   public lastDirtyRect: SKRectI | null = null;
   private checkerPatternCanvas: HTMLCanvasElement | null = null;
 
   private dirtyScratchCanvas: HTMLCanvasElement | null = null;
   private dirtyScratchCtx: CanvasRenderingContext2D | null = null;
+
+  private vectorPreviewCanvas: HTMLCanvasElement | null = null;
+  private vectorPreviewCtx: CanvasRenderingContext2D | null = null;
 
   constructor(
     title: string = 'obraz1.fig',
@@ -179,6 +188,21 @@ export class GraphicEngine {
       this.dirtyScratchCanvas.height = Math.max(this.dirtyScratchCanvas.height, h);
     }
     return { canvas: this.dirtyScratchCanvas, ctx: this.dirtyScratchCtx! };
+  }
+
+  private getVectorScratch(w: number, h: number): { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D } {
+    if (!this.vectorPreviewCanvas) {
+      this.vectorPreviewCanvas = document.createElement('canvas');
+      this.vectorPreviewCanvas.width = Math.max(256, w);
+      this.vectorPreviewCanvas.height = Math.max(256, h);
+      this.vectorPreviewCtx = this.vectorPreviewCanvas.getContext('2d');
+    }
+    if (this.vectorPreviewCanvas.width !== w || this.vectorPreviewCanvas.height !== h) {
+      this.vectorPreviewCanvas.width = w;
+      this.vectorPreviewCanvas.height = h;
+      this.vectorPreviewCtx = this.vectorPreviewCanvas.getContext('2d');
+    }
+    return { canvas: this.vectorPreviewCanvas, ctx: this.vectorPreviewCtx! };
   }
 
   public getActiveLayer(): Layer {
@@ -919,7 +943,12 @@ export class GraphicEngine {
         const da = sData[p + 3] - targetA;
         const dist = Math.sqrt(dr * dr + dg * dg + db * db + (da * da) / 4);
         if (dist <= maxDist) {
-          fillMask[i] = 255;
+          if (brushSettings.antiAliasing && maxDist > 0 && dist > maxDist * 0.75) {
+            const factor = 1 - (dist - maxDist * 0.75) / (maxDist * 0.25);
+            fillMask[i] = Math.max(1, Math.round(factor * 255));
+          } else {
+            fillMask[i] = 255;
+          }
         }
       }
     } else {
@@ -951,7 +980,12 @@ export class GraphicEngine {
             const dist = Math.sqrt(dr * dr + dg * dg + db * db + (da * da) / 4);
 
             if (dist <= maxDist) {
-              fillMask[nIdx] = 255;
+              if (brushSettings.antiAliasing && maxDist > 0 && dist > maxDist * 0.75) {
+                const factor = 1 - (dist - maxDist * 0.75) / (maxDist * 0.25);
+                fillMask[nIdx] = Math.max(1, Math.round(factor * 255));
+              } else {
+                fillMask[nIdx] = 255;
+              }
               queue.push(nIdx);
             }
           }
@@ -981,7 +1015,7 @@ export class GraphicEngine {
         if (py > maxY) maxY = py;
 
         const p = i * 4;
-        let alpha = fillColor.a;
+        let alpha = Math.round((fillColor.a * fillMask[i]) / 255);
         if (selectionMaskData) {
           alpha = Math.round((alpha * selectionMaskData[p + 3]) / 255);
         }
@@ -1491,7 +1525,9 @@ export class GraphicEngine {
     previewPointA?: SKPoint | null,
     previewPointB?: SKPoint | null,
     previewShapeType?: string | null,
-    previewBrushSettings?: BrushSettings | null
+    previewBrushSettings?: BrushSettings | null,
+    customPreviewRenderer?: ((ctx: CanvasRenderingContext2D) => void) | null,
+    customPreviewBlendMode?: SKBlendMode | null
   ): void {
     const ctx = targetCanvas.getContext('2d');
     if (!ctx) return;
@@ -1499,6 +1535,10 @@ export class GraphicEngine {
     if (targetCanvas.width !== this.width || targetCanvas.height !== this.height) {
       targetCanvas.width = this.width;
       targetCanvas.height = this.height;
+      dirtyRect = null;
+    }
+
+    if (customPreviewRenderer) {
       dirtyRect = null;
     }
 
@@ -1613,18 +1653,21 @@ export class GraphicEngine {
       const layer = this.layers[i];
       if (!layer.visible || layer.opacity <= 0) continue;
 
-      if (i !== this.activeLayerIndex || !isDrawingLive || !this.brushEngine.activeBrushSettings) {
+      const isLiveBrushActive = (i === this.activeLayerIndex && isDrawingLive && !!this.brushEngine.activeBrushSettings);
+      const isCustomPreviewActive = (i === this.activeLayerIndex && !!customPreviewRenderer);
+
+      if (!isLiveBrushActive && !isCustomPreviewActive) {
         ctx.save();
         ctx.globalAlpha = layer.opacity;
         ctx.globalCompositeOperation = getCanvasCompositeOperation(layer.blendMode);
         layer.tileGrid.drawToFlatContext(ctx);
         ctx.restore();
-      } else {
+      } else if (isLiveBrushActive) {
         // Aktywna warstwa podczas aktywnego rysowania na żywo w pełnym przerysowaniu
         const activeFlat = layer.tileGrid.compositeToFlatCanvas();
         const afCtx = activeFlat.getContext('2d')!;
 
-        const bSettings = this.brushEngine.activeBrushSettings;
+        const bSettings = this.brushEngine.activeBrushSettings!;
         const brushBlend = this.brushEngine.isEraser ? 'Clear' : bSettings.blendMode;
 
         if (!this.selectionManager.hasActiveSelection) {
@@ -1650,6 +1693,38 @@ export class GraphicEngine {
           afCtx.restore();
         }
 
+        ctx.save();
+        ctx.globalAlpha = layer.opacity;
+        ctx.globalCompositeOperation = getCanvasCompositeOperation(layer.blendMode);
+        ctx.drawImage(activeFlat, 0, 0);
+        ctx.restore();
+      } else if (isCustomPreviewActive) {
+        // Aktywna warstwa podczas podglądu narzędzi wektorowych (linie, krzywe, figury)
+        const activeFlat = layer.tileGrid.compositeToFlatCanvas();
+        const afCtx = activeFlat.getContext('2d')!;
+
+        const { canvas: vScratch, ctx: vsCtx } = this.getVectorScratch(this.width, this.height);
+        vsCtx.clearRect(0, 0, this.width, this.height);
+
+        // 1. Renderujemy kształt wektorowy do odizolowanego bufora podglądu
+        customPreviewRenderer(vsCtx);
+
+        // 2. Jeśli aktywne jest zaznaczenie, maskujemy kształt przed nałożeniem na warstwę
+        if (this.selectionManager.hasActiveSelection) {
+          vsCtx.save();
+          vsCtx.globalCompositeOperation = 'destination-in';
+          vsCtx.drawImage(this.selectionManager.maskCanvas, 0, 0);
+          vsCtx.restore();
+        }
+
+        // 3. Nakładamy kształt na aktywną warstwę z uwzględnieniem trybu mieszania narzędzia
+        const blendOp = getCanvasCompositeOperation(customPreviewBlendMode || 'SrcOver');
+        afCtx.save();
+        afCtx.globalCompositeOperation = blendOp;
+        afCtx.drawImage(vScratch, 0, 0);
+        afCtx.restore();
+
+        // 4. Rysujemy aktywną warstwę z nałożonym kształtem na płótno dokumentu zgodnie z kryciem i trybem warstwy
         ctx.save();
         ctx.globalAlpha = layer.opacity;
         ctx.globalCompositeOperation = getCanvasCompositeOperation(layer.blendMode);
@@ -1692,20 +1767,195 @@ export class GraphicEngine {
         );
         ctx.restore();
       }
-
-      ctx.restore();
     }
 
     if (previewPointA && previewPointB && previewShapeType && previewBrushSettings) {
       this.renderShapePreview(ctx, previewPointA, previewPointB, previewShapeType, previewBrushSettings);
     }
 
-    if (this.showTileGridDebug) {
-      this.drawTileDebugGrid(ctx);
-    }
-
     ctx.restore();
     this.lastDirtyRect = null;
+  }
+
+  public commitVectorLine(
+    p0: SKPoint,
+    p1: SKPoint,
+    settings: LineAndCurveSettings
+  ): void {
+    const layer = this.getActiveLayer();
+    if (!layer || !layer.visible) return;
+
+    const tempCanvas = document.createElement('canvas');
+    tempCanvas.width = this.width;
+    tempCanvas.height = this.height;
+    const tctx = tempCanvas.getContext('2d');
+    if (!tctx) return;
+
+    renderVectorLine(tctx, p0, p1, { ...settings, blendMode: 'SrcOver' });
+
+    if (this.selectionManager.hasActiveSelection) {
+      tctx.save();
+      tctx.globalCompositeOperation = 'destination-in';
+      tctx.drawImage(this.selectionManager.maskCanvas, 0, 0);
+      tctx.restore();
+    }
+
+    const pad = Math.max(20, settings.strokeWidth * (settings.markerSize || 1.0) * 4 + 20);
+    const minX = Math.max(0, Math.floor(Math.min(p0.x, p1.x) - pad));
+    const minY = Math.max(0, Math.floor(Math.min(p0.y, p1.y) - pad));
+    const maxX = Math.min(this.width, Math.ceil(Math.max(p0.x, p1.x) + pad));
+    const maxY = Math.min(this.height, Math.ceil(Math.max(p0.y, p1.y) + pad));
+
+    const dirtyRect: SKRectI = {
+      left: minX,
+      top: minY,
+      right: maxX,
+      bottom: maxY,
+      width: Math.max(0, maxX - minX),
+      height: Math.max(0, maxY - minY),
+    };
+
+    this.bakeCanvasToLayer(layer, tempCanvas, dirtyRect, 'Linia', settings.blendMode);
+  }
+
+  public commitVectorBezier(
+    p0: SKPoint,
+    p1: SKPoint,
+    p2: SKPoint,
+    p3: SKPoint,
+    settings: LineAndCurveSettings
+  ): void {
+    const layer = this.getActiveLayer();
+    if (!layer || !layer.visible) return;
+
+    const tempCanvas = document.createElement('canvas');
+    tempCanvas.width = this.width;
+    tempCanvas.height = this.height;
+    const tctx = tempCanvas.getContext('2d');
+    if (!tctx) return;
+
+    renderVectorBezier(tctx, p0, p1, p2, p3, { ...settings, blendMode: 'SrcOver' });
+
+    if (this.selectionManager.hasActiveSelection) {
+      tctx.save();
+      tctx.globalCompositeOperation = 'destination-in';
+      tctx.drawImage(this.selectionManager.maskCanvas, 0, 0);
+      tctx.restore();
+    }
+
+    const pad = Math.max(20, settings.strokeWidth * (settings.markerSize || 1.0) * 4 + 20);
+    const minX = Math.max(0, Math.floor(Math.min(p0.x, p1.x, p2.x, p3.x) - pad));
+    const minY = Math.max(0, Math.floor(Math.min(p0.y, p1.y, p2.y, p3.y) - pad));
+    const maxX = Math.min(this.width, Math.ceil(Math.max(p0.x, p1.x, p2.x, p3.x) + pad));
+    const maxY = Math.min(this.height, Math.ceil(Math.max(p0.y, p1.y, p2.y, p3.y) + pad));
+
+    const dirtyRect: SKRectI = {
+      left: minX,
+      top: minY,
+      right: maxX,
+      bottom: maxY,
+      width: Math.max(0, maxX - minX),
+      height: Math.max(0, maxY - minY),
+    };
+
+    this.bakeCanvasToLayer(layer, tempCanvas, dirtyRect, 'Krzywa Beziera', settings.blendMode);
+  }
+
+  public commitVectorShape(
+    center: SKPoint,
+    width: number,
+    height: number,
+    angle: number,
+    settings: VectorShapeSettings,
+    flipX: boolean = false,
+    flipY: boolean = false
+  ): void {
+    const layer = this.getActiveLayer();
+    if (!layer || !layer.visible) return;
+
+    const tempCanvas = document.createElement('canvas');
+    tempCanvas.width = this.width;
+    tempCanvas.height = this.height;
+    const tctx = tempCanvas.getContext('2d');
+    if (!tctx) return;
+
+    renderVectorShape(tctx, center, width, height, angle, { ...settings, blendMode: 'SrcOver' }, flipX, flipY);
+
+    if (this.selectionManager.hasActiveSelection) {
+      tctx.save();
+      tctx.globalCompositeOperation = 'destination-in';
+      tctx.drawImage(this.selectionManager.maskCanvas, 0, 0);
+      tctx.restore();
+    }
+
+    const diag = Math.hypot(width, height) / 2;
+    const pad = Math.max(10, settings.strokeWidth * 2 + 10);
+    const minX = Math.max(0, Math.floor(center.x - diag - pad));
+    const minY = Math.max(0, Math.floor(center.y - diag - pad));
+    const maxX = Math.min(this.width, Math.ceil(center.x + diag + pad));
+    const maxY = Math.min(this.height, Math.ceil(center.y + diag + pad));
+
+    const dirtyRect: SKRectI = {
+      left: minX,
+      top: minY,
+      right: maxX,
+      bottom: maxY,
+      width: Math.max(0, maxX - minX),
+      height: Math.max(0, maxY - minY),
+    };
+
+    this.bakeCanvasToLayer(layer, tempCanvas, dirtyRect, 'Figura', settings.blendMode);
+  }
+
+  private bakeCanvasToLayer(
+    layer: Layer,
+    sourceCanvas: HTMLCanvasElement,
+    dirtyRect: SKRectI,
+    actionDesc: string,
+    blendMode: SKBlendMode = 'SrcOver'
+  ): void {
+    if (dirtyRect.width <= 0 || dirtyRect.height <= 0) return;
+
+    const affectedTiles = layer.tileGrid.getTilesIntersectingRect(dirtyRect);
+    const beforeTiles = affectedTiles.map((t) => ({
+      tx: t.tileX,
+      ty: t.tileY,
+      imgData: t.ctx.getImageData(0, 0, t.width, t.height),
+      hasContent: t.hasContent,
+    }));
+
+    const compOp = getCanvasCompositeOperation(blendMode);
+
+    for (const tile of affectedTiles) {
+      tile.ctx.save();
+      tile.ctx.globalCompositeOperation = compOp;
+      tile.ctx.drawImage(
+        sourceCanvas,
+        tile.pixelX, tile.pixelY, tile.width, tile.height,
+        0, 0, tile.width, tile.height
+      );
+      tile.ctx.restore();
+      tile.hasContent = true;
+      tile.isDirty = true;
+    }
+
+    const afterTiles = affectedTiles.map((t) => ({
+      tx: t.tileX,
+      ty: t.tileY,
+      imgData: t.ctx.getImageData(0, 0, t.width, t.height),
+      hasContent: t.hasContent,
+    }));
+
+    this.pushTileAction({
+      type: 'tiles',
+      description: actionDesc,
+      layerIndex: this.activeLayerIndex,
+      before: beforeTiles,
+      after: afterTiles,
+    });
+
+    layer.updateThumbnail();
+    this.markAllLayersDirty();
   }
 
   private renderShapePreview(
@@ -1813,39 +2063,6 @@ export class GraphicEngine {
     });
 
     layer.updateThumbnail();
-  }
-
-  private drawTileDebugGrid(ctx: CanvasRenderingContext2D): void {
-    ctx.save();
-    ctx.lineWidth = 1;
-    ctx.strokeStyle = 'rgba(0, 180, 255, 0.4)';
-    ctx.fillStyle = 'rgba(0, 180, 255, 0.8)';
-    ctx.font = '9px monospace';
-
-    const cols = Math.ceil(this.width / this.tileSize);
-    const rows = Math.ceil(this.height / this.tileSize);
-
-    for (let ty = 0; ty < rows; ty++) {
-      for (let tx = 0; tx < cols; tx++) {
-        const px = tx * this.tileSize;
-        const py = ty * this.tileSize;
-        ctx.strokeRect(px + 0.5, py + 0.5, this.tileSize, this.tileSize);
-        ctx.fillText(`T[${tx},${ty}]`, px + 4, py + 12);
-      }
-    }
-
-    if (this.lastDirtyRect) {
-      ctx.strokeStyle = 'rgba(255, 50, 50, 0.85)';
-      ctx.lineWidth = 2;
-      ctx.strokeRect(
-        this.lastDirtyRect.left,
-        this.lastDirtyRect.top,
-        this.lastDirtyRect.width,
-        this.lastDirtyRect.height
-      );
-    }
-
-    ctx.restore();
   }
 
   public pickColor(

@@ -12,7 +12,6 @@ interface StatusBarProps {
   docHeight: number;
   zoom: number;
   onZoomChange: (newZoom: number) => void;
-  tileSize: number;
 }
 
 export const StatusBar: React.FC<StatusBarProps> = ({
@@ -21,11 +20,7 @@ export const StatusBar: React.FC<StatusBarProps> = ({
   docHeight,
   zoom,
   onZoomChange,
-  tileSize,
 }) => {
-  const cols = Math.ceil(docWidth / tileSize);
-  const rows = Math.ceil(docHeight / tileSize);
-  const totalTiles = cols * rows;
 
   return (
     <div className="h-6 bg-[#007acc] text-white select-none flex items-center justify-between px-3 text-[11px] font-normal z-20 shadow-md">
@@ -64,10 +59,6 @@ export const StatusBar: React.FC<StatusBarProps> = ({
             <ZoomIn size={11} />
           </button>
         </div>
-
-        <span className="opacity-75 text-[10px] hidden md:inline">
-          Kafelki: {cols}×{rows} ({totalTiles} kafelków po {tileSize}px)
-        </span>
       </div>
 
       {/* Prawa sekcja: Współrzędne kursora aktualizowane z 0-opóźnieniem */}

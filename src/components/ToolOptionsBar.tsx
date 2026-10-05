@@ -4,20 +4,27 @@
  */
 
 import React from 'react';
-import { Scaling, Move, FlipHorizontal, FlipVertical, Pipette, Blend, ArrowLeftRight } from 'lucide-react';
+import {
+  FlipHorizontal,
+  FlipVertical,
+  ArrowLeftRight,
+} from 'lucide-react';
 import {
   BLEND_MODES,
   BrushSettings,
-  GradientRepeatMode,
   GradientSettings,
-  GradientType,
-  InterpolationMode,
+  LineAndCurveSettings,
+  MarkerType,
   PipetteSettings,
   SKBlendMode,
   SKColor,
-  SelectionCombineMode,
-  SelectionConstraint,
   SelectionSettings,
+  ShapeFillMode,
+  ShapeKind,
+  StrokeAlignment,
+  StrokeCornerJoin,
+  StrokeDashStyle,
+  VectorShapeSettings,
 } from '../core/skia/types.ts';
 
 interface ToolOptionsBarProps {
@@ -29,13 +36,18 @@ interface ToolOptionsBarProps {
   onChangePipetteSettings: (newSettings: Partial<PipetteSettings>) => void;
   gradientSettings?: GradientSettings;
   onChangeGradientSettings?: (newSettings: Partial<GradientSettings>) => void;
+  vectorShapeSettings: VectorShapeSettings;
+  onChangeVectorShapeSettings: (newSettings: Partial<VectorShapeSettings>) => void;
+  lineAndCurveSettings: LineAndCurveSettings;
+  onChangeLineAndCurveSettings: (newSettings: Partial<LineAndCurveSettings>) => void;
   primaryColor?: SKColor;
   secondaryColor?: SKColor;
-  showTileDebug: boolean;
-  onToggleTileDebug: () => void;
   activeTool: string;
   onFlipHorizontal?: () => void;
   onFlipVertical?: () => void;
+  isLiveVectorSessionActive?: boolean;
+  onCommitLiveVectorSession?: () => void;
+  onCancelLiveVectorSession?: () => void;
 }
 
 function sliderToSize(val: number): number {
@@ -71,13 +83,18 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
   onChangePipetteSettings,
   gradientSettings,
   onChangeGradientSettings,
+  vectorShapeSettings,
+  onChangeVectorShapeSettings,
+  lineAndCurveSettings,
+  onChangeLineAndCurveSettings,
   primaryColor,
   secondaryColor,
-  showTileDebug,
-  onToggleTileDebug,
   activeTool,
   onFlipHorizontal,
   onFlipVertical,
+  isLiveVectorSessionActive = false,
+  onCommitLiveVectorSession,
+  onCancelLiveVectorSession,
 }) => {
   const isSelectionTool =
     activeTool === 'select-rect' ||
@@ -85,35 +102,388 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
     activeTool === 'select-lasso' ||
     activeTool === 'magic-wand';
 
-  return (
-    <div className="h-8 bg-[#2b2b2b] select-none flex items-center px-3 text-xs text-[#dddddd] border-b border-[#1c1c1c] gap-3.5 overflow-x-auto scrollbar-none">
-      <span className="font-semibold text-[#aaaaaa]">Opcje:</span>
+  const isLineOrCurve = activeTool === 'line' || activeTool === 'bezier';
+  const isShapeTool = activeTool === 'shapes';
 
-      {activeTool === 'pipette' ? (
-        /* PASEK OPCJI PIPETY */
-        <div className="flex items-center gap-3.5 flex-1">
-          <div className="flex items-center gap-1.5 text-[#00bcd4] font-medium text-xs bg-[#1e1e1e] px-2 py-0.5 rounded border border-[#00bcd4]/30">
-            <Pipette size={14} />
-            <span>Pipeta (Próbnik kolorów)</span>
+  return (
+    <div className="h-8 bg-[#2b2b2b] select-none flex items-center px-3 text-xs text-[#dddddd] border-b border-[#1c1c1c] gap-3.5 overflow-x-auto scrollbar-none flex-nowrap">
+      <span className="font-semibold text-[#aaaaaa] flex-shrink-0">Opcje:</span>
+
+      {/* 1. OPCJE LINII I KRZYWEJ BEZIERA */}
+      {isLineOrCurve ? (
+        <div className="flex items-center gap-3 flex-1 flex-shrink-0">
+          {/* Grubość linii */}
+          <div className="flex items-center gap-1.5 flex-shrink-0">
+            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Grubość:</label>
+            <input
+              type="number"
+              min="1"
+              max="200"
+              value={lineAndCurveSettings.strokeWidth}
+              onChange={(e) => {
+                const val = parseInt(e.target.value);
+                if (!isNaN(val)) {
+                  onChangeLineAndCurveSettings({ strokeWidth: Math.max(1, Math.min(200, val)) });
+                }
+              }}
+              className="w-12 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white focus:outline-none focus:border-[#007acc] font-mono"
+            />
+            <span className="text-[10px] text-[#888]">px</span>
+            <input
+              type="range"
+              min="1"
+              max="100"
+              value={lineAndCurveSettings.strokeWidth}
+              onChange={(e) => onChangeLineAndCurveSettings({ strokeWidth: parseInt(e.target.value) })}
+              className="w-16 h-1 bg-[#444] accent-[#007acc] rounded-lg appearance-none cursor-pointer"
+            />
           </div>
 
+          {/* Kreskowanie */}
+          <div className="flex items-center gap-1.5 flex-shrink-0">
+            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Kreskowanie:</label>
+            <select
+              value={lineAndCurveSettings.dashStyle}
+              onChange={(e) =>
+                onChangeLineAndCurveSettings({ dashStyle: e.target.value as StrokeDashStyle })
+              }
+              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+            >
+              <option value="solid">Ciągła ──────</option>
+              <option value="dashed">Kreskowana ── ──</option>
+              <option value="dotted">Kropkowana ••••••</option>
+              <option value="dash-dot">Kreska-kropka ── • ──</option>
+              <option value="long-dash">Długa kreska ──── ────</option>
+            </select>
+          </div>
+
+          {/* Znacznik początku */}
+          <div className="flex items-center gap-1.5 flex-shrink-0">
+            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Początek:</label>
+            <select
+              value={lineAndCurveSettings.startMarker}
+              onChange={(e) =>
+                onChangeLineAndCurveSettings({ startMarker: e.target.value as MarkerType })
+              }
+              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+            >
+              <option value="none">Brak</option>
+              <option value="arrow">Strzałka</option>
+              <option value="stealth-arrow">Grot ostry</option>
+              <option value="circle">Koło</option>
+              <option value="square">Kwadrat</option>
+              <option value="diamond">Romb</option>
+            </select>
+          </div>
+
+          {/* Znacznik końca */}
+          <div className="flex items-center gap-1.5 flex-shrink-0">
+            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Koniec:</label>
+            <select
+              value={lineAndCurveSettings.endMarker}
+              onChange={(e) =>
+                onChangeLineAndCurveSettings({ endMarker: e.target.value as MarkerType })
+              }
+              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+            >
+              <option value="none">Brak</option>
+              <option value="arrow">Strzałka</option>
+              <option value="stealth-arrow">Grot ostry</option>
+              <option value="circle">Koło</option>
+              <option value="square">Kwadrat</option>
+              <option value="diamond">Romb</option>
+            </select>
+          </div>
+
+          {/* Rozmiar znacznika */}
+          {(lineAndCurveSettings.startMarker !== 'none' || lineAndCurveSettings.endMarker !== 'none') && (
+            <div className="flex items-center gap-1.5 flex-shrink-0">
+              <label className="text-[11px] whitespace-nowrap text-[#aaa]">Grot:</label>
+              <select
+                value={lineAndCurveSettings.markerSize}
+                onChange={(e) =>
+                  onChangeLineAndCurveSettings({ markerSize: parseFloat(e.target.value) })
+                }
+                className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer font-mono"
+              >
+                <option value={0.7}>Mały (0.7x)</option>
+                <option value={1.0}>Średni (1.0x)</option>
+                <option value={1.5}>Duży (1.5x)</option>
+                <option value={2.2}>Bardzo duży (2.2x)</option>
+              </select>
+            </div>
+          )}
+
+          {/* Wygładzanie */}
+          <label className="flex items-center gap-1.5 cursor-pointer text-[11px] hover:text-white flex-shrink-0">
+            <input
+              type="checkbox"
+              checked={lineAndCurveSettings.antiAliasing}
+              onChange={(e) => onChangeLineAndCurveSettings({ antiAliasing: e.target.checked })}
+              className="rounded bg-[#1e1e1e] border-[#555] text-[#007acc] focus:ring-0 focus:ring-offset-0 h-3.5 w-3.5 cursor-pointer"
+            />
+            <span>Wygładzanie</span>
+          </label>
+
+          {/* Tryb mieszania */}
+          <div className="flex items-center gap-1.5 flex-shrink-0">
+            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Mieszanie:</label>
+            <select
+              value={lineAndCurveSettings.blendMode}
+              onChange={(e) => onChangeLineAndCurveSettings({ blendMode: e.target.value as SKBlendMode })}
+              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+            >
+              {BLEND_MODES.map((mode) => (
+                <option key={mode.id} value={mode.id}>
+                  {mode.namePl}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+      ) : isShapeTool ? (
+        /* 2. OPCJE FIGUR GEOMETRYCZNYCH */
+        <div className="flex items-center gap-3 flex-1 flex-shrink-0">
+          {/* Wybór kształtu */}
+          <div className="flex items-center gap-1.5 flex-shrink-0">
+            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Kształt:</label>
+            <select
+              value={vectorShapeSettings.shapeKind}
+              onChange={(e) =>
+                onChangeVectorShapeSettings({ shapeKind: e.target.value as ShapeKind })
+              }
+              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer font-medium"
+            >
+              <option value="rect">Prostokąt</option>
+              <option value="round-rect">Zaokrąglony prostokąt</option>
+              <option value="ellipse">Elipsa / Koło</option>
+              <option value="triangle">Trójkąt</option>
+              <option value="star">Gwiazda</option>
+              <option value="polygon">Wielokąt</option>
+              <option value="arrow">Strzałka</option>
+              <option value="heart">Serce</option>
+              <option value="diamond">Romb</option>
+            </select>
+          </div>
+
+          {/* Sposób wypełnienia */}
+          <div className="flex items-center gap-1.5 flex-shrink-0">
+            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Wypełnienie:</label>
+            <select
+              value={vectorShapeSettings.fillMode}
+              onChange={(e) =>
+                onChangeVectorShapeSettings({ fillMode: e.target.value as ShapeFillMode })
+              }
+              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer font-medium"
+            >
+              <option value="none">tylko obrys</option>
+              <option value="primary">kolor główny</option>
+              <option value="stroke-and-fill">kolor dodatkowy</option>
+            </select>
+          </div>
+
+          {/* Grubość obrysu */}
+          <div className="flex items-center gap-1.5 flex-shrink-0">
+            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Obrys:</label>
+            <input
+              type="number"
+              min="0"
+              max="200"
+              value={vectorShapeSettings.strokeWidth}
+              onChange={(e) => {
+                const val = parseInt(e.target.value);
+                if (!isNaN(val)) {
+                  onChangeVectorShapeSettings({ strokeWidth: Math.max(0, Math.min(200, val)) });
+                }
+              }}
+              className="w-12 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white focus:outline-none focus:border-[#007acc] font-mono"
+            />
+            <span className="text-[10px] text-[#888]">px</span>
+            <input
+              type="range"
+              min="0"
+              max="100"
+              value={vectorShapeSettings.strokeWidth}
+              onChange={(e) => onChangeVectorShapeSettings({ strokeWidth: parseInt(e.target.value) })}
+              className="w-16 h-1 bg-[#444] accent-[#007acc] rounded-lg appearance-none cursor-pointer"
+            />
+          </div>
+
+          {/* Narożnik */}
+          <div className="flex items-center gap-1.5 flex-shrink-0">
+            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Narożnik:</label>
+            <select
+              value={vectorShapeSettings.strokeCornerJoin}
+              onChange={(e) =>
+                onChangeVectorShapeSettings({ strokeCornerJoin: e.target.value as StrokeCornerJoin })
+              }
+              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+            >
+              <option value="miter">Prosty / Ostry</option>
+              <option value="round">Zaokrąglony</option>
+              <option value="bevel">Ścięty</option>
+            </select>
+          </div>
+
+          {/* Wyrównanie obrysu */}
+          <div className="flex items-center gap-1.5 flex-shrink-0">
+            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Wyrównanie:</label>
+            <select
+              value={vectorShapeSettings.strokeAlignment}
+              onChange={(e) =>
+                onChangeVectorShapeSettings({ strokeAlignment: e.target.value as StrokeAlignment })
+              }
+              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+            >
+              <option value="center">Do środka</option>
+              <option value="inside">Do wewnątrz</option>
+              <option value="outside">Do zewnątrz</option>
+            </select>
+          </div>
+
+          {/* Opcje specyficzne dla kształtu */}
+          {vectorShapeSettings.shapeKind === 'round-rect' && (
+            <div className="flex items-center gap-1 flex-shrink-0">
+              <label className="text-[11px] whitespace-nowrap text-[#aaa]">Promień:</label>
+              <input
+                type="number"
+                min="0"
+                max="200"
+                value={vectorShapeSettings.cornerRadius}
+                onChange={(e) => {
+                  const val = parseInt(e.target.value);
+                  if (!isNaN(val)) onChangeVectorShapeSettings({ cornerRadius: Math.max(0, val) });
+                }}
+                className="w-12 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white font-mono"
+              />
+              <span className="text-[10px] text-[#888]">px</span>
+            </div>
+          )}
+
+          {vectorShapeSettings.shapeKind === 'star' && (
+            <>
+              <div className="flex items-center gap-1 flex-shrink-0">
+                <label className="text-[11px] whitespace-nowrap text-[#aaa]">Ramiona:</label>
+                <input
+                  type="number"
+                  min="3"
+                  max="32"
+                  value={vectorShapeSettings.starPoints}
+                  onChange={(e) => {
+                    const val = parseInt(e.target.value);
+                    if (!isNaN(val)) onChangeVectorShapeSettings({ starPoints: Math.max(3, Math.min(32, val)) });
+                  }}
+                  className="w-10 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white font-mono"
+                />
+              </div>
+              <div className="flex items-center gap-1 flex-shrink-0">
+                <label className="text-[11px] whitespace-nowrap text-[#aaa]">Ostrość:</label>
+                <span className="text-[10px] text-[#ccc] font-mono">{Math.round((1 - vectorShapeSettings.starInnerRatio) * 100)}%</span>
+                <input
+                  type="range"
+                  min="10"
+                  max="90"
+                  value={Math.round(vectorShapeSettings.starInnerRatio * 100)}
+                  onChange={(e) => onChangeVectorShapeSettings({ starInnerRatio: parseInt(e.target.value) / 100 })}
+                  className="w-14 h-1 bg-[#444] accent-[#007acc] rounded-lg appearance-none cursor-pointer"
+                />
+              </div>
+            </>
+          )}
+
+          {vectorShapeSettings.shapeKind === 'polygon' && (
+            <div className="flex items-center gap-1 flex-shrink-0">
+              <label className="text-[11px] whitespace-nowrap text-[#aaa]">Boki:</label>
+              <input
+                type="number"
+                min="3"
+                max="16"
+                value={vectorShapeSettings.polygonSides}
+                onChange={(e) => {
+                  const val = parseInt(e.target.value);
+                  if (!isNaN(val)) onChangeVectorShapeSettings({ polygonSides: Math.max(3, Math.min(16, val)) });
+                }}
+                className="w-10 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white font-mono"
+              />
+            </div>
+          )}
+
+          {vectorShapeSettings.shapeKind === 'arrow' && (
+            <>
+              <div className="flex items-center gap-1 flex-shrink-0">
+                <label className="text-[11px] whitespace-nowrap text-[#aaa]">Grot:</label>
+                <span className="text-[10px] text-[#ccc] font-mono">{Math.round(vectorShapeSettings.arrowHeadWidth * 100)}%</span>
+                <input
+                  type="range"
+                  min="15"
+                  max="85"
+                  value={Math.round(vectorShapeSettings.arrowHeadWidth * 100)}
+                  onChange={(e) => onChangeVectorShapeSettings({ arrowHeadWidth: parseInt(e.target.value) / 100 })}
+                  className="w-14 h-1 bg-[#444] accent-[#007acc] rounded-lg appearance-none cursor-pointer"
+                />
+              </div>
+              <div className="flex items-center gap-1 flex-shrink-0">
+                <label className="text-[11px] whitespace-nowrap text-[#aaa]">Trzon:</label>
+                <span className="text-[10px] text-[#ccc] font-mono">{Math.round(vectorShapeSettings.arrowShaftThickness * 100)}%</span>
+                <input
+                  type="range"
+                  min="10"
+                  max="85"
+                  value={Math.round(vectorShapeSettings.arrowShaftThickness * 100)}
+                  onChange={(e) => onChangeVectorShapeSettings({ arrowShaftThickness: parseInt(e.target.value) / 100 })}
+                  className="w-14 h-1 bg-[#444] accent-[#007acc] rounded-lg appearance-none cursor-pointer"
+                />
+              </div>
+            </>
+          )}
+
+          {/* Wygładzanie */}
+          <label className="flex items-center gap-1.5 cursor-pointer text-[11px] hover:text-white flex-shrink-0">
+            <input
+              type="checkbox"
+              checked={vectorShapeSettings.antiAliasing}
+              onChange={(e) => onChangeVectorShapeSettings({ antiAliasing: e.target.checked })}
+              className="rounded bg-[#1e1e1e] border-[#555] text-[#007acc] focus:ring-0 focus:ring-offset-0 h-3.5 w-3.5 cursor-pointer"
+            />
+            <span>Wygładzanie</span>
+          </label>
+
+          {/* Tryb mieszania */}
+          <div className="flex items-center gap-1.5 flex-shrink-0">
+            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Mieszanie:</label>
+            <select
+              value={vectorShapeSettings.blendMode}
+              onChange={(e) => onChangeVectorShapeSettings({ blendMode: e.target.value as SKBlendMode })}
+              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+            >
+              {BLEND_MODES.map((mode) => (
+                <option key={mode.id} value={mode.id}>
+                  {mode.namePl}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+      ) : activeTool === 'pipette' ? (
+        /* 3. PASEK OPCJI PIPETY */
+        <div className="flex items-center gap-3.5 flex-1 flex-shrink-0">
           {/* Próbkowanie: Warstwa / Obraz */}
-          <div className="flex items-center gap-1.5 bg-[#1e1e1e] px-2 py-0.5 rounded border border-[#3e3e3e]">
+          <div className="flex items-center gap-1.5">
             <label className="text-[11px] whitespace-nowrap text-[#aaa]">Próbkowanie:</label>
             <select
               value={pipetteSettings.sampleSource}
               onChange={(e) =>
                 onChangePipetteSettings({ sampleSource: e.target.value as 'image' | 'layer' })
               }
-              className="h-5 bg-[#252525] border border-[#555] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#00bcd4] cursor-pointer font-medium"
+              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#00bcd4] cursor-pointer font-medium"
             >
-              <option value="image">Obraz (Wszystkie warstwy)</option>
-              <option value="layer">Warstwa (Tylko aktywna)</option>
+              <option value="image">Obraz</option>
+              <option value="layer">Warstwa</option>
             </select>
           </div>
 
           {/* Średnica obszaru zbierania */}
-          <div className="flex items-center gap-1.5 bg-[#1e1e1e] px-2 py-0.5 rounded border border-[#3e3e3e]">
+          <div className="flex items-center gap-1.5">
             <label className="text-[11px] whitespace-nowrap text-[#aaa]">Średnica obszaru:</label>
             <select
               value={
@@ -126,18 +496,18 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
                   onChangePipetteSettings({ sampleDiameter: parseInt(e.target.value) });
                 }
               }}
-              className="h-5 bg-[#252525] border border-[#555] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#00bcd4] cursor-pointer"
+              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#00bcd4] cursor-pointer"
             >
-              <option value={1}>1 px (Pojedynczy punkt)</option>
-              <option value={3}>3 px (Średnia 3×3)</option>
-              <option value={5}>5 px (Średnia 5×5)</option>
-              <option value={11}>11 px (Średnia 11×11)</option>
-              <option value={31}>31 px (Średnia 31×31)</option>
-              <option value={51}>51 px (Średnia 51×51)</option>
+              <option value={1}>1 px</option>
+              <option value={3}>3 px</option>
+              <option value={5}>5 px</option>
+              <option value={11}>11 px</option>
+              <option value={31}>31 px</option>
+              <option value={51}>51 px</option>
               <option value="custom">Własna...</option>
             </select>
 
-            <div className="flex items-center gap-1 ml-1">
+            <div className="flex items-center gap-1">
               <input
                 type="number"
                 min="1"
@@ -149,196 +519,180 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
                     onChangePipetteSettings({ sampleDiameter: Math.max(1, Math.min(101, val)) });
                   }
                 }}
-                className="w-12 h-5 bg-[#252525] border border-[#555] rounded px-1 text-center text-xs text-white font-mono focus:outline-none focus:border-[#00bcd4]"
+                className="w-12 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white font-mono focus:outline-none focus:border-[#00bcd4]"
               />
               <span className="text-[10px] text-[#888]">px</span>
-              <input
-                type="range"
-                min="1"
-                max="101"
-                value={pipetteSettings.sampleDiameter}
-                onChange={(e) => onChangePipetteSettings({ sampleDiameter: parseInt(e.target.value) })}
-                className="w-20 h-1 bg-[#444] accent-[#00bcd4] rounded-lg appearance-none cursor-pointer"
-                title="Średnica okręgu uśredniania kolorów wokół kliknięcia"
-              />
             </div>
           </div>
 
-          {/* Lupa przybliżenia */}
-          <label className="flex items-center gap-1.5 cursor-pointer text-[11px] text-[#ccc] hover:text-white bg-[#1e1e1e] px-2 py-0.5 rounded border border-[#3e3e3e]">
+          <label className="flex items-center gap-1.5 cursor-pointer text-[11px] hover:text-white">
             <input
               type="checkbox"
               checked={pipetteSettings.showLoupe}
               onChange={(e) => onChangePipetteSettings({ showLoupe: e.target.checked })}
-              className="rounded bg-[#252525] border-[#555] text-[#00bcd4] focus:ring-0 focus:ring-offset-0 h-3.5 w-3.5 cursor-pointer"
+              className="rounded bg-[#1e1e1e] border-[#555] text-[#00bcd4] focus:ring-0 focus:ring-offset-0 h-3.5 w-3.5 cursor-pointer"
             />
-            <span>Lupa przybliżenia</span>
+            <span>Pokaż lupę</span>
           </label>
         </div>
-      ) : activeTool === 'transform-content' ? (
-        /* PASEK OPCJI MODYFIKACJI ZAWARTOŚCI ZAZNACZENIA */
-        <div className="flex items-center gap-3.5 flex-1">
-          <div className="flex items-center gap-1.5 text-[#eab308] font-medium text-xs bg-[#1e1e1e] px-2 py-0.5 rounded border border-[#eab308]/30">
-            <Move size={14} />
-            <span>Modyfikacja zawartości (Piksele)</span>
-          </div>
+      ) : activeTool === 'transform-selection' || activeTool === 'transform-content' ? (
+        /* 4. PASEK OPCJI PRZEKSZTAŁCANIA */
+        <div className="flex items-center gap-3 flex-1 flex-shrink-0">
+          {activeTool === 'transform-content' && (
+            <div className="flex items-center gap-1.5">
+              <label className="text-[11px] whitespace-nowrap text-[#aaa]">Próbkowanie:</label>
+              <select
+                value={selectionSettings.interpolation || 'bilinear'}
+                onChange={(e) =>
+                  onChangeSelectionSettings({
+                    interpolation: e.target.value as 'nearest-neighbor' | 'bilinear' | 'bicubic',
+                  })
+                }
+                className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer font-medium"
+              >
+                <option value="nearest-neighbor">Najbliższe sąsiedztwo</option>
+                <option value="bilinear">Dwuliniowe</option>
+                <option value="bicubic">Dwusześcienne</option>
+              </select>
+            </div>
+          )}
 
-          <div className="flex items-center gap-1.5">
-            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Próbkowanie (Interpolacja):</label>
-            <select
-              value={selectionSettings.interpolation || 'bilinear'}
-              onChange={(e) =>
-                onChangeSelectionSettings({ interpolation: e.target.value as InterpolationMode })
-              }
-              className="h-5 bg-[#1e1e1e] border border-[#eab308] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#facc15] cursor-pointer"
-            >
-              <option value="nearest-neighbor">Najbliższe sąsiedztwo (Pikselowe / Pixel Art)</option>
-              <option value="bilinear">Dwuliniowe (Płynne / Bilinear)</option>
-              <option value="bicubic">Dwusześcienne (Wysoka jakość / Bicubic)</option>
-            </select>
-          </div>
-
-          <div className="flex items-center gap-1 bg-[#1e1e1e] p-0.5 rounded border border-[#3e3e3e]">
+          <div className="flex items-center gap-1 border-l border-[#444] pl-2">
             <button
               type="button"
               onClick={onFlipHorizontal}
-              className="flex items-center gap-1.5 px-2 py-0.5 text-xs bg-[#2b2b2b] hover:bg-[#383838] active:bg-[#444] text-white rounded border border-[#555] transition-colors cursor-pointer"
-              title="Odbij zawartość w poziomie (Lustrzane odbicie lewo/prawo)"
+              title="Odbij poziomo (Lustro w poziomie)"
+              className="flex items-center gap-1 px-2 h-5 bg-[#1e1e1e] hover:bg-[#333] text-[#ddd] hover:text-white rounded border border-[#444] text-[11px] cursor-pointer"
             >
-              <FlipHorizontal size={13} className="text-[#eab308]" />
+              <FlipHorizontal size={13} />
               <span>Odbij w poziomie</span>
             </button>
             <button
               type="button"
               onClick={onFlipVertical}
-              className="flex items-center gap-1.5 px-2 py-0.5 text-xs bg-[#2b2b2b] hover:bg-[#383838] active:bg-[#444] text-white rounded border border-[#555] transition-colors cursor-pointer"
-              title="Odbij zawartość w pionie (Lustrzane odbicie góra/dół)"
+              title="Odbij pionowo (Lustro w pionie)"
+              className="flex items-center gap-1 px-2 h-5 bg-[#1e1e1e] hover:bg-[#333] text-[#ddd] hover:text-white rounded border border-[#444] text-[11px] cursor-pointer"
             >
-              <FlipVertical size={13} className="text-[#eab308]" />
-              <span>Odbij w pionie</span>
-            </button>
-          </div>
-        </div>
-      ) : activeTool === 'transform-selection' ? (
-        /* PASEK OPCJI MODYFIKACJI ZAZNACZENIA */
-        <div className="flex items-center gap-3.5 flex-1">
-          <div className="flex items-center gap-1.5 text-[#00bcd4] font-medium text-xs bg-[#1e1e1e] px-2 py-0.5 rounded border border-[#00bcd4]/30">
-            <Scaling size={14} />
-            <span>Modyfikacja zaznaczenia</span>
-          </div>
-
-          <div className="flex items-center gap-1 bg-[#1e1e1e] p-0.5 rounded border border-[#3e3e3e]">
-            <button
-              type="button"
-              onClick={onFlipHorizontal}
-              className="flex items-center gap-1.5 px-2 py-0.5 text-xs bg-[#2b2b2b] hover:bg-[#383838] active:bg-[#444] text-white rounded border border-[#555] transition-colors cursor-pointer"
-              title="Odbij zaznaczenie w poziomie (Lustrzane odbicie lewo/prawo)"
-            >
-              <FlipHorizontal size={13} className="text-[#00bcd4]" />
-              <span>Odbij w poziomie</span>
-            </button>
-            <button
-              type="button"
-              onClick={onFlipVertical}
-              className="flex items-center gap-1.5 px-2 py-0.5 text-xs bg-[#2b2b2b] hover:bg-[#383838] active:bg-[#444] text-white rounded border border-[#555] transition-colors cursor-pointer"
-              title="Odbij zaznaczenie w pionie (Lustrzane odbicie góra/dół)"
-            >
-              <FlipVertical size={13} className="text-[#00bcd4]" />
+              <FlipVertical size={13} />
               <span>Odbij w pionie</span>
             </button>
           </div>
         </div>
       ) : isSelectionTool ? (
-        /* PASEK OPCJI ZAZNACZANIA (ZGODNY Z ZAŁĄCZONYM OBRAZKIEM) */
-        <div className="flex items-center gap-3.5 flex-1">
-          {/* Tryb zaznaczania: Zastąp, Dodaj, Odejmij, Część wspólna, Odwróć */}
+        /* 5. PASEK OPCJI ZAZNACZANIA */
+        <div className="flex items-center gap-3 flex-1 flex-shrink-0">
           <div className="flex items-center gap-1.5">
             <label className="text-[11px] whitespace-nowrap text-[#aaa]">Tryb:</label>
             <select
               value={selectionSettings.mode}
               onChange={(e) =>
-                onChangeSelectionSettings({ mode: e.target.value as SelectionCombineMode })
+                onChangeSelectionSettings({ mode: e.target.value as SelectionSettings['mode'] })
               }
-              className="h-5 bg-[#1e1e1e] border border-[#007acc] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#3894dc] cursor-pointer"
+              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
             >
-              <option value="replace">Zastąp</option>
-              <option value="add">Dodaj (Suma)</option>
-              <option value="subtract">Odejmij (Różnica)</option>
-              <option value="intersect">Część wspólna (Iloczyn)</option>
-              <option value="invert">Odwróć (XOR)</option>
+              <option value="replace">Zastąp zaznaczenie</option>
+              <option value="add">Dodaj do zaznaczenia (Shift)</option>
+              <option value="subtract">Odejmij od zaznaczenia (Alt)</option>
+              <option value="intersect">Część wspólna (Shift+Alt)</option>
+              <option value="invert">Odwróć zaznaczenie</option>
             </select>
           </div>
 
-          {/* Ograniczenie rozmiaru: Dowolny, Stały stosunek, Stały rozmiar */}
-          {activeTool !== 'select-lasso' && activeTool !== 'magic-wand' && (
-            <div className="flex items-center gap-1.5">
-              <label className="text-[11px] whitespace-nowrap text-[#aaa]">Rozmiar:</label>
-              <select
-                value={selectionSettings.constraint}
-                onChange={(e) =>
-                  onChangeSelectionSettings({ constraint: e.target.value as SelectionConstraint })
-                }
-                className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
-              >
-                <option value="normal">Dowolny</option>
-                <option value="fixed-ratio">Stały stosunek</option>
-                <option value="fixed-size">Stały rozmiar</option>
-              </select>
+          {/* Opcje ograniczenia rozmiaru dla zaznaczenia prostokątnego i eliptycznego */}
+          {(activeTool === 'select-rect' || activeTool === 'select-ellipse') && (
+            <>
+              <div className="flex items-center gap-1.5">
+                <label className="text-[11px] whitespace-nowrap text-[#aaa]">Rozmiar:</label>
+                <select
+                  value={selectionSettings.constraint || 'normal'}
+                  onChange={(e) =>
+                    onChangeSelectionSettings({
+                      constraint: e.target.value as SelectionSettings['constraint'],
+                    })
+                  }
+                  className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer font-medium"
+                >
+                  <option value="normal">Dowolny rozmiar</option>
+                  <option value="fixed-ratio">Ustalone proporcje</option>
+                  <option value="fixed-size">Ustalone wymiary</option>
+                </select>
+              </div>
 
               {selectionSettings.constraint === 'fixed-ratio' && (
-                <div className="flex items-center gap-1">
+                <div className="flex items-center gap-1.5 bg-[#1e1e1e] px-1.5 py-0.5 rounded border border-[#3e3e3e]">
+                  <label className="text-[11px] whitespace-nowrap text-[#aaa]">Proporcja:</label>
                   <input
                     type="number"
-                    min="1"
+                    min="0.1"
+                    step="0.5"
                     value={selectionSettings.ratioW}
-                    onChange={(e) =>
-                      onChangeSelectionSettings({ ratioW: Math.max(1, parseInt(e.target.value) || 1) })
-                    }
-                    className="w-10 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white font-mono"
+                    onChange={(e) => {
+                      const val = parseFloat(e.target.value);
+                      if (!isNaN(val) && val > 0) {
+                        onChangeSelectionSettings({ ratioW: val });
+                      }
+                    }}
+                    className="w-11 h-5 bg-[#252525] border border-[#555] rounded px-1 text-center text-xs text-white font-mono focus:outline-none focus:border-[#00bcd4]"
+                    title="Szerokość proporcji"
                   />
-                  <span>:</span>
+                  <span className="text-xs text-[#888] font-bold">:</span>
                   <input
                     type="number"
-                    min="1"
+                    min="0.1"
+                    step="0.5"
                     value={selectionSettings.ratioH}
-                    onChange={(e) =>
-                      onChangeSelectionSettings({ ratioH: Math.max(1, parseInt(e.target.value) || 1) })
-                    }
-                    className="w-10 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white font-mono"
+                    onChange={(e) => {
+                      const val = parseFloat(e.target.value);
+                      if (!isNaN(val) && val > 0) {
+                        onChangeSelectionSettings({ ratioH: val });
+                      }
+                    }}
+                    className="w-11 h-5 bg-[#252525] border border-[#555] rounded px-1 text-center text-xs text-white font-mono focus:outline-none focus:border-[#00bcd4]"
+                    title="Wysokość proporcji"
                   />
                 </div>
               )}
 
               {selectionSettings.constraint === 'fixed-size' && (
-                <div className="flex items-center gap-1">
+                <div className="flex items-center gap-1.5 bg-[#1e1e1e] px-1.5 py-0.5 rounded border border-[#3e3e3e]">
+                  <label className="text-[11px] whitespace-nowrap text-[#aaa]">Szer.:</label>
                   <input
                     type="number"
                     min="1"
+                    max="10000"
                     value={selectionSettings.fixedW}
-                    onChange={(e) =>
-                      onChangeSelectionSettings({ fixedW: Math.max(1, parseInt(e.target.value) || 10) })
-                    }
-                    className="w-14 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white font-mono"
+                    onChange={(e) => {
+                      const val = parseInt(e.target.value);
+                      if (!isNaN(val) && val > 0) {
+                        onChangeSelectionSettings({ fixedW: val });
+                      }
+                    }}
+                    className="w-14 h-5 bg-[#252525] border border-[#555] rounded px-1 text-center text-xs text-white font-mono focus:outline-none focus:border-[#00bcd4]"
                   />
-                  <span>×</span>
+                  <span className="text-[10px] text-[#888]">px</span>
+
+                  <label className="text-[11px] whitespace-nowrap text-[#aaa] ml-1">Wys.:</label>
                   <input
                     type="number"
                     min="1"
+                    max="10000"
                     value={selectionSettings.fixedH}
-                    onChange={(e) =>
-                      onChangeSelectionSettings({ fixedH: Math.max(1, parseInt(e.target.value) || 10) })
-                    }
-                    className="w-14 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white font-mono"
+                    onChange={(e) => {
+                      const val = parseInt(e.target.value);
+                      if (!isNaN(val) && val > 0) {
+                        onChangeSelectionSettings({ fixedH: val });
+                      }
+                    }}
+                    className="w-14 h-5 bg-[#252525] border border-[#555] rounded px-1 text-center text-xs text-white font-mono focus:outline-none focus:border-[#00bcd4]"
                   />
                   <span className="text-[10px] text-[#888]">px</span>
                 </div>
               )}
-            </div>
+            </>
           )}
 
-          {/* Piórkowanie (Feathering) */}
           <div className="flex items-center gap-1.5">
-            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Piórkowanie:</label>
+            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Wtapianie:</label>
             <input
               type="number"
               min="0"
@@ -350,198 +704,247 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
                   onChangeSelectionSettings({ feather: Math.max(0, Math.min(100, val)) });
                 }
               }}
-              className="w-10 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white font-mono"
+              className="w-12 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white font-mono"
+            />
+            <span className="text-[10px] text-[#888]">px</span>
+          </div>
+
+          {activeTool === 'magic-wand' && (
+            <>
+              <div className="flex items-center gap-1.5">
+                <label className="text-[11px] whitespace-nowrap text-[#aaa]">Tolerancja:</label>
+                <input
+                  type="number"
+                  min="0"
+                  max="100"
+                  value={selectionSettings.tolerance}
+                  onChange={(e) => {
+                    const val = parseInt(e.target.value);
+                    if (!isNaN(val)) {
+                      onChangeSelectionSettings({ tolerance: Math.max(0, Math.min(100, val)) });
+                    }
+                  }}
+                  className="w-12 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white font-mono"
+                />
+                <input
+                  type="range"
+                  min="0"
+                  max="100"
+                  value={selectionSettings.tolerance}
+                  onChange={(e) => {
+                    onChangeSelectionSettings({ tolerance: parseInt(e.target.value) });
+                  }}
+                  className="w-20 h-1 bg-[#444] accent-[#007acc] rounded-lg appearance-none cursor-pointer"
+                  title={`Tolerancja próbkowania: ${selectionSettings.tolerance}%`}
+                />
+                <span className="text-[10px] text-[#888] font-mono w-6">{selectionSettings.tolerance}%</span>
+              </div>
+
+              <div className="flex items-center gap-1.5">
+                <label className="text-[11px] whitespace-nowrap text-[#aaa]">Zakres:</label>
+                <select
+                  value={selectionSettings.wandMode}
+                  onChange={(e) =>
+                    onChangeSelectionSettings({
+                      wandMode: e.target.value as SelectionSettings['wandMode'],
+                    })
+                  }
+                  className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white"
+                >
+                  <option value="contiguous">Obszar ciągły</option>
+                  <option value="global">Cały obraz</option>
+                </select>
+              </div>
+
+              {/* Próbkowanie dla Magicznej różdżki (Obraz / Warstwa) */}
+              <div className="flex items-center gap-1.5">
+                <label className="text-[11px] whitespace-nowrap text-[#aaa]">Próbkowanie:</label>
+                <select
+                  value={selectionSettings.sampleSource || 'image'}
+                  onChange={(e) =>
+                    onChangeSelectionSettings({
+                      sampleSource: e.target.value as 'image' | 'layer',
+                    })
+                  }
+                  className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+                >
+                  <option value="image">Obraz</option>
+                  <option value="layer">Warstwa</option>
+                </select>
+              </div>
+            </>
+          )}
+        </div>
+      ) : activeTool === 'gradient' ? (
+        /* 6. PASEK OPCJI GRADIENTU */
+        <div className="flex items-center gap-3 flex-1 flex-shrink-0">
+          <div className="flex items-center gap-1.5">
+            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Kształt:</label>
+            <select
+              value={gradientSettings?.type || 'linear'}
+              onChange={(e) =>
+                onChangeGradientSettings?.({ type: e.target.value as GradientSettings['type'] })
+              }
+              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#00bcd4] cursor-pointer"
+            >
+              <option value="linear">Liniowy</option>
+              <option value="radial">Kolisty</option>
+              <option value="reflected">Lustrzany</option>
+              <option value="diamond">Diamentowy</option>
+              <option value="conic">Stożkowy</option>
+              <option value="spiral-left">Spirala lewa</option>
+              <option value="spiral-right">Spirala prawa</option>
+            </select>
+          </div>
+
+          {/* Powtarzanie */}
+          <div className="flex items-center gap-1.5">
+            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Powtarzanie:</label>
+            <select
+              value={gradientSettings?.repeat || 'none'}
+              onChange={(e) =>
+                onChangeGradientSettings?.({ repeat: e.target.value as any })
+              }
+              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#00bcd4] cursor-pointer"
+            >
+              <option value="none">Nie powtarzaj</option>
+              <option value="repeat">Powtarzaj</option>
+            </select>
+          </div>
+
+          {/* Mieszanie */}
+          <div className="flex items-center gap-1.5">
+            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Mieszanie:</label>
+            <select
+              value={gradientSettings?.blendMode || 'SrcOver'}
+              onChange={(e) =>
+                onChangeGradientSettings?.({ blendMode: e.target.value as SKBlendMode })
+              }
+              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#00bcd4] cursor-pointer"
+            >
+              {BLEND_MODES.map((mode) => (
+                <option key={mode.id} value={mode.id}>
+                  {mode.namePl}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => onChangeGradientSettings?.({ reverse: !gradientSettings?.reverse })}
+            title="Odwróć kierunek kolorów gradientu"
+            className={`flex items-center gap-1 px-2 h-5 rounded text-xs border transition-colors cursor-pointer ${
+              gradientSettings?.reverse
+                ? 'bg-[#0284c7] border-[#38bdf8] text-white font-medium'
+                : 'bg-[#252525] border-[#444] text-[#ccc] hover:bg-[#333]'
+            }`}
+          >
+            <ArrowLeftRight size={12} />
+            <span>Odwróć</span>
+          </button>
+        </div>
+      ) : activeTool === 'bucket' ? (
+        /* 7. PASEK OPCJI WIADRA Z FARBĄ */
+        <div className="flex items-center gap-3 flex-1 flex-shrink-0">
+          {/* Tolerancja */}
+          <div className="flex items-center gap-1.5">
+            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Tolerancja:</label>
+            <input
+              type="number"
+              min="0"
+              max="100"
+              value={selectionSettings.tolerance}
+              onChange={(e) => {
+                const val = parseInt(e.target.value);
+                if (!isNaN(val)) {
+                  onChangeSelectionSettings({ tolerance: Math.max(0, Math.min(100, val)) });
+                }
+              }}
+              className="w-12 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white font-mono"
             />
             <input
               type="range"
               min="0"
               max="100"
-              value={selectionSettings.feather}
-              onChange={(e) => onChangeSelectionSettings({ feather: parseInt(e.target.value) })}
-              className="w-20 h-1 bg-[#444] accent-[#007acc] rounded-lg appearance-none cursor-pointer"
+              value={selectionSettings.tolerance}
+              onChange={(e) => {
+                onChangeSelectionSettings({ tolerance: parseInt(e.target.value) });
+              }}
+              className="w-20 h-1 bg-[#444] accent-[#ff9800] rounded-lg appearance-none cursor-pointer"
+              title={`Tolerancja próbkowania: ${selectionSettings.tolerance}%`}
             />
+            <span className="text-[10px] text-[#888] font-mono w-6">{selectionSettings.tolerance}%</span>
           </div>
 
-          {/* Opcje Magicznej Różdżki: Próbkowanie, Wypełnianie oraz Czułość / Tolerancja */}
-          {activeTool === 'magic-wand' && (
-            <>
-              <div className="flex items-center gap-1.5 bg-[#1e1e1e] px-2 py-0.5 rounded border border-[#3e3e3e]">
-                <label className="text-[11px] whitespace-nowrap text-[#aaa]">Próbkowanie:</label>
-                <select
-                  value={selectionSettings.sampleSource || 'image'}
-                  onChange={(e) =>
-                    onChangeSelectionSettings({ sampleSource: e.target.value as 'image' | 'layer' })
-                  }
-                  className="h-5 bg-[#252525] border border-[#555] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#00bcd4] cursor-pointer font-medium"
-                >
-                  <option value="image">Obraz (Wszystkie warstwy)</option>
-                  <option value="layer">Warstwa (Tylko aktywna)</option>
-                </select>
-              </div>
+          {/* Zakres / Ciągłość */}
+          <div className="flex items-center gap-1.5">
+            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Zakres:</label>
+            <select
+              value={selectionSettings.wandMode || 'contiguous'}
+              onChange={(e) =>
+                onChangeSelectionSettings({
+                  wandMode: e.target.value as SelectionSettings['wandMode'],
+                })
+              }
+              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#ff9800] cursor-pointer"
+            >
+              <option value="contiguous">Obszar ciągły</option>
+              <option value="global">Cały obraz</option>
+            </select>
+          </div>
 
-              <div className="flex items-center gap-1.5 bg-[#1e1e1e] px-2 py-0.5 rounded border border-[#3e3e3e]">
-                <label className="text-[11px] whitespace-nowrap text-[#aaa]">Wypełnianie:</label>
-                <select
-                  value={selectionSettings.wandMode || 'contiguous'}
-                  onChange={(e) =>
-                    onChangeSelectionSettings({ wandMode: e.target.value as 'contiguous' | 'global' })
-                  }
-                  className="h-5 bg-[#252525] border border-[#555] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#00bcd4] cursor-pointer"
-                >
-                  <option value="contiguous">Wskazany obszar (Ciągły)</option>
-                  <option value="global">Na całym obrazie (Globalny)</option>
-                </select>
-              </div>
+          {/* Próbkowanie */}
+          <div className="flex items-center gap-1.5">
+            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Próbkowanie:</label>
+            <select
+              value={selectionSettings.sampleSource || 'image'}
+              onChange={(e) =>
+                onChangeSelectionSettings({
+                  sampleSource: e.target.value as SelectionSettings['sampleSource'],
+                })
+              }
+              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#ff9800] cursor-pointer font-medium"
+            >
+              <option value="image">Obraz</option>
+              <option value="layer">Warstwa</option>
+            </select>
+          </div>
 
-              <div className="flex items-center gap-1.5 bg-[#1e1e1e] px-2 py-0.5 rounded border border-[#3e3e3e]">
-                <label className="text-[11px] whitespace-nowrap text-[#00bcd4] font-medium">Czułość (Tolerancja):</label>
-                <span className="text-[11px] text-white w-8 text-right font-mono">{selectionSettings.tolerance}%</span>
-                <input
-                  type="range"
-                  min="0"
-                  max="100"
-                  value={selectionSettings.tolerance}
-                  onChange={(e) => onChangeSelectionSettings({ tolerance: parseInt(e.target.value) })}
-                  className="w-24 h-1 bg-[#444] accent-[#00bcd4] rounded-lg appearance-none cursor-pointer"
-                  title="Dynamicznie przelicza zaznaczenie różdżki na żywo"
-                />
-              </div>
-            </>
-          )}
+          {/* Wygładzanie */}
+          <label className="flex items-center gap-1.5 cursor-pointer text-[11px] hover:text-white">
+            <input
+              type="checkbox"
+              checked={brushSettings.antiAliasing}
+              onChange={(e) => onChangeSettings({ antiAliasing: e.target.checked })}
+              className="rounded bg-[#1e1e1e] border-[#555] text-[#ff9800] focus:ring-0 focus:ring-offset-0 h-3.5 w-3.5 cursor-pointer"
+            />
+            <span>Wygładzanie</span>
+          </label>
+
+          {/* Tryb mieszania */}
+          <div className="flex items-center gap-1.5">
+            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Mieszanie:</label>
+            <select
+              value={brushSettings.blendMode}
+              onChange={(e) => onChangeSettings({ blendMode: e.target.value as SKBlendMode })}
+              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#ff9800] cursor-pointer"
+            >
+              {BLEND_MODES.map((mode) => (
+                <option key={mode.id} value={mode.id}>
+                  {mode.namePl}
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
+      ) : activeTool === 'pan' ? (
+        /* W narzędziu rączka nic nie ma być w opcjach */
+        <div className="flex-1"></div>
       ) : (
-        /* PASEK OPCJI NARZĘDZI MALARSKICH (PĘDZEL, GUMKA, KSZTAŁTY, WIADRO) */
-        <div className="flex items-center gap-3.5 flex-1">
-          {activeTool === 'bucket' ? (
-            <>
-              {/* Opcje Wiadra z Wodą: Próbkowanie, Wypełnianie, Czułość */}
-              <div className="flex items-center gap-1.5 bg-[#1e1e1e] px-2 py-0.5 rounded border border-[#3e3e3e]">
-                <label className="text-[11px] whitespace-nowrap text-[#aaa]">Próbkowanie:</label>
-                <select
-                  value={selectionSettings.sampleSource || 'image'}
-                  onChange={(e) =>
-                    onChangeSelectionSettings({ sampleSource: e.target.value as 'image' | 'layer' })
-                  }
-                  className="h-5 bg-[#252525] border border-[#555] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#ff9800] cursor-pointer font-medium"
-                >
-                  <option value="image">Obraz (Wszystkie warstwy)</option>
-                  <option value="layer">Warstwa (Tylko aktywna)</option>
-                </select>
-              </div>
-
-              <div className="flex items-center gap-1.5 bg-[#1e1e1e] px-2 py-0.5 rounded border border-[#3e3e3e]">
-                <label className="text-[11px] whitespace-nowrap text-[#aaa]">Wypełnianie:</label>
-                <select
-                  value={selectionSettings.wandMode || 'contiguous'}
-                  onChange={(e) =>
-                    onChangeSelectionSettings({ wandMode: e.target.value as 'contiguous' | 'global' })
-                  }
-                  className="h-5 bg-[#252525] border border-[#555] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#ff9800] cursor-pointer"
-                >
-                  <option value="contiguous">Wskazany obszar (Ciągły)</option>
-                  <option value="global">Na całym obrazie (Globalny)</option>
-                </select>
-              </div>
-
-              <div className="flex items-center gap-1.5 bg-[#1e1e1e] px-2 py-0.5 rounded border border-[#3e3e3e]">
-                <label className="text-[11px] whitespace-nowrap text-[#ff9800] font-medium">Czułość (Tolerancja):</label>
-                <span className="text-[11px] text-white w-8 text-right font-mono">{selectionSettings.tolerance}%</span>
-                <input
-                  type="range"
-                  min="0"
-                  max="100"
-                  value={selectionSettings.tolerance}
-                  onChange={(e) => onChangeSelectionSettings({ tolerance: parseInt(e.target.value) })}
-                  className="w-24 h-1 bg-[#444] accent-[#ff9800] rounded-lg appearance-none cursor-pointer"
-                  title="Dynamicznie przelicza wypełnienie wiaderkiem na żywo"
-                />
-              </div>
-            </>
-          ) : activeTool === 'gradient' ? (
-            <>
-              {/* Opcje Narzędzia Gradient */}
-              <div className="flex items-center gap-1.5 text-[#38bdf8] font-medium text-xs bg-[#1e1e1e] px-2 py-0.5 rounded border border-[#38bdf8]/30">
-                <Blend size={14} />
-                <span>Gradient</span>
-              </div>
-
-              {/* Kształt gradientu */}
-              <div className="flex items-center gap-1.5 bg-[#1e1e1e] px-2 py-0.5 rounded border border-[#3e3e3e]">
-                <label className="text-[11px] whitespace-nowrap text-[#aaa]">Kształt:</label>
-                <select
-                  value={gradientSettings?.type || 'linear'}
-                  onChange={(e) =>
-                    onChangeGradientSettings?.({ type: e.target.value as GradientType })
-                  }
-                  className="h-5 bg-[#252525] border border-[#555] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#38bdf8] cursor-pointer font-medium"
-                >
-                  <option value="linear">Liniowy</option>
-                  <option value="reflected">Liniowy lustrzany</option>
-                  <option value="diamond">Diamentowy</option>
-                  <option value="radial">Kolisty</option>
-                  <option value="conic">Stożkowy</option>
-                  <option value="spiral-left">Spirala lewa</option>
-                  <option value="spiral-right">Spirala prawa</option>
-                </select>
-              </div>
-
-              {/* Powtarzanie */}
-              <div className="flex items-center gap-1.5 bg-[#1e1e1e] px-2 py-0.5 rounded border border-[#3e3e3e]">
-                <label className="text-[11px] whitespace-nowrap text-[#aaa]">Powtarzanie:</label>
-                <select
-                  value={gradientSettings?.repeat || 'none'}
-                  onChange={(e) =>
-                    onChangeGradientSettings?.({ repeat: e.target.value as GradientRepeatMode })
-                  }
-                  className="h-5 bg-[#252525] border border-[#555] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#38bdf8] cursor-pointer"
-                >
-                  <option value="none">Nie powtarzaj</option>
-                  <option value="repeat">Powtarzaj w nieskończoność</option>
-                </select>
-              </div>
-
-              {/* Odwróć kolory */}
-              <button
-                type="button"
-                onClick={() => onChangeGradientSettings?.({ reverse: !gradientSettings?.reverse })}
-                title="Odwróć kierunek kolorów gradientu"
-                className={`flex items-center gap-1 px-2 h-5 rounded text-xs border transition-colors cursor-pointer ${
-                  gradientSettings?.reverse
-                    ? 'bg-[#0284c7] border-[#38bdf8] text-white font-medium'
-                    : 'bg-[#252525] border-[#444] text-[#ccc] hover:bg-[#333]'
-                }`}
-              >
-                <ArrowLeftRight size={12} />
-                <span>Odwróć</span>
-              </button>
-
-              {/* Miniaturka podglądu gradientu */}
-              {primaryColor && secondaryColor && (
-                <div
-                  className="h-5 w-24 rounded border border-[#555] relative overflow-hidden flex-shrink-0"
-                  title="Podgląd przejścia kolorów (kolor główny -> dodatkowy)"
-                  style={{
-                    backgroundImage: `linear-gradient(45deg, #444 25%, transparent 25%), linear-gradient(-45deg, #444 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #444 75%), linear-gradient(-45deg, transparent 75%, #444 75%)`,
-                    backgroundSize: '8px 8px',
-                    backgroundColor: '#222',
-                  }}
-                >
-                  <div
-                    className="absolute inset-0"
-                    style={{
-                      background: `linear-gradient(to right, ${
-                        gradientSettings?.reverse
-                          ? `rgba(${secondaryColor.r}, ${secondaryColor.g}, ${secondaryColor.b}, ${secondaryColor.a / 255}), rgba(${primaryColor.r}, ${primaryColor.g}, ${primaryColor.b}, ${primaryColor.a / 255})`
-                          : `rgba(${primaryColor.r}, ${primaryColor.g}, ${primaryColor.b}, ${primaryColor.a / 255}), rgba(${secondaryColor.r}, ${secondaryColor.g}, ${secondaryColor.b}, ${secondaryColor.a / 255})`
-                      })`,
-                    }}
-                  />
-                </div>
-              )}
-            </>
-          ) : (
-            <>
-              {/* Rozmiar pędzla */}
+        /* 8. PASEK OPCJI PĘDZLA I GUMKI */
+        <div className="flex items-center gap-3 flex-1 flex-shrink-0">
+          {/* Rozmiar pędzla */}
           <div className="flex items-center gap-1.5">
             <label className="text-[11px] whitespace-nowrap">Rozmiar:</label>
             <input
@@ -623,46 +1026,30 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
                 onChangeSettings({ spacing });
               }}
               className="w-20 h-1 bg-[#444] accent-[#007acc] rounded-lg appearance-none cursor-pointer"
-              title={`Odstęp stempli: ${brushSettings.spacing}% średnicy pędzla`}
             />
           </div>
 
-            </>
+          {/* Tryb mieszania */}
+          {activeTool !== 'eraser' && (
+            <div className="flex items-center gap-1.5">
+              <label className="text-[11px] whitespace-nowrap">Tryb:</label>
+              <select
+                value={brushSettings.blendMode}
+                onChange={(e) => onChangeSettings({ blendMode: e.target.value as SKBlendMode })}
+                className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+              >
+                {BLEND_MODES.map((mode) => (
+                  <option key={mode.id} value={mode.id}>
+                    {mode.namePl}
+                  </option>
+                ))}
+              </select>
+            </div>
           )}
-
-          {/* Tryb mieszania pędzla / wylewania */}
-          <div className="flex items-center gap-1.5">
-            <label className="text-[11px] whitespace-nowrap">Tryb:</label>
-            <select
-              value={brushSettings.blendMode}
-              onChange={(e) => onChangeSettings({ blendMode: e.target.value as SKBlendMode })}
-              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
-            >
-              {BLEND_MODES.map((mode) => (
-                <option key={mode.id} value={mode.id}>
-                  {mode.namePl}
-                </option>
-              ))}
-            </select>
-          </div>
         </div>
       )}
 
-      {/* Wizualizacja kafelków Skia / DirtyRect Debug */}
-      <div className="ml-auto flex items-center gap-2">
-        <button
-          type="button"
-          onClick={onToggleTileDebug}
-          className={`px-2 py-0.5 text-[10px] rounded border transition-colors cursor-pointer ${
-            showTileDebug
-              ? 'bg-[#007acc] border-[#3894dc] text-white font-medium'
-              : 'bg-[#222222] border-[#444444] text-[#888888] hover:text-[#cccccc]'
-          }`}
-          title="Przełącz podgląd siatki kafelków pamięci i Dirty-Rect"
-        >
-          Siatka kafelków
-        </button>
-      </div>
+
     </div>
   );
 };

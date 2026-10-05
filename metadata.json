@@ -1,6 +1,8 @@
 {
-  "name": "Paint.NET Web - Edytor Graficzny z Warstwami",
-  "description": "Klon Paint.NET z szybkim pipeline renderowania opartym na kafelkach (Tile Grid) i dirty-rect, obsługą warstw, trybami mieszania i architekturą zgodną ze SkiaSharp C# WPF.",
+  "name": "Figura",
+  "description": "High-performance web-based image editor featuring real-time layering, blending modes, and SkiaSharp-ready architecture for seamless future WPF migration.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

@@ -171,6 +171,59 @@ export interface GradientSettings {
   type: GradientType;
   repeat: GradientRepeatMode;
   reverse: boolean;
+  blendMode?: SKBlendMode;
+}
+
+export type StrokeDashStyle = 'solid' | 'dashed' | 'dotted' | 'dash-dot' | 'long-dash';
+
+export type MarkerType = 'none' | 'arrow' | 'stealth-arrow' | 'circle' | 'square' | 'diamond';
+
+export type ShapeKind =
+  | 'rect'
+  | 'round-rect'
+  | 'ellipse'
+  | 'triangle'
+  | 'star'
+  | 'polygon'
+  | 'arrow'
+  | 'heart'
+  | 'diamond';
+
+export type ShapeFillMode = 'none' | 'primary' | 'stroke-and-fill';
+
+export type StrokeCornerJoin = 'miter' | 'round' | 'bevel';
+
+export type StrokeAlignment = 'center' | 'inside' | 'outside';
+
+export interface VectorShapeSettings {
+  shapeKind: ShapeKind;
+  fillMode: ShapeFillMode;
+  strokeWidth: number;          // 0..200 px
+  strokeColor: SKColor;
+  fillColor: SKColor;
+  strokeCornerJoin: StrokeCornerJoin;
+  strokeAlignment: StrokeAlignment;
+  antiAliasing: boolean;
+  hardness?: number;            // Opcjonalne (usunięte z UI)
+  blendMode: SKBlendMode;
+  cornerRadius: number;         // px
+  starPoints: number;           // np. 5
+  starInnerRatio: number;       // np. 0.45 (45%)
+  polygonSides: number;         // np. 6
+  arrowHeadWidth: number;       // 0.2..1.0
+  arrowShaftThickness: number;  // 0.1..0.8
+}
+
+export interface LineAndCurveSettings {
+  strokeWidth: number;
+  strokeColor: SKColor;
+  dashStyle: StrokeDashStyle;
+  startMarker: MarkerType;
+  endMarker: MarkerType;
+  markerSize: number;           // 0.5 .. 3.0
+  antiAliasing: boolean;
+  hardness?: number;            // Opcjonalne (usunięte z UI)
+  blendMode: SKBlendMode;
 }
 
 export type ToolType =
@@ -188,6 +241,7 @@ export type ToolType =
   | 'stamp'
   | 'shapes'
   | 'line'
+  | 'bezier'
   | 'text'
   | 'pan';
 

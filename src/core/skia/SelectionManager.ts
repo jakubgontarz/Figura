@@ -395,8 +395,10 @@ export class SelectionManager {
     if (settings.constraint === 'fixed-size') {
       const w = Math.max(1, settings.fixedW || 100);
       const h = Math.max(1, settings.fixedH || 100);
-      const left = p1.x >= p0.x ? p0.x : p0.x - w;
-      const top = p1.y >= p0.y ? p0.y : p0.y - h;
+      // Ruch myszą wybiera lewy górny narożnik zaznaczenia
+      const anchor = p1 || p0;
+      const left = anchor.x;
+      const top = anchor.y;
       return {
         left: Math.round(left),
         top: Math.round(top),
@@ -413,7 +415,9 @@ export class SelectionManager {
     const signY = p1.y >= p0.y ? 1 : -1;
 
     if (settings.constraint === 'fixed-ratio') {
-      const ratio = (settings.ratioW || 1) / (settings.ratioH || 1);
+      const rw = Math.max(0.001, settings.ratioW || 1);
+      const rh = Math.max(0.001, settings.ratioH || 1);
+      const ratio = rw / rh;
       if (w / Math.max(1, h) > ratio) {
         w = h * ratio;
       } else {

@@ -18,15 +18,16 @@ import {
   Blend,
   Shapes,
   Minus,
+  Spline,
   Hand,
 } from 'lucide-react';
-import { ToolType } from '../core/skia/types.ts';
+import { ShapeKind, ToolType } from '../core/skia/types.ts';
 
 interface ToolboxProps {
   activeTool: ToolType;
   onSelectTool: (tool: ToolType) => void;
-  activeShapeType: 'rect' | 'ellipse' | 'line';
-  onSelectShapeType: (shape: 'rect' | 'ellipse' | 'line') => void;
+  activeShapeType?: ShapeKind;
+  onSelectShapeType?: (shape: ShapeKind) => void;
 }
 
 interface ToolDefinition {
@@ -39,8 +40,6 @@ interface ToolDefinition {
 export const Toolbox: React.FC<ToolboxProps> = ({
   activeTool,
   onSelectTool,
-  activeShapeType,
-  onSelectShapeType,
 }) => {
   const tools: ToolDefinition[] = [
     {
@@ -111,7 +110,7 @@ export const Toolbox: React.FC<ToolboxProps> = ({
     },
     {
       id: 'shapes',
-      name: 'Kształty geometryczne',
+      name: 'Figury geometryczne',
       shortcut: 'O',
       icon: <Shapes size={16} strokeWidth={2.2} />,
     },
@@ -120,6 +119,12 @@ export const Toolbox: React.FC<ToolboxProps> = ({
       name: 'Linia prosta',
       shortcut: 'U',
       icon: <Minus size={16} strokeWidth={2.5} className="rotate-45" />,
+    },
+    {
+      id: 'bezier',
+      name: 'Krzywa Beziera',
+      shortcut: 'P',
+      icon: <Spline size={16} strokeWidth={2.2} />,
     },
     {
       id: 'pan',
@@ -149,32 +154,6 @@ export const Toolbox: React.FC<ToolboxProps> = ({
           </button>
         );
       })}
-
-      {/* Podmenu wyboru kształtu, gdy narzędzie Shapes jest aktywne */}
-      {activeTool === 'shapes' && (
-        <div className="w-full mt-2 pt-2 border-t border-[#3a3a3a] flex flex-col items-center gap-1">
-          <button
-            type="button"
-            onClick={() => onSelectShapeType('rect')}
-            title="Prostokąt"
-            className={`w-7 h-7 rounded flex items-center justify-center cursor-pointer ${
-              activeShapeType === 'rect' ? 'bg-[#007acc] text-white' : 'text-[#888] hover:bg-[#333]'
-            }`}
-          >
-            <div className="w-3.5 h-3 border border-current" />
-          </button>
-          <button
-            type="button"
-            onClick={() => onSelectShapeType('ellipse')}
-            title="Elipsa"
-            className={`w-7 h-7 rounded flex items-center justify-center cursor-pointer ${
-              activeShapeType === 'ellipse' ? 'bg-[#007acc] text-white' : 'text-[#888] hover:bg-[#333]'
-            }`}
-          >
-            <div className="w-3.5 h-3.5 border border-current rounded-full" />
-          </button>
-        </div>
-      )}
     </div>
   );
 };

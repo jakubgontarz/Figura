@@ -8,11 +8,14 @@ import { GraphicEngine } from './core/skia/GraphicEngine.ts';
 import {
   BrushSettings,
   GradientSettings,
+  LineAndCurveSettings,
   PipetteSettings,
   SKBlendMode,
   SKColor,
   SelectionSettings,
+  ShapeKind,
   ToolType,
+  VectorShapeSettings,
 } from './core/skia/types.ts';
 import { TitleBar } from './components/TitleBar.tsx';
 import { MenuBar, MenuActionHandlers } from './components/MenuBar.tsx';
@@ -98,20 +101,78 @@ export default function App() {
     type: 'linear',
     repeat: 'none',
     reverse: false,
+    blendMode: 'SrcOver',
   });
 
   const handleUpdateGradientSettings = (newSettings: Partial<GradientSettings>) => {
     setGradientSettings((prev) => ({ ...prev, ...newSettings }));
   };
 
+  // Ustawienia figur wektorowych
+  const [vectorShapeSettings, setVectorShapeSettings] = useState<VectorShapeSettings>({
+    shapeKind: 'rect',
+    fillMode: 'stroke-and-fill',
+    strokeWidth: 4,
+    strokeColor: { r: 255, g: 0, b: 0, a: 255 },
+    fillColor: { r: 255, g: 255, b: 255, a: 255 },
+    strokeCornerJoin: 'miter',
+    strokeAlignment: 'center',
+    antiAliasing: true,
+    hardness: 100,
+    blendMode: 'SrcOver',
+    cornerRadius: 16,
+    starPoints: 5,
+    starInnerRatio: 0.45,
+    polygonSides: 6,
+    arrowHeadWidth: 0.45,
+    arrowShaftThickness: 0.35,
+  });
+
+  const handleUpdateVectorShapeSettings = (newSettings: Partial<VectorShapeSettings>) => {
+    setVectorShapeSettings((prev) => ({ ...prev, ...newSettings }));
+  };
+
+  // Ustawienia linii i krzywych Beziera
+  const [lineAndCurveSettings, setLineAndCurveSettings] = useState<LineAndCurveSettings>({
+    strokeWidth: 4,
+    strokeColor: { r: 255, g: 0, b: 0, a: 255 },
+    dashStyle: 'solid',
+    startMarker: 'none',
+    endMarker: 'none',
+    markerSize: 1.0,
+    antiAliasing: true,
+    hardness: 100,
+    blendMode: 'SrcOver',
+  });
+
+  const handleUpdateLineAndCurveSettings = (newSettings: Partial<LineAndCurveSettings>) => {
+    setLineAndCurveSettings((prev) => ({ ...prev, ...newSettings }));
+  };
+
+  // Synchronizacja kolorów
+  useEffect(() => {
+    setVectorShapeSettings((prev) => ({
+      ...prev,
+      strokeColor: primaryColor,
+      fillColor: secondaryColor,
+    }));
+    setLineAndCurveSettings((prev) => ({
+      ...prev,
+      strokeColor: primaryColor,
+    }));
+  }, [primaryColor, secondaryColor]);
+
+  // Stan aktywnej sesji wektorowej (linia, krzywa, figura)
+  const [isLiveVectorSessionActive, setIsLiveVectorSessionActive] = useState(false);
+  const [liveVectorCommitTrigger, setLiveVectorCommitTrigger] = useState(0);
+  const [liveVectorCancelTrigger, setLiveVectorCancelTrigger] = useState(0);
+
   // Narzędzia
   const [activeTool, setActiveTool] = useState<ToolType>('brush');
-  const [activeShapeType, setActiveShapeType] = useState<'rect' | 'ellipse' | 'line'>('rect');
 
   // Widok (Zoom i Pan)
   const [zoom, setZoom] = useState<number>(1.0);
   const [panOffset, setPanOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
-  const [showTileDebug, setShowTileDebug] = useState<boolean>(false);
 
   const [isNewDocModalOpen, setIsNewDocModalOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -530,8 +591,6 @@ export default function App() {
       setZoom(1.0);
       setPanOffset({ x: 0, y: 0 });
     },
-    toggleTileDebug: () => setShowTileDebug((v) => !v),
-    showTileDebug,
     onFlipHorizontal: () => {
       engine.getActiveLayer()?.flipHorizontal();
       bumpEngineRevision();
@@ -608,7 +667,7 @@ export default function App() {
       {/* 2. Menu główne z sekcją Zaznacz */}
       <MenuBar handlers={menuHandlers} />
 
-      {/* 3. Pasek opcji narzędzi z opcjami zaznaczania i transformacji */}
+      {/* 3. Pasek opcji narzędzi z opcjami zaznaczania, transformacji i figur/linii */}
       <ToolOptionsBar
         brushSettings={brushSettings}
         onChangeSettings={handleUpdateBrushSettings}
@@ -618,10 +677,12 @@ export default function App() {
         onChangePipetteSettings={handleUpdatePipetteSettings}
         gradientSettings={gradientSettings}
         onChangeGradientSettings={handleUpdateGradientSettings}
+        vectorShapeSettings={vectorShapeSettings}
+        onChangeVectorShapeSettings={handleUpdateVectorShapeSettings}
+        lineAndCurveSettings={lineAndCurveSettings}
+        onChangeLineAndCurveSettings={handleUpdateLineAndCurveSettings}
         primaryColor={primaryColor}
         secondaryColor={secondaryColor}
-        showTileDebug={showTileDebug}
-        onToggleTileDebug={() => setShowTileDebug((v) => !v)}
         activeTool={activeTool}
         onFlipHorizontal={() => {
           engine.selectionManager.flipHorizontal();
@@ -631,6 +692,9 @@ export default function App() {
           engine.selectionManager.flipVertical();
           bumpEngineRevision();
         }}
+        isLiveVectorSessionActive={isLiveVectorSessionActive}
+        onCommitLiveVectorSession={() => setLiveVectorCommitTrigger((c) => c + 1)}
+        onCancelLiveVectorSession={() => setLiveVectorCancelTrigger((c) => c + 1)}
       />
 
       {/* 4. Główny obszar roboczy */}
@@ -638,8 +702,8 @@ export default function App() {
         <Toolbox
           activeTool={activeTool}
           onSelectTool={setActiveTool}
-          activeShapeType={activeShapeType}
-          onSelectShapeType={setActiveShapeType}
+          activeShapeType={vectorShapeSettings.shapeKind}
+          onSelectShapeType={(sh) => setVectorShapeSettings((prev) => ({ ...prev, shapeKind: sh }))}
         />
 
         <CanvasViewport
@@ -650,10 +714,14 @@ export default function App() {
           onChangeSelectionSettings={handleUpdateSelectionSettings}
           pipetteSettings={pipetteSettings}
           gradientSettings={gradientSettings}
+          vectorShapeSettings={vectorShapeSettings}
+          onChangeVectorShapeSettings={handleUpdateVectorShapeSettings}
+          lineAndCurveSettings={lineAndCurveSettings}
+          onChangeLineAndCurveSettings={handleUpdateLineAndCurveSettings}
           primaryColor={primaryColor}
           secondaryColor={secondaryColor}
           activeTool={activeTool}
-          activeShapeType={activeShapeType}
+          activeShapeType={vectorShapeSettings.shapeKind}
           zoom={zoom}
           panOffset={panOffset}
           onUpdateZoom={setZoom}
@@ -663,7 +731,9 @@ export default function App() {
             setBrushSettings((prev) => ({ ...prev, color }));
           }}
           onCanvasModified={bumpEngineRevision}
-          showTileDebug={showTileDebug}
+          onLiveVectorSessionChange={setIsLiveVectorSessionActive}
+          liveVectorCommitTrigger={liveVectorCommitTrigger}
+          liveVectorCancelTrigger={liveVectorCancelTrigger}
         />
 
         {/* Prawy panel boczny: Kolor + Warstwy */}
@@ -745,7 +815,6 @@ export default function App() {
         docHeight={engine.height}
         zoom={zoom}
         onZoomChange={setZoom}
-        tileSize={engine.tileSize}
       />
 
       {/* Modal Nowego Dokumentu */}

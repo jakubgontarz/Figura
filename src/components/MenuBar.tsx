@@ -28,8 +28,6 @@ export interface MenuActionHandlers {
   onZoomIn: () => void;
   onZoomOut: () => void;
   onZoomReset: () => void;
-  toggleTileDebug: () => void;
-  showTileDebug: boolean;
   onFlipHorizontal: () => void;
   onFlipVertical: () => void;
   onInvertColors: () => void;
@@ -296,14 +294,6 @@ export const MenuBar: React.FC<MenuBarProps> = ({ handlers }) => {
             >
               <span>Rozmiar rzeczywisty (100%)</span>
               <span className="text-[#888] text-[11px]">Ctrl+0</span>
-            </button>
-            <div className="h-[1px] bg-[#333333] my-1" />
-            <button
-              onClick={() => handleAction(handlers.toggleTileDebug)}
-              className="w-full text-left px-3 py-1 hover:bg-[#007acc] hover:text-white flex justify-between cursor-pointer"
-            >
-              <span>Podgląd kafelków Skia</span>
-              <span>{handlers.showTileDebug ? '✓' : ''}</span>
             </button>
           </div>
         )}

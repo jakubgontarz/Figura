@@ -336,13 +336,18 @@ export const ColorPanel: React.FC<ColorPanelProps> = ({
               background: `linear-gradient(to right, rgba(${currentColor.r},${currentColor.g},${currentColor.b},0), rgba(${currentColor.r},${currentColor.g},${currentColor.b},1))`,
             }}
           />
+          {/* Pionowy znacznik w stylu paska barwy */}
+          <div
+            className="absolute top-0 bottom-0 w-1.5 -translate-x-1/2 border border-black bg-white shadow-sm pointer-events-none z-10"
+            style={{ left: `${(currentColor.a / 255) * 100}%` }}
+          />
           <input
             type="range"
             min="0"
             max="255"
             value={currentColor.a}
             onChange={(e) => updateCurrentColor({ ...currentColor, a: parseInt(e.target.value) })}
-            className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
+            className="absolute inset-0 opacity-0 cursor-pointer w-full h-full z-20"
           />
         </div>
       </div>

@@ -8,15 +8,24 @@ import { GraphicEngine } from '../core/skia/GraphicEngine.ts';
 import {
   BrushSettings,
   GradientSettings,
+  LineAndCurveSettings,
   PipetteSettings,
   SKColor,
   SKPoint,
+  SKRectI,
   SelectionSettings,
+  ShapeKind,
   ToolType,
+  VectorShapeSettings,
   skColorToHex,
   skColorToRgbaString,
 } from '../core/skia/types.ts';
 import { TransformSelectionState } from '../core/skia/SelectionManager.ts';
+import {
+  renderVectorBezier,
+  renderVectorLine,
+  renderVectorShape,
+} from '../core/skia/VectorRenderer.ts';
 
 interface CanvasViewportProps {
   engine: GraphicEngine;
@@ -25,18 +34,24 @@ interface CanvasViewportProps {
   selectionSettings: SelectionSettings;
   pipetteSettings?: PipetteSettings;
   gradientSettings?: GradientSettings;
+  vectorShapeSettings: VectorShapeSettings;
+  onChangeVectorShapeSettings?: (settings: Partial<VectorShapeSettings>) => void;
+  lineAndCurveSettings: LineAndCurveSettings;
+  onChangeLineAndCurveSettings?: (settings: Partial<LineAndCurveSettings>) => void;
   primaryColor?: SKColor;
   secondaryColor?: SKColor;
   onChangeSelectionSettings?: (settings: Partial<SelectionSettings>) => void;
   activeTool: ToolType;
-  activeShapeType: 'rect' | 'ellipse' | 'line';
+  activeShapeType: ShapeKind;
   zoom: number;
   panOffset: { x: number; y: number };
   onUpdateZoom: (zoom: number) => void;
   onUpdatePan: (offset: { x: number; y: number }) => void;
   onPipettePick: (color: SKColor) => void;
   onCanvasModified: () => void;
-  showTileDebug: boolean;
+  onLiveVectorSessionChange?: (isActive: boolean) => void;
+  liveVectorCommitTrigger?: number;
+  liveVectorCancelTrigger?: number;
 }
 
 type TransformHandleType =
@@ -50,12 +65,30 @@ type TransformHandleType =
   | 'w'
   | 'pivot'
   | 'rotate'
-  | 'rotate-nw'
-  | 'rotate-ne'
-  | 'rotate-se'
-  | 'rotate-sw'
   | 'move'
   | null;
+
+interface ActiveVectorShapeSession {
+  center: SKPoint;
+  width: number;
+  height: number;
+  angle: number;
+  pivot: SKPoint;
+  flipX: boolean;
+  flipY: boolean;
+}
+
+interface ActiveVectorLineSession {
+  p0: SKPoint;
+  p1: SKPoint;
+}
+
+interface ActiveVectorBezierSession {
+  p0: SKPoint;
+  p1: SKPoint;
+  p2: SKPoint;
+  p3: SKPoint;
+}
 
 const rotateCursorCache = new Map<number, string>();
 
@@ -77,18 +110,16 @@ function getRotateCursorUrl(angleDeg: number): string {
   ctx.rotate((normAngle * Math.PI) / 180);
 
   const r = 9.5;
-  const span = (55 * Math.PI) / 180; // 55 stopni w każdą stronę (łącznie 110 stopni wyraźnego łuku)
+  const span = (55 * Math.PI) / 180;
 
   const cosSpan = Math.cos(span);
   const sinSpan = Math.sin(span);
 
-  // Punkt 1 (górny): kąt -span
   const p1x = r * cosSpan;
   const p1y = -r * sinSpan;
   const dir1x = -sinSpan;
   const dir1y = -cosSpan;
 
-  // Punkt 2 (dolny): kąt +span
   const p2x = r * cosSpan;
   const p2y = r * sinSpan;
   const dir2x = -sinSpan;
@@ -104,12 +135,10 @@ function getRotateCursorUrl(angleDeg: number): string {
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
 
-    // 1. Wyraźny łuk łączący groty strzałek
     ctx.beginPath();
     ctx.arc(0, 0, r, -span, span, false);
     ctx.stroke();
 
-    // 2. Grot strzałki 1 (górny)
     const tip1x = p1x + dir1x * 2.5;
     const tip1y = p1y + dir1y * 2.5;
     const norm1x = -dir1y;
@@ -125,7 +154,6 @@ function getRotateCursorUrl(angleDeg: number): string {
     ctx.fill();
     if (isOutline) ctx.stroke();
 
-    // 3. Grot strzałki 2 (dolny)
     const tip2x = p2x + dir2x * 2.5;
     const tip2y = p2y + dir2y * 2.5;
     const norm2x = -dir2y;
@@ -142,9 +170,7 @@ function getRotateCursorUrl(angleDeg: number): string {
     if (isOutline) ctx.stroke();
   };
 
-  // Warstwa 1: Gruba biała sylwetka (zapewnia kontrast na ciemnym, szarym i kolorowym tle)
   drawCursorShape(true);
-  // Warstwa 2: Wyrazisty ciemny rdzeń (łuk + wypełnione groty)
   drawCursorShape(false);
 
   ctx.restore();
@@ -162,26 +188,114 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   selectionSettings,
   pipetteSettings,
   gradientSettings = { type: 'linear', repeat: 'none', reverse: false },
+  vectorShapeSettings,
+  onChangeVectorShapeSettings,
+  lineAndCurveSettings,
+  onChangeLineAndCurveSettings,
   primaryColor = { r: 0, g: 0, b: 0, a: 255 },
   secondaryColor = { r: 255, g: 255, b: 255, a: 255 },
+  onChangeSelectionSettings,
   activeTool,
-  activeShapeType,
   zoom,
   panOffset,
   onUpdateZoom,
   onUpdatePan,
   onPipettePick,
   onCanvasModified,
-  showTileDebug,
+  onLiveVectorSessionChange,
+  liveVectorCommitTrigger,
+  liveVectorCancelTrigger,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
 
-  const [isDrawing, setIsDrawing] = useState(false);
+  const baseSelectionModeRef = useRef<SelectionSettings['mode'] | null>(null);
+
   const [isPanning, setIsPanning] = useState(false);
   const [isSpacePressed, setIsSpacePressed] = useState(false);
   const [containerSize, setContainerSize] = useState<{ width: number; height: number }>({ width: 0, height: 0 });
+
+  // SESJE EDYCJI WEKTOROWEJ NA ŻYWO
+  const [activeVectorLineSession, setActiveVectorLineSession] = useState<ActiveVectorLineSession | null>(null);
+  const [activeVectorBezierSession, setActiveVectorBezierSession] = useState<ActiveVectorBezierSession | null>(null);
+  const [activeVectorShapeSession, setActiveVectorShapeSession] = useState<ActiveVectorShapeSession | null>(null);
+
+  // UCHWYTY INTERAKTYWNE WEKTOROWE
+  const [activeVectorHandle, setActiveVectorHandle] = useState<string | null>(null);
+  const activeVectorHandleRef = useRef<string | null>(null);
+  const setActiveVectorHandleSynced = (val: string | null) => {
+    activeVectorHandleRef.current = val;
+    setActiveVectorHandle(val);
+  };
+  const [hoverVectorHandle, setHoverVectorHandle] = useState<string | null>(null);
+  const vectorDragStartPtRef = useRef<SKPoint | null>(null);
+  const vectorInitialSessionStateRef = useRef<any>(null);
+
+  // STAN TRANSFORMACJI ZAZNACZENIA / ZAWARTOŚCI
+  const isTransformTool = activeTool === 'transform-selection' || activeTool === 'transform-content';
+  const [transformActiveHandle, setTransformActiveHandle] = useState<TransformHandleType>(null);
+  const [transformHoverHandle, setTransformHoverHandle] = useState<TransformHandleType>(null);
+
+  const transformActiveHandleRef = useRef<TransformHandleType>(null);
+  const setTransformActiveHandleSynced = (val: TransformHandleType) => {
+    transformActiveHandleRef.current = val;
+    setTransformActiveHandle(val);
+  };
+
+  const transformDragStartDocPtRef = useRef<SKPoint | null>(null);
+  const transformInitialStateRef = useRef<TransformSelectionState | null>(null);
+  const transformInitialHistorySnapshotRef = useRef<{ imgData: ImageData | null; seedPoint: SKPoint | null } | null>(null);
+  const lastTransformPtRef = useRef<SKPoint | null>(null);
+
+  const [dragStartPoint, setDragStartPoint] = useState<SKPoint | null>(null);
+  const dragStartPointRef = useRef<SKPoint | null>(null);
+  const setDragStartPointSynced = (val: SKPoint | null) => {
+    dragStartPointRef.current = val;
+    setDragStartPoint(val);
+  };
+  const [currentDragPoint, setCurrentDragPoint] = useState<SKPoint | null>(null);
+  const [lassoPoints, setLassoPoints] = useState<SKPoint[]>([]);
+
+  const [isDrawing, setIsDrawing] = useState(false);
+  const isDrawingRef = useRef<boolean>(false);
+  const setIsDrawingSynced = (val: boolean) => {
+    isDrawingRef.current = val;
+    setIsDrawing(val);
+  };
+
+  const lastDocPtRef = useRef<SKPoint | null>(null);
+
+  const [isDraggingWandHandle, setIsDraggingWandHandle] = useState(false);
+  const wandDragInitialSnapshotRef = useRef<{ imgData: ImageData | null; seedPoint: SKPoint | null } | null>(null);
+  const [isDraggingBucketHandle, setIsDraggingBucketHandle] = useState(false);
+  const [isDraggingGradientHandle, setIsDraggingGradientHandle] = useState<0 | 1 | 'move' | null>(null);
+  const [gradientHoverHandle, setGradientHoverHandle] = useState<0 | 1 | 'move' | null>(null);
+  const gradientDragInitialStartPtRef = useRef<SKPoint | null>(null);
+  const gradientDragInitialEndPtRef = useRef<SKPoint | null>(null);
+
+  const [panStart, setPanStart] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const cursorPosRef = useRef<{ x: number; y: number } | null>(null);
+  const lastBrushStrokeDocPointRef = useRef<SKPoint | null>(null);
+  const [isShiftKeyDown, setIsShiftKeyDown] = useState<boolean>(false);
+  const [isCtrlKeyDown, setIsCtrlKeyDown] = useState<boolean>(false);
+  const isSamplingPipetteRef = useRef<boolean>(false);
+
+  const isDrawingTool = useCallback((tool: ToolType): boolean => {
+    return (
+      tool === 'brush' ||
+      tool === 'eraser' ||
+      tool === 'bucket' ||
+      tool === 'gradient' ||
+      tool === 'line' ||
+      tool === 'bezier' ||
+      tool === 'shapes' ||
+      tool === 'stamp' ||
+      tool === 'text'
+    );
+  }, []);
+
+  const isQuickPipetteActive = isCtrlKeyDown && isDrawingTool(activeTool);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -199,49 +313,108 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     obs.observe(el);
     return () => obs.disconnect();
   }, []);
-  const [panStart, setPanStart] = useState({ x: 0, y: 0 });
 
-  const [dragStartPoint, setDragStartPoint] = useState<SKPoint | null>(null);
-  const [currentDragPoint, setCurrentDragPoint] = useState<SKPoint | null>(null);
-  const [lassoPoints, setLassoPoints] = useState<SKPoint[]>([]);
-  const [isDraggingWandHandle, setIsDraggingWandHandle] = useState(false);
-  const [isDraggingBucketHandle, setIsDraggingBucketHandle] = useState(false);
-  const [isDraggingGradientHandle, setIsDraggingGradientHandle] = useState<0 | 1 | null>(null);
-  const [gradientHoverHandle, setGradientHoverHandle] = useState<0 | 1 | null>(null);
-  const wandDragInitialSnapshotRef = useRef<{ imgData: ImageData | null; seedPoint: SKPoint | null } | null>(null);
+  // Powiadomienie o stanie aktywnej sesji wektorowej
+  const isAnyVectorSessionActive = !!(
+    activeVectorLineSession ||
+    activeVectorBezierSession ||
+    activeVectorShapeSession
+  );
 
-  // Stan manipulacji narzędzia Przekształć Zaznaczenie / Zawartość
-  const [transformActiveHandle, setTransformActiveHandle] = useState<TransformHandleType>(null);
-  const transformActiveHandleRef = useRef<TransformHandleType>(null);
-  const lastTransformPtRef = useRef<SKPoint | null>(null);
-  const updateTransformInteractionRef = useRef<((pt: SKPoint, shiftKey: boolean, altKey: boolean) => void) | null>(null);
-
-  const setTransformActiveHandleSynced = (handle: TransformHandleType) => {
-    transformActiveHandleRef.current = handle;
-    setTransformActiveHandle(handle);
-  };
-
-  const [transformHoverHandle, setTransformHoverHandle] = useState<TransformHandleType>(null);
-  const transformInitialStateRef = useRef<TransformSelectionState | null>(null);
-  const transformDragStartDocPtRef = useRef<SKPoint | null>(null);
-  const transformInitialHistorySnapshotRef = useRef<{ imgData: ImageData | null; seedPoint: SKPoint | null } | null>(null);
-
-  const isTransformTool = activeTool === 'transform-selection' || activeTool === 'transform-content';
-  const cursorPosRef = useRef<{ x: number; y: number } | null>(null);
-
-  // Inicjalizacja i zamykanie sesji przekształcania (Zaznaczenie vs Zawartość pikselowa)
   useEffect(() => {
+    onLiveVectorSessionChange?.(isAnyVectorSessionActive);
+  }, [isAnyVectorSessionActive, onLiveVectorSessionChange]);
+
+  // FUNKCJE ZATWIERDZANIA I ANULOWANIA SESJI WEKTOROWYCH
+  const commitActiveVectorSession = useCallback(() => {
+    if (activeVectorLineSession) {
+      engine.commitVectorLine(
+        activeVectorLineSession.p0,
+        activeVectorLineSession.p1,
+        lineAndCurveSettings
+      );
+      setActiveVectorLineSession(null);
+      onCanvasModified();
+    } else if (activeVectorBezierSession) {
+      engine.commitVectorBezier(
+        activeVectorBezierSession.p0,
+        activeVectorBezierSession.p1,
+        activeVectorBezierSession.p2,
+        activeVectorBezierSession.p3,
+        lineAndCurveSettings
+      );
+      setActiveVectorBezierSession(null);
+      onCanvasModified();
+    } else if (activeVectorShapeSession) {
+      engine.commitVectorShape(
+        activeVectorShapeSession.center,
+        activeVectorShapeSession.width,
+        activeVectorShapeSession.height,
+        activeVectorShapeSession.angle,
+        vectorShapeSettings,
+        activeVectorShapeSession.flipX,
+        activeVectorShapeSession.flipY
+      );
+      setActiveVectorShapeSession(null);
+      onCanvasModified();
+    }
+  }, [
+    activeVectorLineSession,
+    activeVectorBezierSession,
+    activeVectorShapeSession,
+    engine,
+    lineAndCurveSettings,
+    vectorShapeSettings,
+    onCanvasModified,
+  ]);
+
+  const cancelActiveVectorSession = useCallback(() => {
+    setActiveVectorLineSession(null);
+    setActiveVectorBezierSession(null);
+    setActiveVectorShapeSession(null);
+    setActiveVectorHandleSynced(null);
+    vectorDragStartPtRef.current = null;
+    vectorInitialSessionStateRef.current = null;
+    setIsDrawingSynced(false);
+    setDragStartPointSynced(null);
+    onCanvasModified();
+  }, [onCanvasModified]);
+
+  // Reakcja na zewnętrzne triggery (z paska opcji)
+  const prevCommitTriggerRef = useRef(liveVectorCommitTrigger);
+  useEffect(() => {
+    if (liveVectorCommitTrigger && liveVectorCommitTrigger !== prevCommitTriggerRef.current) {
+      prevCommitTriggerRef.current = liveVectorCommitTrigger;
+      commitActiveVectorSession();
+    }
+  }, [liveVectorCommitTrigger, commitActiveVectorSession]);
+
+  const prevCancelTriggerRef = useRef(liveVectorCancelTrigger);
+  useEffect(() => {
+    if (liveVectorCancelTrigger && liveVectorCancelTrigger !== prevCancelTriggerRef.current) {
+      prevCancelTriggerRef.current = liveVectorCancelTrigger;
+      cancelActiveVectorSession();
+    }
+  }, [liveVectorCancelTrigger, cancelActiveVectorSession]);
+
+  // Automatyczne zatwierdzenie przy zmianie narzędzia na inne oraz start/commit sesji transformacji
+  useEffect(() => {
+    if (activeTool !== 'line' && activeVectorLineSession) {
+      commitActiveVectorSession();
+    }
+    if (activeTool !== 'bezier' && activeVectorBezierSession) {
+      commitActiveVectorSession();
+    }
+    if (activeTool !== 'shapes' && activeVectorShapeSession) {
+      commitActiveVectorSession();
+    }
     if (activeTool === 'transform-content') {
-      if (!engine.transformContentSession) {
+      if (!engine.transformContentSession && engine.selectionManager.hasActiveSelection) {
         engine.beginTransformContent(selectionSettings.interpolation || 'bilinear');
         onCanvasModified();
       }
     } else if (activeTool === 'transform-selection') {
-      if (engine.transformContentSession) {
-        engine.commitTransformContent();
-        onCanvasModified();
-      }
-      if (engine.selectionManager.hasActiveSelection && !engine.selectionManager.transformState) {
+      if (!engine.selectionManager.transformState && engine.selectionManager.hasActiveSelection) {
         engine.selectionManager.beginTransformSelection();
         onCanvasModified();
       }
@@ -255,68 +428,54 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         onCanvasModified();
       }
     }
-  }, [activeTool, engine, selectionSettings.interpolation, onCanvasModified]);
-
-  // Dynamiczna zmiana próbkowania (interpolacji) dla transformacji zawartości na żywo
-  useEffect(() => {
-    if (activeTool === 'transform-content' && engine.transformContentSession) {
-      engine.updateTransformContentInterpolation(selectionSettings.interpolation || 'bilinear');
-      onCanvasModified();
-    }
-  }, [selectionSettings.interpolation, activeTool, engine, onCanvasModified]);
-
-  // Dynamiczna zmiana czułości, trybu wypełnienia lub próbkowania różdżki na żywo
-  useEffect(() => {
-    if (
-      activeTool === 'magic-wand' &&
-      engine.selectionManager.wandSeedPoint &&
-      engine.selectionManager.hasActiveSelection
-    ) {
-      engine.refreshMagicWand(selectionSettings);
-      onCanvasModified();
-    }
-  }, [
-    selectionSettings.tolerance,
-    selectionSettings.wandMode,
-    selectionSettings.sampleSource,
-    selectionSettings.mode,
-    activeTool,
-    engine,
-    selectionSettings,
-    onCanvasModified,
-  ]);
-
-  // Dynamiczna zmiana parametrów, próbkowania, koloru lub trybu mieszania dla wiaderka z wodą na żywo
-  useEffect(() => {
-    if (activeTool === 'bucket' && engine.bucketSeedPoint) {
-      engine.applyPaintBucket(engine.bucketSeedPoint, selectionSettings, brushSettings, false);
-      onCanvasModified();
-    }
-  }, [
-    selectionSettings.tolerance,
-    selectionSettings.wandMode,
-    selectionSettings.sampleSource,
-    brushSettings.color.r,
-    brushSettings.color.g,
-    brushSettings.color.b,
-    brushSettings.color.a,
-    brushSettings.blendMode,
-    activeTool,
-    engine,
-    selectionSettings,
-    brushSettings,
-    onCanvasModified,
-  ]);
-
-  // Czyszczenie sesji i uchwytu wiaderka przy przełączeniu na inne narzędzie
-  useEffect(() => {
     if (activeTool !== 'bucket' && engine.bucketSeedPoint) {
       engine.commitPaintBucketSession();
       onCanvasModified();
     }
-  }, [activeTool, engine, onCanvasModified]);
+    if (activeTool !== 'brush' && activeTool !== 'eraser') {
+      lastBrushStrokeDocPointRef.current = null;
+    }
+  }, [activeTool, engine, selectionSettings.interpolation, onCanvasModified]);
 
-  // Dynamiczna zmiana parametrów, kolorów lub trybu mieszania dla wypełnienia gradientowego na żywo
+  // Reakcja na zmianę parametrów wiadra z farbą i koloru na żywo (gdy aktywna jest sesja wiadra)
+  useEffect(() => {
+    if (activeTool === 'bucket' && engine.bucketSeedPoint) {
+      engine.applyPaintBucket(
+        engine.bucketSeedPoint,
+        selectionSettings,
+        { ...brushSettings, color: primaryColor },
+        false
+      );
+      onCanvasModified();
+    }
+  }, [
+    activeTool,
+    engine,
+    selectionSettings.tolerance,
+    selectionSettings.wandMode,
+    selectionSettings.sampleSource,
+    brushSettings.blendMode,
+    brushSettings.antiAliasing,
+    primaryColor,
+    onCanvasModified,
+  ]);
+
+  // Reakcja na zmianę parametrów magicznej różdżki na żywo (gdy aktywna jest sesja różdżki)
+  useEffect(() => {
+    if (activeTool === 'magic-wand' && engine.selectionManager.wandSeedPoint) {
+      engine.refreshMagicWand(selectionSettings);
+      onCanvasModified();
+    }
+  }, [
+    activeTool,
+    engine,
+    selectionSettings.tolerance,
+    selectionSettings.wandMode,
+    selectionSettings.sampleSource,
+    onCanvasModified,
+  ]);
+
+  // Reakcja na zmianę parametrów gradientu na żywo (gdy aktywna jest sesja gradientu)
   useEffect(() => {
     if (activeTool === 'gradient' && engine.gradientStartPoint && engine.gradientEndPoint) {
       engine.applyGradient(
@@ -325,133 +484,327 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         gradientSettings,
         primaryColor,
         secondaryColor,
-        brushSettings.blendMode,
+        gradientSettings.blendMode || 'SrcOver',
         false
       );
       onCanvasModified();
     }
   }, [
-    gradientSettings.type,
-    gradientSettings.repeat,
-    gradientSettings.reverse,
-    primaryColor.r,
-    primaryColor.g,
-    primaryColor.b,
-    primaryColor.a,
-    secondaryColor.r,
-    secondaryColor.g,
-    secondaryColor.b,
-    secondaryColor.a,
-    brushSettings.blendMode,
     activeTool,
     engine,
     gradientSettings,
     primaryColor,
     secondaryColor,
-    brushSettings,
     onCanvasModified,
   ]);
 
-  // Czyszczenie sesji i zatwierdzanie gradientu przy przełączeniu na inne narzędzie
-  useEffect(() => {
-    if (activeTool !== 'gradient' && engine.gradientStartPoint) {
-      engine.commitGradientSession();
-      onCanvasModified();
-    }
-  }, [activeTool, engine, onCanvasModified]);
 
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (['INPUT', 'SELECT', 'TEXTAREA'].includes((e.target as HTMLElement).tagName)) return;
-      if (e.key === 'Shift' || e.key === 'Alt') {
-        if (transformActiveHandleRef.current && lastTransformPtRef.current && updateTransformInteractionRef.current) {
-          updateTransformInteractionRef.current(lastTransformPtRef.current, e.shiftKey, e.altKey);
-        }
-      }
-      if (e.code === 'Space' && !isSpacePressed) {
-        setIsSpacePressed(true);
-      }
-      if (e.key === 'Escape') {
-        if (engine.transformContentSession) {
-          engine.cancelTransformContent();
-          onCanvasModified();
-        } else if (engine.selectionManager.transformState) {
-          engine.selectionManager.cancelTransformSelection();
-          onCanvasModified();
-        }
-      } else if (e.key === 'Enter') {
-        if (engine.transformContentSession) {
-          engine.commitTransformContent();
-          onCanvasModified();
-        } else if (engine.selectionManager.transformState) {
-          engine.selectionManager.commitTransformSelection();
-          onCanvasModified();
-        }
-      }
-    };
-    const handleKeyUp = (e: KeyboardEvent) => {
-      if (e.key === 'Shift' || e.key === 'Alt') {
-        if (transformActiveHandleRef.current && lastTransformPtRef.current && updateTransformInteractionRef.current) {
-          updateTransformInteractionRef.current(lastTransformPtRef.current, e.shiftKey, e.altKey);
-        }
-      }
-      if (e.code === 'Space') {
-        setIsSpacePressed(false);
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    window.addEventListener('keyup', handleKeyUp);
-    return () => {
-      window.removeEventListener('keydown', handleKeyDown);
-      window.removeEventListener('keyup', handleKeyUp);
-    };
-  }, [isSpacePressed, engine, onCanvasModified]);
 
-  useEffect(() => {
-    engine.showTileGridDebug = showTileDebug;
-    if (canvasRef.current) {
-      engine.compositeToViewport(canvasRef.current);
-    }
-  }, [engine, showTileDebug]);
-
+  // REDRAW & COMPOSITE TO VIEWPORT
   const redraw = useCallback(() => {
-    if (canvasRef.current) {
-      engine.compositeToViewport(canvasRef.current);
-    }
-  }, [engine]);
+    if (!canvasRef.current) return;
+
+    // Przekaż niestandardowy preview renderer dla aktywnej sesji wektorowej
+    const customPreview = (ctx: CanvasRenderingContext2D) => {
+      if (activeVectorLineSession) {
+        renderVectorLine(
+          ctx,
+          activeVectorLineSession.p0,
+          activeVectorLineSession.p1,
+          { ...lineAndCurveSettings, blendMode: 'SrcOver' }
+        );
+      } else if (activeVectorBezierSession) {
+        renderVectorBezier(
+          ctx,
+          activeVectorBezierSession.p0,
+          activeVectorBezierSession.p1,
+          activeVectorBezierSession.p2,
+          activeVectorBezierSession.p3,
+          { ...lineAndCurveSettings, blendMode: 'SrcOver' }
+        );
+      } else if (activeVectorShapeSession) {
+        renderVectorShape(
+          ctx,
+          activeVectorShapeSession.center,
+          activeVectorShapeSession.width,
+          activeVectorShapeSession.height,
+          activeVectorShapeSession.angle,
+          { ...vectorShapeSettings, blendMode: 'SrcOver' },
+          activeVectorShapeSession.flipX,
+          activeVectorShapeSession.flipY
+        );
+      }
+    };
+
+    const currentBlendMode = activeVectorShapeSession
+      ? vectorShapeSettings.blendMode
+      : lineAndCurveSettings.blendMode;
+
+    engine.compositeToViewport(
+      canvasRef.current,
+      null,
+      null,
+      null,
+      null,
+      null,
+      isAnyVectorSessionActive ? customPreview : null,
+      isAnyVectorSessionActive ? currentBlendMode : null
+    );
+  }, [
+    engine,
+    activeVectorLineSession,
+    activeVectorBezierSession,
+    activeVectorShapeSession,
+    lineAndCurveSettings,
+    vectorShapeSettings,
+    isAnyVectorSessionActive,
+  ]);
 
   useEffect(() => {
     redraw();
   }, [redraw, engineRevision, engine.width, engine.height, engine.activeLayerIndex]);
 
+  // PRZELICZANIE WSPÓŁRZĘDNYCH DOKUMENTU
   const getDocPoint = useCallback(
     (e: React.PointerEvent | PointerEvent | MouseEvent, clamp: boolean = false): SKPoint | null => {
       if (!canvasRef.current) return null;
       const rect = canvasRef.current.getBoundingClientRect();
-      const docX = rect.width > 0 ? ((e.clientX - rect.left) / rect.width) * engine.width : (e.clientX - rect.left) / zoom;
-      const docY = rect.height > 0 ? ((e.clientY - rect.top) / rect.height) * engine.height : (e.clientY - rect.top) / zoom;
+      const docX =
+        rect.width > 0
+          ? ((e.clientX - rect.left) / rect.width) * engine.width
+          : (e.clientX - rect.left) / zoom;
+      const docY =
+        rect.height > 0
+          ? ((e.clientY - rect.top) / rect.height) * engine.height
+          : (e.clientY - rect.top) / zoom;
       if (clamp) {
         return {
           x: Math.max(0, Math.min(engine.width, docX)),
           y: Math.max(0, Math.min(engine.height, docY)),
         };
       }
-      return {
-        x: docX,
-        y: docY,
-      };
+      return { x: docX, y: docY };
     },
     [engine.width, engine.height, zoom]
+  );
+
+  const docToScreen = useCallback(
+    (pt: SKPoint): SKPoint => {
+      const cWidth = containerSize.width || containerRef.current?.clientWidth || 0;
+      const cHeight = containerSize.height || containerRef.current?.clientHeight || 0;
+      const screenCenterX = cWidth / 2 + panOffset.x;
+      const screenCenterY = cHeight / 2 + panOffset.y;
+      return {
+        x: (pt.x - engine.width / 2) * zoom + screenCenterX,
+        y: (pt.y - engine.height / 2) * zoom + screenCenterY,
+      };
+    },
+    [containerSize, panOffset, engine.width, engine.height, zoom]
   );
 
   const updateStatusBarPos = (pt: SKPoint | null) => {
     const el = document.getElementById('status-bar-cursor-pos');
     if (el) {
-      el.textContent = pt ? `Pozycja: ${Math.floor(pt.x)}, ${Math.floor(pt.y)}` : 'Pozycja: 0, 0';
+      el.textContent = pt
+        ? `Pozycja: ${Math.floor(pt.x)}, ${Math.floor(pt.y)}`
+        : 'Pozycja: 0, 0';
     }
   };
 
-  // Oblicza pozycje narożników, uchwytów i środka w przestrzeni ekranowej
+  const hasShapeModifier = (shapeKind: ShapeKind): boolean => {
+    return shapeKind === 'round-rect' || shapeKind === 'star' || shapeKind === 'arrow';
+  };
+
+  // OBLICZANIE PUNKTU MODYFIKATORA DLA FIGURY (ŻÓŁTY UCHWYT)
+  const getShapeModifierDocPoint = useCallback(
+    (sess: ActiveVectorShapeSession, settings: VectorShapeSettings): SKPoint => {
+      const { center, width, height, angle } = sess;
+      const halfW = width / 2;
+      const halfH = height / 2;
+      const cos = Math.cos(angle);
+      const sin = Math.sin(angle);
+
+      let localX = 0;
+      let localY = 0;
+
+      if (settings.shapeKind === 'round-rect') {
+        const maxR = Math.min(halfW, halfH);
+        const r = Math.max(0, Math.min(maxR, settings.cornerRadius ?? 16));
+        localX = halfW - r;
+        localY = -halfH;
+      } else if (settings.shapeKind === 'star') {
+        const numPoints = Math.max(3, settings.starPoints || 5);
+        const innerRatio = Math.max(0.1, Math.min(0.9, settings.starInnerRatio || 0.45));
+        const outerRadius = Math.min(halfW, halfH);
+        const innerRadius = outerRadius * innerRatio;
+        const scaleX = halfW / Math.max(1, outerRadius);
+        const scaleY = halfH / Math.max(1, outerRadius);
+        const angleStar = -Math.PI / 2 + Math.PI / numPoints;
+        localX = Math.cos(angleStar) * innerRadius * scaleX;
+        localY = Math.sin(angleStar) * innerRadius * scaleY;
+      } else if (settings.shapeKind === 'arrow') {
+        const headWidth = Math.max(0.15, Math.min(0.85, settings.arrowHeadWidth || 0.45));
+        const headLen = width * headWidth;
+        const shaftLen = width - headLen;
+        localX = -halfW + shaftLen;
+        localY = -halfH;
+      } else {
+        localX = halfW * 0.7;
+        localY = -halfH * 0.7;
+      }
+
+      return {
+        x: center.x + localX * cos - localY * sin,
+        y: center.y + localX * sin + localY * cos,
+      };
+    },
+    []
+  );
+
+  const getArrowShaftModifierDocPoint = useCallback(
+    (sess: ActiveVectorShapeSession, settings: VectorShapeSettings): SKPoint => {
+      const { center, width, height, angle } = sess;
+      const halfW = width / 2;
+      const cos = Math.cos(angle);
+      const sin = Math.sin(angle);
+
+      const headWidth = Math.max(0.15, Math.min(0.85, settings.arrowHeadWidth || 0.45));
+      const headLen = width * headWidth;
+      const shaftLen = width - headLen;
+      const shaftThickness = Math.max(0.1, Math.min(0.85, settings.arrowShaftThickness || 0.35));
+      const halfShaftH = (height * shaftThickness) / 2;
+
+      const localX = -halfW + shaftLen / 2;
+      const localY = -halfShaftH;
+
+      return {
+        x: center.x + localX * cos - localY * sin,
+        y: center.y + localX * sin + localY * cos,
+      };
+    },
+    []
+  );
+
+  // HIT TESTING DLA UCHWYTÓW WEKTOROWYCH
+  const hitTestVectorHandles = useCallback(
+    (e: React.PointerEvent | PointerEvent | MouseEvent): string | null => {
+      const container = containerRef.current;
+      if (!container) return null;
+      const rect = container.getBoundingClientRect();
+      const mouseX = e.clientX - rect.left;
+      const mouseY = e.clientY - rect.top;
+
+      if (activeVectorLineSession) {
+        const p0Screen = docToScreen(activeVectorLineSession.p0);
+        const p1Screen = docToScreen(activeVectorLineSession.p1);
+        const midDoc: SKPoint = {
+          x: (activeVectorLineSession.p0.x + activeVectorLineSession.p1.x) / 2,
+          y: (activeVectorLineSession.p0.y + activeVectorLineSession.p1.y) / 2,
+        };
+        const midScreen = docToScreen(midDoc);
+
+        if (Math.hypot(mouseX - p0Screen.x, mouseY - p0Screen.y) <= 12) return 'p0';
+        if (Math.hypot(mouseX - p1Screen.x, mouseY - p1Screen.y) <= 12) return 'p1';
+        if (Math.hypot(mouseX - midScreen.x, mouseY - midScreen.y) <= 12) return 'move';
+        return null;
+      }
+
+      if (activeVectorBezierSession) {
+        const p0Screen = docToScreen(activeVectorBezierSession.p0);
+        const p1Screen = docToScreen(activeVectorBezierSession.p1);
+        const p2Screen = docToScreen(activeVectorBezierSession.p2);
+        const p3Screen = docToScreen(activeVectorBezierSession.p3);
+        const midDoc: SKPoint = {
+          x: (activeVectorBezierSession.p0.x + activeVectorBezierSession.p3.x) / 2,
+          y: (activeVectorBezierSession.p0.y + activeVectorBezierSession.p3.y) / 2,
+        };
+        const midScreen = docToScreen(midDoc);
+
+        if (Math.hypot(mouseX - p0Screen.x, mouseY - p0Screen.y) <= 12) return 'p0';
+        if (Math.hypot(mouseX - p1Screen.x, mouseY - p1Screen.y) <= 12) return 'p1';
+        if (Math.hypot(mouseX - p2Screen.x, mouseY - p2Screen.y) <= 12) return 'p2';
+        if (Math.hypot(mouseX - p3Screen.x, mouseY - p3Screen.y) <= 12) return 'p3';
+        if (Math.hypot(mouseX - midScreen.x, mouseY - midScreen.y) <= 12) return 'move';
+        return null;
+      }
+
+      if (activeVectorShapeSession) {
+        const sess = activeVectorShapeSession;
+        // 1. Sprawdź punkt modyfikatora TYLKO dla figur które go posiadają (round-rect, star, arrow)
+        if (hasShapeModifier(vectorShapeSettings.shapeKind)) {
+          const modDoc = getShapeModifierDocPoint(sess, vectorShapeSettings);
+          const modScreen = docToScreen(modDoc);
+          if (Math.hypot(mouseX - modScreen.x, mouseY - modScreen.y) <= 12) {
+            return 'modifier';
+          }
+          if (vectorShapeSettings.shapeKind === 'arrow') {
+            const shaftDoc = getArrowShaftModifierDocPoint(sess, vectorShapeSettings);
+            const shaftScreen = docToScreen(shaftDoc);
+            if (Math.hypot(mouseX - shaftScreen.x, mouseY - shaftScreen.y) <= 12) {
+              return 'modifier-shaft';
+            }
+          }
+        }
+
+        // 2. Uchwyt obrotu
+        const cos = Math.cos(sess.angle);
+        const sin = Math.sin(sess.angle);
+        const rotOffset = 26 / zoom;
+        const rotDocX = sess.center.x - (sess.height / 2 + rotOffset) * (-sin);
+        const rotDocY = sess.center.y + (sess.height / 2 + rotOffset) * (-cos);
+        const rotScreen = docToScreen({ x: rotDocX, y: rotDocY });
+        if (Math.hypot(mouseX - rotScreen.x, mouseY - rotScreen.y) <= 12) {
+          return 'rotate';
+        }
+
+        // 3. 8 uchwytów skalowania
+        const localCoords: Record<string, { u: number; v: number }> = {
+          nw: { u: -0.5, v: -0.5 },
+          n: { u: 0, v: -0.5 },
+          ne: { u: 0.5, v: -0.5 },
+          e: { u: 0.5, v: 0 },
+          se: { u: 0.5, v: 0.5 },
+          s: { u: 0, v: 0.5 },
+          sw: { u: -0.5, v: 0.5 },
+          w: { u: -0.5, v: 0 },
+        };
+
+        for (const [key, lc] of Object.entries(localCoords)) {
+          const lx = lc.u * sess.width;
+          const ly = lc.v * sess.height;
+          const rx = lx * cos - ly * sin;
+          const ry = lx * sin + ly * cos;
+          const hDoc = { x: sess.center.x + rx, y: sess.center.y + ry };
+          const hScreen = docToScreen(hDoc);
+          if (Math.abs(mouseX - hScreen.x) <= 8 && Math.abs(mouseY - hScreen.y) <= 8) {
+            return key;
+          }
+        }
+
+        // 4. Przesuwanie wnętrza figury
+        const localMouseX = (mouseX - docToScreen(sess.center).x) / zoom;
+        const localMouseY = (mouseY - docToScreen(sess.center).y) / zoom;
+        const unrotX = localMouseX * cos + localMouseY * sin;
+        const unrotY = -localMouseX * sin + localMouseY * cos;
+        if (Math.abs(unrotX) <= sess.width / 2 && Math.abs(unrotY) <= sess.height / 2) {
+          return 'move';
+        }
+      }
+
+      return null;
+    },
+    [
+      activeVectorLineSession,
+      activeVectorBezierSession,
+      activeVectorShapeSession,
+      docToScreen,
+      getShapeModifierDocPoint,
+      vectorShapeSettings,
+      zoom,
+    ]
+  );
+
+  // HIT TESTING TRANSFORM SELECTION
   const getTransformScreenGeometry = useCallback(() => {
     const st = engine.selectionManager.transformState;
     const container = containerRef.current;
@@ -462,15 +815,12 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     const screenCenterX = cWidth / 2 + panOffset.x;
     const screenCenterY = cHeight / 2 + panOffset.y;
 
-    const docToScreen = (pt: SKPoint): SKPoint => {
-      return {
-        x: (pt.x - engine.width / 2) * zoom + screenCenterX,
-        y: (pt.y - engine.height / 2) * zoom + screenCenterY,
-      };
-    };
+    const docToScr = (pt: SKPoint): SKPoint => ({
+      x: (pt.x - engine.width / 2) * zoom + screenCenterX,
+      y: (pt.y - engine.height / 2) * zoom + screenCenterY,
+    });
 
-    // Znormalizowane punkty w lokalnym układzie ramki (u, v) w [-0.5, 0.5]
-    const localCoords: { [key: string]: { u: number; v: number } } = {
+    const localCoords: Record<string, { u: number; v: number }> = {
       nw: { u: -0.5, v: -0.5 },
       n: { u: 0, v: -0.5 },
       ne: { u: 0.5, v: -0.5 },
@@ -483,100 +833,933 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
 
     const cos = Math.cos(st.angle);
     const sin = Math.sin(st.angle);
-
-    const docHandles: { [key: string]: SKPoint } = {};
-    const screenHandles: { [key: string]: SKPoint } = {};
+    const docHandles: Record<string, SKPoint> = {};
+    const screenHandles: Record<string, SKPoint> = {};
 
     for (const [key, lc] of Object.entries(localCoords)) {
       const lx = lc.u * st.width;
       const ly = lc.v * st.height;
       const rx = lx * cos - ly * sin;
       const ry = lx * sin + ly * cos;
-
-      const dpt: SKPoint = {
-        x: st.pos.x + rx,
-        y: st.pos.y + ry,
-      };
+      const dpt: SKPoint = { x: st.pos.x + rx, y: st.pos.y + ry };
       docHandles[key] = dpt;
-      screenHandles[key] = docToScreen(dpt);
+      screenHandles[key] = docToScr(dpt);
     }
 
-    const curPivotDoc: SKPoint = {
-      x: st.pivot.x,
-      y: st.pivot.y,
+    const curPivotDoc: SKPoint = { x: st.pivot.x, y: st.pivot.y };
+    const curPivotScreen = docToScr(curPivotDoc);
+
+    // Uchwyt obrotu na górze (taki sam jak dla figur)
+    const rotOffset = 22 / zoom;
+    const rotDoc: SKPoint = {
+      x: st.pos.x - (st.height / 2 + rotOffset) * (-sin),
+      y: st.pos.y + (st.height / 2 + rotOffset) * (-cos),
     };
-    const curPivotScreen = docToScreen(curPivotDoc);
+    const rotScreen = docToScr(rotDoc);
 
     return {
       docHandles,
       screenHandles,
       pivotDoc: curPivotDoc,
       pivotScreen: curPivotScreen,
+      rotDoc,
+      rotScreen,
     };
   }, [engine, zoom, panOffset]);
 
-  // Wykrywanie uchwytu pod kursorem w pikselach ekranu
   const hitTestTransformHandles = useCallback(
-    (e: React.PointerEvent | PointerEvent | MouseEvent): TransformHandleType => {
+    (e: React.PointerEvent | MouseEvent): TransformHandleType => {
       const geom = getTransformScreenGeometry();
-      const container = containerRef.current;
-      if (!geom || !container) return null;
+      if (!geom || !containerRef.current) return null;
 
-      const rect = container.getBoundingClientRect();
-      const mouseScreenX = e.clientX - rect.left;
-      const mouseScreenY = e.clientY - rect.top;
+      const rect = containerRef.current.getBoundingClientRect();
+      const mouseX = e.clientX - rect.left;
+      const mouseY = e.clientY - rect.top;
 
-      // 1. Sprawdź środek ciężkości (pivot) - promień 8px ekranu
-      if (Math.hypot(mouseScreenX - geom.pivotScreen.x, mouseScreenY - geom.pivotScreen.y) <= 8) {
+      // 1. Pivot
+      if (Math.hypot(mouseX - geom.pivotScreen.x, mouseY - geom.pivotScreen.y) <= 8) {
         return 'pivot';
       }
 
-      // 2. Sprawdź 8 uchwytów skalowania - kwadraty 8x8px ekranu
-      const handleKeys: (keyof typeof geom.screenHandles)[] = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
-      for (const k of handleKeys) {
-        const hp = geom.screenHandles[k];
-        if (Math.abs(mouseScreenX - hp.x) <= 6 && Math.abs(mouseScreenY - hp.y) <= 6) {
-          return k as TransformHandleType;
+      // 2. Uchwyt obrotu na górze
+      if (Math.hypot(mouseX - geom.rotScreen.x, mouseY - geom.rotScreen.y) <= 9) {
+        return 'rotate';
+      }
+
+      // 3. 8 uchwytów skalowania
+      for (const [key, sPt] of Object.entries(geom.screenHandles)) {
+        if (Math.abs(mouseX - sPt.x) <= 8 && Math.abs(mouseY - sPt.y) <= 8) {
+          return key as TransformHandleType;
         }
       }
 
-      // 3. Sprawdź strefę obrotu na zewnątrz 4 narożników (odległość 8px do 26px od naroża)
-      const cornerKeys: (keyof typeof geom.screenHandles)[] = ['nw', 'ne', 'se', 'sw'];
-      for (const k of cornerKeys) {
-        const hp = geom.screenHandles[k];
-        const dist = Math.hypot(mouseScreenX - hp.x, mouseScreenY - hp.y);
-        if (dist > 6 && dist <= 26) {
-          return `rotate-${k}` as TransformHandleType;
+      // 4. Wnętrze zaznaczenia (przesuwanie)
+      const st = engine.selectionManager.transformState;
+      if (st) {
+        const localDocPt = getDocPoint(e);
+        if (localDocPt) {
+          const dx = localDocPt.x - st.pos.x;
+          const dy = localDocPt.y - st.pos.y;
+          const cos = Math.cos(st.angle);
+          const sin = Math.sin(st.angle);
+          const unrotX = dx * cos + dy * sin;
+          const unrotY = -dx * sin + dy * cos;
+          if (Math.abs(unrotX) <= st.width / 2 && Math.abs(unrotY) <= st.height / 2) {
+            return 'move';
+          }
         }
-      }
-
-      // 4. Sprawdź czy kursor jest wewnątrz przekształcanego wielokąta
-      const poly = [
-        geom.screenHandles.nw,
-        geom.screenHandles.ne,
-        geom.screenHandles.se,
-        geom.screenHandles.sw,
-      ];
-      let inside = false;
-      for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-        const xi = poly[i].x,
-          yi = poly[i].y;
-        const xj = poly[j].x,
-          yj = poly[j].y;
-        const intersect = yi > mouseScreenY !== yj > mouseScreenY && mouseScreenX < ((xj - xi) * (mouseScreenY - yi)) / (yj - yi) + xi;
-        if (intersect) inside = !inside;
-      }
-
-      if (inside) {
-        return 'move';
       }
 
       return null;
     },
-    [getTransformScreenGeometry]
+    [getTransformScreenGeometry, engine.selectionManager.transformState, getDocPoint]
   );
 
-  // RENDEROWANIE NAKŁADKI: MASZERUJĄCE MRÓWKI ORAZ EKRANOWY INTERFEJS TRANSFORMACJI
+  // OBSŁUGA INTERAKCJI TRANSFORMACJI ZAZNACZENIA / ZAWARTOŚCI
+  const updateTransformInteraction = useCallback(
+    (pt: SKPoint, shiftKey: boolean, altKey: boolean) => {
+      const activeHandle = transformActiveHandleRef.current;
+      if (!activeHandle || !transformInitialStateRef.current || !transformDragStartDocPtRef.current) {
+        return;
+      }
+
+      const init = transformInitialStateRef.current;
+      const startPt = transformDragStartDocPtRef.current;
+
+      if (activeHandle === 'move') {
+        let dx = pt.x - startPt.x;
+        let dy = pt.y - startPt.y;
+
+        if (shiftKey) {
+          if (Math.abs(dx) >= Math.abs(dy)) dy = 0;
+          else dx = 0;
+        }
+
+        dx = Math.round(dx);
+        dy = Math.round(dy);
+
+        engine.selectionManager.updateTransformSelection({
+          pos: { x: init.pos.x + dx, y: init.pos.y + dy },
+          pivot: { x: init.pivot.x + dx, y: init.pivot.y + dy },
+        });
+        onCanvasModified();
+        return;
+      }
+
+      if (activeHandle === 'pivot') {
+        engine.selectionManager.updateTransformSelection({
+          pivot: { x: Math.round(pt.x), y: Math.round(pt.y) },
+        });
+        onCanvasModified();
+        return;
+      }
+
+      if (activeHandle === 'rotate') {
+        const P = init.pivot;
+        const startAngle = Math.atan2(startPt.y - P.y, startPt.x - P.x);
+        const curAngle = Math.atan2(pt.y - P.y, pt.x - P.x);
+        let deltaAngle = curAngle - startAngle;
+
+        let targetAngle = init.angle + deltaAngle;
+        if (shiftKey) {
+          const step = (15 * Math.PI) / 180;
+          targetAngle = Math.round(targetAngle / step) * step;
+          deltaAngle = targetAngle - init.angle;
+        }
+
+        const dx = init.pos.x - P.x;
+        const dy = init.pos.y - P.y;
+        const cos = Math.cos(deltaAngle);
+        const sin = Math.sin(deltaAngle);
+
+        const newPosX = P.x + dx * cos - dy * sin;
+        const newPosY = P.y + dx * sin + dy * cos;
+
+        engine.selectionManager.updateTransformSelection({
+          angle: targetAngle,
+          pos: { x: newPosX, y: newPosY },
+        });
+        onCanvasModified();
+        return;
+      }
+
+      // Skalowanie z 8 uchwytów
+      let uA = 0;
+      let vA = 0;
+
+      if (activeHandle === 'e') { uA = -0.5; vA = 0; }
+      else if (activeHandle === 'w') { uA = 0.5; vA = 0; }
+      else if (activeHandle === 's') { uA = 0; vA = -0.5; }
+      else if (activeHandle === 'n') { uA = 0; vA = 0.5; }
+      else if (activeHandle === 'se') { uA = -0.5; vA = -0.5; }
+      else if (activeHandle === 'nw') { uA = 0.5; vA = 0.5; }
+      else if (activeHandle === 'ne') { uA = -0.5; vA = 0.5; }
+      else if (activeHandle === 'sw') { uA = 0.5; vA = -0.5; }
+
+      const uH = -uA;
+      const vH = -vA;
+
+      const cos0 = Math.cos(init.angle);
+      const sin0 = Math.sin(init.angle);
+      const Ux = { x: cos0, y: sin0 };
+      const Uy = { x: -sin0, y: cos0 };
+
+      let newW = init.width;
+      let newH = init.height;
+
+      const anchorDocX = init.pos.x + uA * init.width * cos0 - vA * init.height * sin0;
+      const anchorDocY = init.pos.y + uA * init.width * sin0 + vA * init.height * cos0;
+
+      if (altKey) {
+        const Vp = { x: pt.x - init.pivot.x, y: pt.y - init.pivot.y };
+        const projPivX = Vp.x * Ux.x + Vp.y * Ux.y;
+        const projPivY = Vp.x * Uy.x + Vp.y * Uy.y;
+
+        const H0x = init.pos.x + uH * init.width * cos0 - vH * init.height * sin0;
+        const H0y = init.pos.y + uH * init.width * sin0 + vH * init.height * cos0;
+        const VH0 = { x: H0x - init.pivot.x, y: H0y - init.pivot.y };
+        const projH0_X = VH0.x * Ux.x + VH0.y * Ux.y;
+        const projH0_Y = VH0.x * Uy.x + VH0.y * Uy.y;
+
+        if (uH !== 0) {
+          if (Math.abs(projH0_X) > 0.001) {
+            const signX = projH0_X >= 0 ? 1 : -1;
+            const scaleX = Math.max(0.01, (projPivX * signX) / Math.abs(projH0_X));
+            newW = Math.max(2, init.width * scaleX);
+          } else {
+            newW = Math.max(2, Math.abs(projPivX) * 2);
+          }
+        }
+
+        if (vH !== 0) {
+          if (Math.abs(projH0_Y) > 0.001) {
+            const signY = projH0_Y >= 0 ? 1 : -1;
+            const scaleY = Math.max(0.01, (projPivY * signY) / Math.abs(projH0_Y));
+            newH = Math.max(2, init.height * scaleY);
+          } else {
+            newH = Math.max(2, Math.abs(projPivY) * 2);
+          }
+        }
+      } else {
+        const V = { x: pt.x - anchorDocX, y: pt.y - anchorDocY };
+        const projX = V.x * Ux.x + V.y * Ux.y;
+        const projY = V.x * Uy.x + V.y * Uy.y;
+
+        if (uH !== 0) newW = Math.max(2, projX * Math.sign(uH));
+        if (vH !== 0) newH = Math.max(2, projY * Math.sign(vH));
+      }
+
+      if (shiftKey) {
+        const initialAspect = init.width / Math.max(1, init.height);
+        if (uH !== 0 && vH !== 0) {
+          const scaleW = newW / Math.max(1, init.width);
+          const scaleH = newH / Math.max(1, init.height);
+          if (Math.abs(scaleW - 1) >= Math.abs(scaleH - 1)) {
+            newH = Math.max(2, newW / initialAspect);
+          } else {
+            newW = Math.max(2, newH * initialAspect);
+          }
+        } else if (uH !== 0) {
+          newH = Math.max(2, newW / initialAspect);
+        } else if (vH !== 0) {
+          newW = Math.max(2, newH * initialAspect);
+        }
+      }
+
+      let newPosX: number;
+      let newPosY: number;
+      let newPivDocX: number;
+      let newPivDocY: number;
+
+      if (altKey) {
+        newPivDocX = init.pivot.x;
+        newPivDocY = init.pivot.y;
+        const dxPiv = init.pos.x - init.pivot.x;
+        const dyPiv = init.pos.y - init.pivot.y;
+        const localCenterFromPivX = dxPiv * cos0 + dyPiv * sin0;
+        const localCenterFromPivY = -dxPiv * sin0 + dyPiv * cos0;
+        const finalScaleX = newW / Math.max(1, init.width);
+        const finalScaleY = newH / Math.max(1, init.height);
+
+        const scaledLocalCenterX = localCenterFromPivX * finalScaleX;
+        const scaledLocalCenterY = localCenterFromPivY * finalScaleY;
+
+        newPosX = init.pivot.x + scaledLocalCenterX * cos0 - scaledLocalCenterY * sin0;
+        newPosY = init.pivot.y + scaledLocalCenterX * sin0 + scaledLocalCenterY * cos0;
+      } else {
+        newPosX = anchorDocX - uA * newW * Ux.x - vA * newH * Uy.x;
+        newPosY = anchorDocY - uA * newW * Ux.y - vA * newH * Uy.y;
+
+        const dxPiv = init.pivot.x - init.pos.x;
+        const dyPiv = init.pivot.y - init.pos.y;
+        const localPivX = dxPiv * cos0 + dyPiv * sin0;
+        const localPivY = -dxPiv * sin0 + dyPiv * cos0;
+        const uPiv = localPivX / Math.max(1, init.width);
+        const vPiv = localPivY / Math.max(1, init.height);
+
+        const newLocalPivX = uPiv * newW;
+        const newLocalPivY = vPiv * newH;
+        newPivDocX = newPosX + newLocalPivX * cos0 - newLocalPivY * sin0;
+        newPivDocY = newPosY + newLocalPivX * sin0 + newLocalPivY * cos0;
+      }
+
+      if (Math.abs(init.angle) < 0.001) {
+        newW = Math.round(newW);
+        newH = Math.round(newH);
+        const left = Math.round(newPosX - newW / 2);
+        const top = Math.round(newPosY - newH / 2);
+        newPosX = left + newW / 2;
+        newPosY = top + newH / 2;
+        newPivDocX = Math.round(newPivDocX);
+        newPivDocY = Math.round(newPivDocY);
+      } else {
+        newW = Math.round(newW * 10) / 10;
+        newH = Math.round(newH * 10) / 10;
+        newPosX = Math.round(newPosX * 10) / 10;
+        newPosY = Math.round(newPosY * 10) / 10;
+        newPivDocX = Math.round(newPivDocX * 10) / 10;
+        newPivDocY = Math.round(newPivDocY * 10) / 10;
+      }
+
+      engine.selectionManager.updateTransformSelection({
+        width: newW,
+        height: newH,
+        pos: { x: newPosX, y: newPosY },
+        pivot: { x: newPivDocX, y: newPivDocY },
+      });
+      onCanvasModified();
+    },
+    [engine, onCanvasModified]
+  );
+
+  // OBSŁUGA INTERAKCJI UCHWYTÓW WEKTOROWYCH (FIGURA, LINIA, BEZIER)
+  const updateVectorHandleInteraction = useCallback(
+    (pt: SKPoint, shiftKey: boolean, altKey: boolean) => {
+      const activeHandle = activeVectorHandleRef.current;
+      if (!activeHandle || !vectorDragStartPtRef.current || !vectorInitialSessionStateRef.current) {
+        return;
+      }
+
+      const startPt = vectorDragStartPtRef.current;
+      const dx = Math.round(pt.x - startPt.x);
+      const dy = Math.round(pt.y - startPt.y);
+
+      if (activeVectorLineSession) {
+        const init = vectorInitialSessionStateRef.current as ActiveVectorLineSession;
+        if (activeHandle === 'p0') {
+          let p0 = { x: Math.round(pt.x), y: Math.round(pt.y) };
+          if (shiftKey) {
+            const ldx = p0.x - init.p1.x;
+            const ldy = p0.y - init.p1.y;
+            const angle = Math.atan2(ldy, ldx);
+            const step = Math.PI / 4;
+            const snappedAngle = Math.round(angle / step) * step;
+            const dist = Math.hypot(ldx, ldy);
+            p0 = {
+              x: Math.round(init.p1.x + Math.cos(snappedAngle) * dist),
+              y: Math.round(init.p1.y + Math.sin(snappedAngle) * dist),
+            };
+          }
+          setActiveVectorLineSession({ p0, p1: init.p1 });
+        } else if (activeHandle === 'p1') {
+          let p1 = { x: Math.round(pt.x), y: Math.round(pt.y) };
+          if (shiftKey) {
+            const ldx = p1.x - init.p0.x;
+            const ldy = p1.y - init.p0.y;
+            const angle = Math.atan2(ldy, ldx);
+            const step = Math.PI / 4;
+            const snappedAngle = Math.round(angle / step) * step;
+            const dist = Math.hypot(ldx, ldy);
+            p1 = {
+              x: Math.round(init.p0.x + Math.cos(snappedAngle) * dist),
+              y: Math.round(init.p0.y + Math.sin(snappedAngle) * dist),
+            };
+          }
+          setActiveVectorLineSession({ p0: init.p0, p1 });
+        } else if (activeHandle === 'move') {
+          let moveDx = dx;
+          let moveDy = dy;
+          if (shiftKey) {
+            if (Math.abs(moveDx) >= Math.abs(moveDy)) moveDy = 0;
+            else moveDx = 0;
+          }
+          setActiveVectorLineSession({
+            p0: { x: init.p0.x + moveDx, y: init.p0.y + moveDy },
+            p1: { x: init.p1.x + moveDx, y: init.p1.y + moveDy },
+          });
+        }
+        redraw();
+        return;
+      }
+
+      if (activeVectorBezierSession) {
+        const init = vectorInitialSessionStateRef.current as ActiveVectorBezierSession;
+        if (activeHandle === 'p0') {
+          let moveX = Math.round(pt.x) - init.p0.x;
+          let moveY = Math.round(pt.y) - init.p0.y;
+          if (shiftKey) {
+            if (Math.abs(moveX) >= Math.abs(moveY)) moveY = 0;
+            else moveX = 0;
+          }
+          const newP0 = { x: init.p0.x + moveX, y: init.p0.y + moveY };
+          const newP1 = { x: init.p1.x + moveX, y: init.p1.y + moveY };
+          setActiveVectorBezierSession({ ...init, p0: newP0, p1: newP1 });
+        } else if (activeHandle === 'p3') {
+          let moveX = Math.round(pt.x) - init.p3.x;
+          let moveY = Math.round(pt.y) - init.p3.y;
+          if (shiftKey) {
+            if (Math.abs(moveX) >= Math.abs(moveY)) moveY = 0;
+            else moveX = 0;
+          }
+          const newP3 = { x: init.p3.x + moveX, y: init.p3.y + moveY };
+          const newP2 = { x: init.p2.x + moveX, y: init.p2.y + moveY };
+          setActiveVectorBezierSession({ ...init, p3: newP3, p2: newP2 });
+        } else if (activeHandle === 'p1') {
+          let targetX = Math.round(pt.x);
+          let targetY = Math.round(pt.y);
+          if (shiftKey) {
+            const hdx = targetX - init.p0.x;
+            const hdy = targetY - init.p0.y;
+            const angle = Math.atan2(hdy, hdx);
+            const step = Math.PI / 4;
+            const snappedAngle = Math.round(angle / step) * step;
+            const dist = Math.hypot(hdx, hdy);
+            targetX = Math.round(init.p0.x + Math.cos(snappedAngle) * dist);
+            targetY = Math.round(init.p0.y + Math.sin(snappedAngle) * dist);
+          }
+          setActiveVectorBezierSession({ ...init, p1: { x: targetX, y: targetY } });
+        } else if (activeHandle === 'p2') {
+          let targetX = Math.round(pt.x);
+          let targetY = Math.round(pt.y);
+          if (shiftKey) {
+            const hdx = targetX - init.p3.x;
+            const hdy = targetY - init.p3.y;
+            const angle = Math.atan2(hdy, hdx);
+            const step = Math.PI / 4;
+            const snappedAngle = Math.round(angle / step) * step;
+            const dist = Math.hypot(hdx, hdy);
+            targetX = Math.round(init.p3.x + Math.cos(snappedAngle) * dist);
+            targetY = Math.round(init.p3.y + Math.sin(snappedAngle) * dist);
+          }
+          setActiveVectorBezierSession({ ...init, p2: { x: targetX, y: targetY } });
+        } else if (activeHandle === 'move') {
+          let moveDx = dx;
+          let moveDy = dy;
+          if (shiftKey) {
+            if (Math.abs(moveDx) >= Math.abs(moveDy)) moveDy = 0;
+            else moveDx = 0;
+          }
+          setActiveVectorBezierSession({
+            p0: { x: init.p0.x + moveDx, y: init.p0.y + moveDy },
+            p1: { x: init.p1.x + moveDx, y: init.p1.y + moveDy },
+            p2: { x: init.p2.x + moveDx, y: init.p2.y + moveDy },
+            p3: { x: init.p3.x + moveDx, y: init.p3.y + moveDy },
+          });
+        }
+        redraw();
+        return;
+      }
+
+      if (activeVectorShapeSession) {
+        const init = vectorInitialSessionStateRef.current as {
+          center: SKPoint;
+          width: number;
+          height: number;
+          angle: number;
+          pivot: SKPoint;
+          flipX: boolean;
+          flipY: boolean;
+          settings: VectorShapeSettings;
+        };
+
+        if (activeHandle === 'modifier') {
+          const { center, width, height, angle } = init;
+          const cos = Math.cos(angle);
+          const sin = Math.sin(angle);
+          const relX = pt.x - center.x;
+          const relY = pt.y - center.y;
+          const localX = relX * cos + relY * sin;
+
+          if (vectorShapeSettings.shapeKind === 'rect' || vectorShapeSettings.shapeKind === 'round-rect') {
+            const maxR = Math.min(width, height) / 2;
+            const newR = Math.max(0, Math.min(maxR, Math.round(width / 2 - localX)));
+            onChangeVectorShapeSettings?.({ cornerRadius: newR });
+          } else if (vectorShapeSettings.shapeKind === 'star') {
+            const outerR = Math.min(width, height) / 2;
+            const localY = -relX * sin + relY * cos;
+            const dist = Math.hypot(localX, localY);
+            const ratio = Math.max(0.1, Math.min(0.9, dist / Math.max(1, outerR)));
+            onChangeVectorShapeSettings?.({ starInnerRatio: Math.round(ratio * 100) / 100 });
+          } else if (vectorShapeSettings.shapeKind === 'arrow') {
+            const headW = Math.max(0.15, Math.min(0.85, (width / 2 - localX) / Math.max(1, width)));
+            onChangeVectorShapeSettings?.({ arrowHeadWidth: Math.round(headW * 100) / 100 });
+          }
+          redraw();
+          return;
+        }
+
+        if (activeHandle === 'modifier-shaft') {
+          const { center, height, angle } = init;
+          const cos = Math.cos(angle);
+          const sin = Math.sin(angle);
+          const relX = pt.x - center.x;
+          const relY = pt.y - center.y;
+          const localY = -relX * sin + relY * cos;
+
+          const shaftThick = Math.max(0.1, Math.min(0.85, (Math.abs(localY) * 2) / Math.max(1, height)));
+          onChangeVectorShapeSettings?.({ arrowShaftThickness: Math.round(shaftThick * 100) / 100 });
+          redraw();
+          return;
+        }
+
+        if (activeHandle === 'move') {
+          let moveDx = dx;
+          let moveDy = dy;
+          if (shiftKey) {
+            if (Math.abs(moveDx) >= Math.abs(moveDy)) moveDy = 0;
+            else moveDx = 0;
+          }
+          setActiveVectorShapeSession({
+            ...init,
+            center: { x: init.center.x + moveDx, y: init.center.y + moveDy },
+            pivot: { x: init.pivot.x + moveDx, y: init.pivot.y + moveDy },
+          });
+          redraw();
+          return;
+        }
+
+        if (activeHandle === 'rotate') {
+          const P = init.center;
+          const startAngle = Math.atan2(startPt.y - P.y, startPt.x - P.x);
+          const curAngle = Math.atan2(pt.y - P.y, pt.x - P.x);
+          let deltaAngle = curAngle - startAngle;
+          let targetAngle = init.angle + deltaAngle;
+
+          if (shiftKey) {
+            const step = (15 * Math.PI) / 180;
+            targetAngle = Math.round(targetAngle / step) * step;
+          }
+
+          setActiveVectorShapeSession({ ...init, angle: targetAngle });
+          redraw();
+          return;
+        }
+
+        // 8 Uchwytów skalowania figury (z pełną obsługą Alt = skalowanie symetryczne ze środka, Shift = zachowanie proporcji init.width / init.height)
+        let uA = 0;
+        let vA = 0;
+
+        if (activeHandle === 'e') { uA = -0.5; vA = 0; }
+        else if (activeHandle === 'w') { uA = 0.5; vA = 0; }
+        else if (activeHandle === 's') { uA = 0; vA = -0.5; }
+        else if (activeHandle === 'n') { uA = 0; vA = 0.5; }
+        else if (activeHandle === 'se') { uA = -0.5; vA = -0.5; }
+        else if (activeHandle === 'nw') { uA = 0.5; vA = 0.5; }
+        else if (activeHandle === 'ne') { uA = -0.5; vA = 0.5; }
+        else if (activeHandle === 'sw') { uA = 0.5; vA = -0.5; }
+
+        const uH = -uA;
+        const vH = -vA;
+
+        const cos0 = Math.cos(init.angle);
+        const sin0 = Math.sin(init.angle);
+        const Ux = { x: cos0, y: sin0 };
+        const Uy = { x: -sin0, y: cos0 };
+
+        let newW = init.width;
+        let newH = init.height;
+
+        const anchorDocX = init.center.x + uA * init.width * cos0 - vA * init.height * sin0;
+        const anchorDocY = init.center.y + uA * init.width * sin0 + vA * init.height * cos0;
+
+        if (altKey) {
+          const Vp = { x: pt.x - init.center.x, y: pt.y - init.center.y };
+          const projPivX = Vp.x * Ux.x + Vp.y * Ux.y;
+          const projPivY = Vp.x * Uy.x + Vp.y * Uy.y;
+
+          const H0x = init.center.x + uH * init.width * cos0 - vH * init.height * sin0;
+          const H0y = init.center.y + uH * init.width * sin0 + vH * init.height * cos0;
+          const VH0 = { x: H0x - init.center.x, y: H0y - init.center.y };
+          const projH0_X = VH0.x * Ux.x + VH0.y * Ux.y;
+          const projH0_Y = VH0.x * Uy.x + VH0.y * Uy.y;
+
+          if (uH !== 0) {
+            if (Math.abs(projH0_X) > 0.001) {
+              const signX = projH0_X >= 0 ? 1 : -1;
+              const scaleX = Math.max(0.01, (projPivX * signX) / Math.abs(projH0_X));
+              newW = Math.max(2, init.width * scaleX);
+            } else {
+              newW = Math.max(2, Math.abs(projPivX) * 2);
+            }
+          }
+
+          if (vH !== 0) {
+            if (Math.abs(projH0_Y) > 0.001) {
+              const signY = projH0_Y >= 0 ? 1 : -1;
+              const scaleY = Math.max(0.01, (projPivY * signY) / Math.abs(projH0_Y));
+              newH = Math.max(2, init.height * scaleY);
+            } else {
+              newH = Math.max(2, Math.abs(projPivY) * 2);
+            }
+          }
+        } else {
+          const V = { x: pt.x - anchorDocX, y: pt.y - anchorDocY };
+          const projX = V.x * Ux.x + V.y * Ux.y;
+          const projY = V.x * Uy.x + V.y * Uy.y;
+
+          if (uH !== 0) newW = Math.max(2, projX * Math.sign(uH));
+          if (vH !== 0) newH = Math.max(2, projY * Math.sign(vH));
+        }
+
+        if (shiftKey) {
+          const initialAspect = init.width / Math.max(1, init.height);
+          if (uH !== 0 && vH !== 0) {
+            const scaleW = newW / Math.max(1, init.width);
+            const scaleH = newH / Math.max(1, init.height);
+            if (Math.abs(scaleW - 1) >= Math.abs(scaleH - 1)) {
+              newH = Math.max(2, newW / initialAspect);
+            } else {
+              newW = Math.max(2, newH * initialAspect);
+            }
+          } else if (uH !== 0) {
+            newH = Math.max(2, newW / initialAspect);
+          } else if (vH !== 0) {
+            newW = Math.max(2, newH * initialAspect);
+          }
+        }
+
+        let newCenterX: number;
+        let newCenterY: number;
+
+        if (altKey) {
+          newCenterX = init.center.x;
+          newCenterY = init.center.y;
+        } else {
+          newCenterX = anchorDocX - uA * newW * Ux.x - vA * newH * Uy.x;
+          newCenterY = anchorDocY - uA * newW * Ux.y - vA * newH * Uy.y;
+        }
+
+        if (Math.abs(init.angle) < 0.001) {
+          newW = Math.round(newW);
+          newH = Math.round(newH);
+          const left = Math.round(newCenterX - newW / 2);
+          const top = Math.round(newCenterY - newH / 2);
+          newCenterX = left + newW / 2;
+          newCenterY = top + newH / 2;
+        } else {
+          newW = Math.round(newW * 10) / 10;
+          newH = Math.round(newH * 10) / 10;
+          newCenterX = Math.round(newCenterX * 10) / 10;
+          newCenterY = Math.round(newCenterY * 10) / 10;
+        }
+
+        setActiveVectorShapeSession({
+          ...init,
+          width: newW,
+          height: newH,
+          center: { x: newCenterX, y: newCenterY },
+          pivot: { x: newCenterX, y: newCenterY },
+        });
+        redraw();
+      }
+    },
+    [
+      activeVectorLineSession,
+      activeVectorBezierSession,
+      activeVectorShapeSession,
+      onChangeVectorShapeSettings,
+      vectorShapeSettings.shapeKind,
+      redraw,
+    ]
+  );
+
+  // OBSŁUGA PIERWOTNEGO PRZECIĄGANIA NOWEJ FIGURY / LINII / KRZYWEJ
+  const updateInitialDrawingDrag = useCallback(
+    (pt: SKPoint, shiftKey: boolean, altKey: boolean) => {
+      const startPt = dragStartPointRef.current;
+      if (!isDrawingRef.current || !startPt) return;
+
+      const dist = Math.hypot(pt.x - startPt.x, pt.y - startPt.y);
+      if (dist < 3) return;
+
+      setCurrentDragPoint(pt);
+
+      if (activeTool === 'line') {
+        let p1 = { ...pt };
+        if (shiftKey) {
+          const dx = pt.x - startPt.x;
+          const dy = pt.y - startPt.y;
+          const angle = Math.atan2(dy, dx);
+          const step = Math.PI / 4;
+          const snappedAngle = Math.round(angle / step) * step;
+          const lineDist = Math.hypot(dx, dy);
+          p1 = {
+            x: Math.round(startPt.x + Math.cos(snappedAngle) * lineDist),
+            y: Math.round(startPt.y + Math.sin(snappedAngle) * lineDist),
+          };
+        }
+        setActiveVectorLineSession({
+          p0: { x: Math.round(startPt.x), y: Math.round(startPt.y) },
+          p1: { x: Math.round(p1.x), y: Math.round(p1.y) },
+        });
+        redraw();
+        return;
+      }
+
+      if (activeTool === 'bezier') {
+        const p0 = { x: Math.round(startPt.x), y: Math.round(startPt.y) };
+        const p3 = { x: Math.round(pt.x), y: Math.round(pt.y) };
+        const dx = p3.x - p0.x;
+        const dy = p3.y - p0.y;
+        const p1 = {
+          x: Math.round(p0.x + dx * 0.33 - dy * 0.25),
+          y: Math.round(p0.y + dy * 0.33 + dx * 0.25),
+        };
+        const p2 = {
+          x: Math.round(p0.x + dx * 0.66 - dy * 0.25),
+          y: Math.round(p0.y + dy * 0.66 + dx * 0.25),
+        };
+        setActiveVectorBezierSession({ p0, p1, p2, p3 });
+        redraw();
+        return;
+      }
+
+      if (activeTool === 'shapes') {
+        const startX = Math.round(startPt.x);
+        const startY = Math.round(startPt.y);
+        const curX = Math.round(pt.x);
+        const curY = Math.round(pt.y);
+
+        let w = 0;
+        let h = 0;
+        let center = { x: startX, y: startY };
+
+        if (altKey) {
+          // Alt key: startPt is the center, pt is a corner
+          let halfW = Math.abs(curX - startX);
+          let halfH = Math.abs(curY - startY);
+
+          if (shiftKey) {
+            const side = Math.max(halfW, halfH);
+            halfW = side;
+            halfH = side;
+          }
+
+          w = halfW * 2;
+          h = halfH * 2;
+          center = { x: startX, y: startY };
+        } else {
+          // Normal drag: startPt is a corner, pt is the opposite corner
+          w = Math.abs(curX - startX);
+          h = Math.abs(curY - startY);
+          let minX = Math.min(startX, curX);
+          let minY = Math.min(startY, curY);
+
+          if (shiftKey) {
+            const side = Math.max(w, h);
+            w = side;
+            h = side;
+            minX = curX >= startX ? startX : startX - side;
+            minY = curY >= startY ? startY : startY - side;
+          }
+
+          center = { x: minX + w / 2, y: minY + h / 2 };
+        }
+
+        w = Math.max(1, w);
+        h = Math.max(1, h);
+
+        setActiveVectorShapeSession({
+          center,
+          width: w,
+          height: h,
+          angle: 0,
+          pivot: { ...center },
+          flipX: false,
+          flipY: false,
+        });
+        redraw();
+      }
+    },
+    [activeTool, redraw]
+  );
+
+  // OBSŁUGA SKRÓTÓW KLAWIATUROWYCH (Enter = Zatwierdź, Esc = Anuluj, Natychmiastowa reakcja na Shift / Alt)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (['INPUT', 'SELECT', 'TEXTAREA'].includes((e.target as HTMLElement).tagName)) return;
+      if (e.code === 'Space' && !isSpacePressed) {
+        setIsSpacePressed(true);
+      }
+      if (e.key === 'Shift') {
+        setIsShiftKeyDown(true);
+      }
+      if (e.key === 'Control' || e.key === 'Meta') {
+        setIsCtrlKeyDown(true);
+      }
+
+      const isSelectionTool =
+        activeTool === 'select-rect' ||
+        activeTool === 'select-ellipse' ||
+        activeTool === 'select-lasso' ||
+        activeTool === 'magic-wand';
+
+      if (isSelectionTool && (e.key === 'Shift' || e.key === 'Alt')) {
+        if (baseSelectionModeRef.current === null) {
+          baseSelectionModeRef.current = selectionSettings.mode;
+        }
+
+        const shiftKey = e.shiftKey || e.key === 'Shift';
+        const altKey = e.altKey || e.key === 'Alt';
+
+        let targetMode = baseSelectionModeRef.current;
+        if (shiftKey && altKey) {
+          targetMode = 'intersect';
+        } else if (altKey) {
+          targetMode = 'subtract';
+        } else if (shiftKey) {
+          targetMode = 'add';
+        }
+
+        if (selectionSettings.mode !== targetMode) {
+          onChangeSelectionSettings?.({ mode: targetMode });
+        }
+      }
+
+      if (e.key === 'Shift' || e.key === 'Alt') {
+        const pt = lastDocPtRef.current;
+        if (pt) {
+          const shiftKey = e.shiftKey || e.key === 'Shift';
+          const altKey = e.altKey || e.key === 'Alt';
+          if (isTransformTool && transformActiveHandleRef.current) {
+            updateTransformInteraction(pt, shiftKey, altKey);
+          } else if (activeVectorHandleRef.current) {
+            updateVectorHandleInteraction(pt, shiftKey, altKey);
+          } else if (isDrawingRef.current && dragStartPointRef.current) {
+            updateInitialDrawingDrag(pt, shiftKey, altKey);
+          }
+        }
+      }
+      if (e.key === 'Escape') {
+        if (isAnyVectorSessionActive) {
+          cancelActiveVectorSession();
+        } else if (engine.transformContentSession) {
+          engine.cancelTransformContent();
+          onCanvasModified();
+        } else if (engine.selectionManager.transformState) {
+          engine.selectionManager.cancelTransformSelection();
+          onCanvasModified();
+        } else if (engine.bucketSeedPoint) {
+          engine.restoreBucketInitialTiles();
+          engine.bucketSeedPoint = null;
+          onCanvasModified();
+        }
+      } else if (e.key === 'Enter') {
+        if (isAnyVectorSessionActive) {
+          commitActiveVectorSession();
+        } else if (engine.transformContentSession) {
+          engine.commitTransformContent();
+          onCanvasModified();
+        } else if (engine.selectionManager.transformState) {
+          engine.selectionManager.commitTransformSelection();
+          onCanvasModified();
+        } else if (engine.bucketSeedPoint) {
+          engine.commitPaintBucketSession();
+          onCanvasModified();
+        }
+      }
+    };
+
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.code === 'Space') {
+        setIsSpacePressed(false);
+      }
+      if (e.key === 'Shift') {
+        setIsShiftKeyDown(false);
+      }
+      if (e.key === 'Control' || e.key === 'Meta') {
+        setIsCtrlKeyDown(false);
+      }
+
+      const isSelectionTool =
+        activeTool === 'select-rect' ||
+        activeTool === 'select-ellipse' ||
+        activeTool === 'select-lasso' ||
+        activeTool === 'magic-wand';
+
+      if (isSelectionTool && (e.key === 'Shift' || e.key === 'Alt')) {
+        const shiftKey = e.key === 'Shift' ? false : e.shiftKey;
+        const altKey = e.key === 'Alt' ? false : e.altKey;
+
+        let targetMode = baseSelectionModeRef.current || 'replace';
+        if (shiftKey && altKey) {
+          targetMode = 'intersect';
+        } else if (altKey) {
+          targetMode = 'subtract';
+        } else if (shiftKey) {
+          targetMode = 'add';
+        } else {
+          targetMode = baseSelectionModeRef.current || 'replace';
+          baseSelectionModeRef.current = null;
+        }
+
+        if (selectionSettings.mode !== targetMode) {
+          onChangeSelectionSettings?.({ mode: targetMode });
+        }
+      }
+
+      if (e.key === 'Shift' || e.key === 'Alt') {
+        const pt = lastDocPtRef.current;
+        if (pt) {
+          const shiftKey = e.key === 'Shift' ? false : e.shiftKey;
+          const altKey = e.key === 'Alt' ? false : e.altKey;
+          if (isTransformTool && transformActiveHandleRef.current) {
+            updateTransformInteraction(pt, shiftKey, altKey);
+          } else if (activeVectorHandleRef.current) {
+            updateVectorHandleInteraction(pt, shiftKey, altKey);
+          } else if (isDrawingRef.current && dragStartPointRef.current) {
+            updateInitialDrawingDrag(pt, shiftKey, altKey);
+          }
+        }
+      }
+    };
+
+    const handleBlur = () => {
+      setIsSpacePressed(false);
+      setIsShiftKeyDown(false);
+      setIsCtrlKeyDown(false);
+      isSamplingPipetteRef.current = false;
+      if (baseSelectionModeRef.current !== null) {
+        onChangeSelectionSettings?.({ mode: baseSelectionModeRef.current });
+        baseSelectionModeRef.current = null;
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    window.addEventListener('blur', handleBlur);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+      window.removeEventListener('blur', handleBlur);
+    };
+  }, [
+    isSpacePressed,
+    isAnyVectorSessionActive,
+    isTransformTool,
+    commitActiveVectorSession,
+    cancelActiveVectorSession,
+    engine,
+    onCanvasModified,
+    updateTransformInteraction,
+    updateVectorHandleInteraction,
+    updateInitialDrawingDrag,
+    activeTool,
+    selectionSettings,
+    onChangeSelectionSettings,
+  ]);
+
+  // RENDEROWANIE NAKŁADKI: MASZERUJĄCE MRÓWKI, UCHWYTY TRANSFORMACJI, EDYCJA WEKTOROWA
   useEffect(() => {
     let animId: number;
 
@@ -605,11 +1788,8 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
           oCtx.scale(zoom, zoom);
           oCtx.translate(-engine.width / 2, -engine.height / 2);
 
-          // 1. MASZERUJĄCE MRÓWKI (Wektorowa ścieżka maski w 1px pikseli ekranu)
-          // Podczas manipulacji zawartością (trzymanie przycisku) nie renderujemy mrówek.
-          // Dopiero po puszczeniu przycisku myszy lub podczas manipulacji samym zaznaczeniem.
+          // 1. MASZERUJĄCE MRÓWKI DLA ZAZNACZENIA
           const isTransformingContentActive = activeTool === 'transform-content' && transformActiveHandle !== null;
-
           if (engine.selectionManager.hasActiveSelection && !isTransformingContentActive) {
             const time = performance.now();
             const dashOffset = (time / 60) % 8;
@@ -618,12 +1798,10 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
             oCtx.lineWidth = 1 / zoom;
             oCtx.setLineDash([4 / zoom, 4 / zoom]);
 
-            // Pass 1: Czarny
             oCtx.lineDashOffset = dashOffset / zoom;
             oCtx.strokeStyle = '#000000';
             oCtx.stroke(engine.selectionManager.contourPath);
 
-            // Pass 2: Biały
             oCtx.lineDashOffset = (dashOffset + 4) / zoom;
             oCtx.strokeStyle = '#ffffff';
             oCtx.stroke(engine.selectionManager.contourPath);
@@ -681,7 +1859,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
             oCtx.restore();
           }
 
-          // 3. UCHWYT MAGICZNEJ RÓŻDŻKI LUB WIADRA Z WODĄ
+          // 3. UCHWYT MAGICZNEJ RÓŻDŻKI LUB WIADRA
           const activeHandlePoint =
             activeTool === 'magic-wand'
               ? engine.selectionManager.wandSeedPoint
@@ -715,14 +1893,13 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
             oCtx.restore();
           }
 
-          // 3b. UCHWYTY WYPEŁNIENIA GRADIENTOWEGO (PUNKT 1 I PUNKT 2 ORAZ LINIA ŁĄCZĄCA)
+          // 4. UCHWYTY WYPEŁNIENIA GRADIENTOWEGO
           if (activeTool === 'gradient' && engine.gradientStartPoint && engine.gradientEndPoint) {
             const p0 = engine.gradientStartPoint;
             const p1 = engine.gradientEndPoint;
+            const mid = { x: (p0.x + p1.x) / 2, y: (p0.y + p1.y) / 2 };
 
             oCtx.save();
-
-            // Cień / obrys linii łączącej
             oCtx.lineWidth = 3 / zoom;
             oCtx.strokeStyle = 'rgba(0, 0, 0, 0.4)';
             oCtx.beginPath();
@@ -730,7 +1907,6 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
             oCtx.lineTo(p1.x, p1.y);
             oCtx.stroke();
 
-            // Linia główna
             oCtx.lineWidth = 1.5 / zoom;
             oCtx.strokeStyle = '#ffffff';
             oCtx.beginPath();
@@ -738,466 +1914,649 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
             oCtx.lineTo(p1.x, p1.y);
             oCtx.stroke();
 
-            // Przerywana linia kontrastowa
-            oCtx.setLineDash([4 / zoom, 3 / zoom]);
-            oCtx.strokeStyle = '#007acc';
-            oCtx.beginPath();
-            oCtx.moveTo(p0.x, p0.y);
-            oCtx.lineTo(p1.x, p1.y);
-            oCtx.stroke();
-            oCtx.setLineDash([]);
+            const drawHollowRing = (pt: SKPoint, isHover: boolean, rPx: number = 6) => {
+              const r = rPx / zoom;
+              oCtx.save();
+              // Zewnętrzny czarny obrys
+              oCtx.strokeStyle = '#000000';
+              oCtx.lineWidth = 2.5 / zoom;
+              oCtx.beginPath();
+              oCtx.arc(pt.x, pt.y, r, 0, Math.PI * 2);
+              oCtx.stroke();
+              // Wewnętrzny biały/błękitny obrys
+              oCtx.strokeStyle = isHover ? '#00e5ff' : '#ffffff';
+              oCtx.lineWidth = 1.2 / zoom;
+              oCtx.beginPath();
+              oCtx.arc(pt.x, pt.y, r, 0, Math.PI * 2);
+              oCtx.stroke();
+              oCtx.restore();
+            };
 
-            const c0 = gradientSettings.reverse ? secondaryColor : primaryColor;
-            const c1 = gradientSettings.reverse ? primaryColor : secondaryColor;
+            // P0 i P1 (rozmiar 6 tak jak w narzędziu linia)
+            drawHollowRing(p0, gradientHoverHandle === 0 || isDraggingGradientHandle === 0, 6);
+            drawHollowRing(p1, gradientHoverHandle === 1 || isDraggingGradientHandle === 1, 6);
 
-            // Uchwyt 0 (Start)
-            const r0 = (gradientHoverHandle === 0 || isDraggingGradientHandle === 0 ? 9 : 7) / zoom;
-            oCtx.fillStyle = `rgba(${c0.r}, ${c0.g}, ${c0.b}, ${c0.a / 255})`;
-            oCtx.strokeStyle = '#ffffff';
-            oCtx.lineWidth = 2.5 / zoom;
-            oCtx.beginPath();
-            oCtx.arc(p0.x, p0.y, r0, 0, Math.PI * 2);
-            oCtx.fill();
-            oCtx.stroke();
-            oCtx.strokeStyle = '#111111';
-            oCtx.lineWidth = 1 / zoom;
-            oCtx.stroke();
-
-            // Etykietka "1"
-            oCtx.font = `bold ${Math.max(8, 10 / zoom)}px sans-serif`;
-            oCtx.textAlign = 'center';
-            oCtx.textBaseline = 'middle';
-            oCtx.fillStyle = '#ffffff';
-            oCtx.strokeStyle = '#000000';
-            oCtx.lineWidth = 2 / zoom;
-            oCtx.strokeText('1', p0.x, p0.y - (r0 + 8 / zoom));
-            oCtx.fillText('1', p0.x, p0.y - (r0 + 8 / zoom));
-
-            // Uchwyt 1 (Koniec)
-            const r1 = (gradientHoverHandle === 1 || isDraggingGradientHandle === 1 ? 9 : 7) / zoom;
-            oCtx.fillStyle = `rgba(${c1.r}, ${c1.g}, ${c1.b}, ${c1.a / 255})`;
-            oCtx.strokeStyle = '#ffffff';
-            oCtx.lineWidth = 2.5 / zoom;
-            oCtx.beginPath();
-            oCtx.arc(p1.x, p1.y, r1, 0, Math.PI * 2);
-            oCtx.fill();
-            oCtx.stroke();
-            oCtx.strokeStyle = '#111111';
-            oCtx.lineWidth = 1 / zoom;
-            oCtx.stroke();
-
-            // Etykietka "2"
-            oCtx.font = `bold ${Math.max(8, 10 / zoom)}px sans-serif`;
-            oCtx.textAlign = 'center';
-            oCtx.textBaseline = 'middle';
-            oCtx.fillStyle = '#ffffff';
-            oCtx.strokeStyle = '#000000';
-            oCtx.lineWidth = 2 / zoom;
-            oCtx.strokeText('2', p1.x, p1.y - (r1 + 8 / zoom));
-            oCtx.fillText('2', p1.x, p1.y - (r1 + 8 / zoom));
+            // Środek (rozmiar 4 tak jak w narzędziu linia)
+            drawHollowRing(mid, gradientHoverHandle === 'move' || isDraggingGradientHandle === 'move', 4);
 
             oCtx.restore();
           }
 
-          oCtx.restore();
+          // 5. INTERFEJS EDYCJI LINII NA ŻYWO (P0, P1, ŚRODEK) - PUSTE ZNACZNIKI
+          if (activeVectorLineSession) {
+            const { p0, p1 } = activeVectorLineSession;
+            const mid: SKPoint = { x: (p0.x + p1.x) / 2, y: (p0.y + p1.y) / 2 };
 
-          // 4. RENDEROWANIE RAMKI I UCHWYTÓW NARZĘDZIA TRANSFORMACJI (ZAZNACZENIA LUB ZAWARTOŚCI) W PIKSELACH EKRANU
-          if (isTransformTool && engine.selectionManager.transformState) {
-            const geom = getTransformScreenGeometry();
-            if (geom) {
-              const sh = geom.screenHandles;
-              const isContent = activeTool === 'transform-content';
+            const drawHollowRing = (pt: SKPoint, isHover: boolean, rPx: number = 6) => {
+              const r = rPx / zoom;
               oCtx.save();
-
-              // Linia ramki (1px na ekranie, cyan dla zaznaczenia, złoty dla zawartości)
-              oCtx.lineWidth = 1;
-              oCtx.strokeStyle = isContent ? '#facc15' : '#00e5ff';
-              oCtx.setLineDash([4, 4]);
+              // Zewnętrzny czarny obrys
+              oCtx.strokeStyle = '#000000';
+              oCtx.lineWidth = 2.5 / zoom;
               oCtx.beginPath();
-              oCtx.moveTo(sh.nw.x, sh.nw.y);
-              oCtx.lineTo(sh.ne.x, sh.ne.y);
-              oCtx.lineTo(sh.se.x, sh.se.y);
-              oCtx.lineTo(sh.sw.x, sh.sw.y);
+              oCtx.arc(pt.x, pt.y, r, 0, Math.PI * 2);
+              oCtx.stroke();
+              // Wewnętrzny biały/błękitny obrys
+              oCtx.strokeStyle = isHover ? '#00e5ff' : '#ffffff';
+              oCtx.lineWidth = 1.2 / zoom;
+              oCtx.beginPath();
+              oCtx.arc(pt.x, pt.y, r, 0, Math.PI * 2);
+              oCtx.stroke();
+              oCtx.restore();
+            };
+
+            // P0 i P1
+            drawHollowRing(p0, hoverVectorHandle === 'p0', 6);
+            drawHollowRing(p1, hoverVectorHandle === 'p1', 6);
+
+            // Środek (przesuwanie)
+            drawHollowRing(mid, hoverVectorHandle === 'move', 4);
+          }
+
+          // 6. INTERFEJS EDYCJI KRZYWEJ BEZIERA NA ŻYWO (P0, P1, P2, P3, ŚRODEK) - PUSTE ZNACZNIKI
+          if (activeVectorBezierSession) {
+            const { p0, p1, p2, p3 } = activeVectorBezierSession;
+            const mid: SKPoint = { x: (p0.x + p3.x) / 2, y: (p0.y + p3.y) / 2 };
+
+            oCtx.save();
+
+            // Linie pomocnicze stycznych (P0-P1 oraz P3-P2)
+            oCtx.lineWidth = 1 / zoom;
+            oCtx.strokeStyle = 'rgba(168, 85, 247, 0.7)';
+            oCtx.setLineDash([3 / zoom, 3 / zoom]);
+
+            oCtx.beginPath();
+            oCtx.moveTo(p0.x, p0.y);
+            oCtx.lineTo(p1.x, p1.y);
+            oCtx.moveTo(p3.x, p3.y);
+            oCtx.lineTo(p2.x, p2.y);
+            oCtx.stroke();
+            oCtx.setLineDash([]);
+            oCtx.restore();
+
+            const drawHollowRing = (pt: SKPoint, isHover: boolean, rPx: number = 6) => {
+              const r = rPx / zoom;
+              oCtx.save();
+              oCtx.strokeStyle = '#000000';
+              oCtx.lineWidth = 2.5 / zoom;
+              oCtx.beginPath();
+              oCtx.arc(pt.x, pt.y, r, 0, Math.PI * 2);
+              oCtx.stroke();
+
+              oCtx.strokeStyle = isHover ? '#00e5ff' : '#ffffff';
+              oCtx.lineWidth = 1.2 / zoom;
+              oCtx.beginPath();
+              oCtx.arc(pt.x, pt.y, r, 0, Math.PI * 2);
+              oCtx.stroke();
+              oCtx.restore();
+            };
+
+            const drawHollowDiamond = (pt: SKPoint, isHover: boolean, rPx: number = 6) => {
+              const d = rPx / zoom;
+              oCtx.save();
+              oCtx.strokeStyle = '#000000';
+              oCtx.lineWidth = 2.5 / zoom;
+              oCtx.beginPath();
+              oCtx.moveTo(pt.x, pt.y - d);
+              oCtx.lineTo(pt.x + d, pt.y);
+              oCtx.lineTo(pt.x, pt.y + d);
+              oCtx.lineTo(pt.x - d, pt.y);
               oCtx.closePath();
               oCtx.stroke();
-              oCtx.setLineDash([]);
 
-              // 8 Uchwytów skalowania w pikselach ekranu (8x8 px)
-              const handleSize = 8;
-              const handleKeys = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'] as const;
+              oCtx.strokeStyle = isHover ? '#00e5ff' : '#a855f7';
+              oCtx.lineWidth = 1.2 / zoom;
+              oCtx.beginPath();
+              oCtx.moveTo(pt.x, pt.y - d);
+              oCtx.lineTo(pt.x + d, pt.y);
+              oCtx.lineTo(pt.x, pt.y + d);
+              oCtx.lineTo(pt.x - d, pt.y);
+              oCtx.closePath();
+              oCtx.stroke();
+              oCtx.restore();
+            };
 
-              for (const hk of handleKeys) {
-                const pt = sh[hk];
-                oCtx.fillStyle = '#ffffff';
-                oCtx.strokeStyle = isContent ? '#854d0e' : '#003344';
-                oCtx.lineWidth = 1.5;
+            // P0 i P3 (kotwice - puste okręgi)
+            drawHollowRing(p0, hoverVectorHandle === 'p0', 6);
+            drawHollowRing(p3, hoverVectorHandle === 'p3', 6);
 
-                oCtx.fillRect(pt.x - handleSize / 2, pt.y - handleSize / 2, handleSize, handleSize);
-                oCtx.strokeRect(pt.x - handleSize / 2, pt.y - handleSize / 2, handleSize, handleSize);
-              }
+            // P1 i P2 (uchwyty kontrolne - puste romby)
+            drawHollowDiamond(p1, hoverVectorHandle === 'p1', 6);
+            drawHollowDiamond(p2, hoverVectorHandle === 'p2', 6);
 
-              // Środek ciężkości (Pivot / Center of Rotation)
-              const pv = geom.pivotScreen;
-              oCtx.fillStyle = isContent ? '#facc15' : '#00e5ff';
-              oCtx.strokeStyle = '#ffffff';
-              oCtx.lineWidth = 1.5;
+            // Środek
+            drawHollowRing(mid, hoverVectorHandle === 'move', 4);
+          }
+
+          // 7. INTERFEJS EDYCJI FIGURY NA ŻYWO (RAMKA, 8 UCHWYTÓW, OBRÓT, MODYFIKATOR)
+          if (activeVectorShapeSession) {
+            const sess = activeVectorShapeSession;
+            const cos = Math.cos(sess.angle);
+            const sin = Math.sin(sess.angle);
+
+            oCtx.save();
+
+            // Ramka obwiedni (Bounding box)
+            oCtx.translate(sess.center.x, sess.center.y);
+            oCtx.rotate(sess.angle);
+
+            oCtx.lineWidth = 1 / zoom;
+            oCtx.strokeStyle = 'rgba(0, 122, 204, 0.9)';
+            oCtx.strokeRect(-sess.width / 2, -sess.height / 2, sess.width, sess.height);
+
+            oCtx.lineWidth = 1 / zoom;
+            oCtx.setLineDash([4 / zoom, 4 / zoom]);
+            oCtx.strokeStyle = '#ffffff';
+            oCtx.strokeRect(-sess.width / 2, -sess.height / 2, sess.width, sess.height);
+            oCtx.setLineDash([]);
+
+            // Uchwyt obrotu (ramię + koło)
+            const rotStem = 22 / zoom;
+            oCtx.strokeStyle = '#007acc';
+            oCtx.lineWidth = 1.5 / zoom;
+            oCtx.beginPath();
+            oCtx.moveTo(0, -sess.height / 2);
+            oCtx.lineTo(0, -sess.height / 2 - rotStem);
+            oCtx.stroke();
+
+            oCtx.fillStyle = hoverVectorHandle === 'rotate' ? '#00e5ff' : '#ffffff';
+            oCtx.strokeStyle = '#007acc';
+            oCtx.lineWidth = 2 / zoom;
+            oCtx.beginPath();
+            oCtx.arc(0, -sess.height / 2 - rotStem, 5.5 / zoom, 0, Math.PI * 2);
+            oCtx.fill();
+            oCtx.stroke();
+
+            // 8 Uchwytów skalowania
+            const handleSize = 7 / zoom;
+            const localCoords: Record<string, { u: number; v: number }> = {
+              nw: { u: -0.5, v: -0.5 },
+              n: { u: 0, v: -0.5 },
+              ne: { u: 0.5, v: -0.5 },
+              e: { u: 0.5, v: 0 },
+              se: { u: 0.5, v: 0.5 },
+              s: { u: 0, v: 0.5 },
+              sw: { u: -0.5, v: 0.5 },
+              w: { u: -0.5, v: 0 },
+            };
+
+            for (const [key, lc] of Object.entries(localCoords)) {
+              const hx = lc.u * sess.width - handleSize / 2;
+              const hy = lc.v * sess.height - handleSize / 2;
+              const isHover = hoverVectorHandle === key;
+
+              oCtx.fillStyle = isHover ? '#00e5ff' : '#ffffff';
+              oCtx.strokeStyle = '#007acc';
+              oCtx.lineWidth = 1.5 / zoom;
+              oCtx.fillRect(hx, hy, handleSize, handleSize);
+              oCtx.strokeRect(hx, hy, handleSize, handleSize);
+            }
+
+            oCtx.restore();
+
+            // 8. ŻÓŁTY PUNKT MODYFIKATORA (TYLKO DLA FIGUR, KTÓRE GO MAJĄ)
+            if (hasShapeModifier(vectorShapeSettings.shapeKind)) {
+              const modDoc = getShapeModifierDocPoint(sess, vectorShapeSettings);
+              const modR = 7 / zoom;
+              const isModHover = hoverVectorHandle === 'modifier';
+
+              oCtx.save();
+              oCtx.fillStyle = isModHover ? '#ffe600' : '#ffb703';
+              oCtx.strokeStyle = '#1e1e1e';
+              oCtx.lineWidth = 2 / zoom;
+              oCtx.shadowColor = 'rgba(255, 183, 3, 0.6)';
+              oCtx.shadowBlur = 8 / zoom;
 
               oCtx.beginPath();
-              oCtx.arc(pv.x, pv.y, 4.5, 0, Math.PI * 2);
+              oCtx.arc(modDoc.x, modDoc.y, modR, 0, Math.PI * 2);
               oCtx.fill();
               oCtx.stroke();
 
-              // Krzyżyk celownika w środku ciężkości
-              oCtx.strokeStyle = '#000000';
-              oCtx.lineWidth = 1;
+              oCtx.shadowColor = 'transparent';
+              oCtx.fillStyle = '#ffffff';
               oCtx.beginPath();
-              oCtx.moveTo(pv.x - 7, pv.y);
-              oCtx.lineTo(pv.x + 7, pv.y);
-              oCtx.moveTo(pv.x, pv.y - 7);
-              oCtx.lineTo(pv.x, pv.y + 7);
-              oCtx.stroke();
+              oCtx.arc(modDoc.x, modDoc.y, modR * 0.4, 0, Math.PI * 2);
+              oCtx.fill();
 
-              // Wyświetlanie etykietki kąta obrotu w czasie rzeczywistym
-              if (
-                transformActiveHandle &&
-                transformActiveHandle.startsWith('rotate') &&
-                cursorPosRef.current
-              ) {
-                const curRad = engine.selectionManager.transformState.angle;
-                let curDeg = (((curRad * 180) / Math.PI) % 360 + 360) % 360;
-                if (curDeg > 180) curDeg -= 360;
-                const angleText = `Kąt: ${curDeg.toFixed(1)}°`;
+              // Drugi uchwyt modyfikatora dla strzałki (grubość trzonu)
+              if (vectorShapeSettings.shapeKind === 'arrow') {
+                const shaftDoc = getArrowShaftModifierDocPoint(sess, vectorShapeSettings);
+                const isShaftHover = hoverVectorHandle === 'modifier-shaft';
 
-                const tx = cursorPosRef.current.x + 16;
-                const ty = cursorPosRef.current.y + 16;
+                oCtx.fillStyle = isShaftHover ? '#ffe600' : '#ffb703';
+                oCtx.strokeStyle = '#1e1e1e';
+                oCtx.lineWidth = 2 / zoom;
+                oCtx.shadowColor = 'rgba(255, 183, 3, 0.6)';
+                oCtx.shadowBlur = 8 / zoom;
 
-                oCtx.save();
-                oCtx.font = '11px sans-serif';
-                const textMetrics = oCtx.measureText(angleText);
-                const padW = textMetrics.width + 12;
-                const padH = 20;
-
-                oCtx.fillStyle = 'rgba(24, 24, 24, 0.9)';
-                oCtx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
-                oCtx.lineWidth = 1;
                 oCtx.beginPath();
-                if (typeof oCtx.roundRect === 'function') {
-                  oCtx.roundRect(tx, ty, padW, padH, 4);
-                } else {
-                  oCtx.rect(tx, ty, padW, padH);
-                }
+                oCtx.arc(shaftDoc.x, shaftDoc.y, modR, 0, Math.PI * 2);
                 oCtx.fill();
                 oCtx.stroke();
 
+                oCtx.shadowColor = 'transparent';
                 oCtx.fillStyle = '#ffffff';
-                oCtx.textBaseline = 'middle';
-                oCtx.textAlign = 'left';
-                oCtx.fillText(angleText, tx + 6, ty + padH / 2);
-                oCtx.restore();
+                oCtx.beginPath();
+                oCtx.arc(shaftDoc.x, shaftDoc.y, modR * 0.4, 0, Math.PI * 2);
+                oCtx.fill();
               }
 
               oCtx.restore();
             }
           }
-        }
 
-        // 5. OBRYS PĘDZLA I GUMKI (3 PIERŚCIENIE WOKÓŁ KURSORA: BIAŁY, CZARNY, BIAŁY)
-        if (oCtx && (activeTool === 'brush' || activeTool === 'eraser') && cursorPosRef.current) {
-          const { x, y } = cursorPosRef.current;
-          const radius = (brushSettings.size / 2) * zoom;
-
-          oCtx.save();
-
-          // Kółko 1 (Zewnętrzne) - Białe 1px
-          oCtx.strokeStyle = 'rgba(255, 255, 255, 0.9)';
-          oCtx.lineWidth = 1;
-          oCtx.beginPath();
-          oCtx.arc(x, y, radius + 1, 0, Math.PI * 2);
-          oCtx.stroke();
-
-          // Kółko 2 (Środkowe) - Czarne 1px
-          oCtx.strokeStyle = 'rgba(0, 0, 0, 0.95)';
-          oCtx.lineWidth = 1;
-          oCtx.beginPath();
-          oCtx.arc(x, y, Math.max(1, radius), 0, Math.PI * 2);
-          oCtx.stroke();
-
-          // Kółko 3 (Wewnętrzne) - Białe 1px
-          if (radius > 1.5) {
-            oCtx.strokeStyle = 'rgba(255, 255, 255, 0.9)';
-            oCtx.lineWidth = 1;
-            oCtx.beginPath();
-            oCtx.arc(x, y, Math.max(0.5, radius - 1), 0, Math.PI * 2);
-            oCtx.stroke();
-          }
-
-          // Mały celownik 1px w środeczku dla idealnej precyzji
-          oCtx.strokeStyle = 'rgba(255, 255, 255, 0.9)';
-          oCtx.lineWidth = 1;
-          oCtx.beginPath();
-          oCtx.moveTo(x - 3, y);
-          oCtx.lineTo(x + 3, y);
-          oCtx.moveTo(x, y - 3);
-          oCtx.lineTo(x, y + 3);
-          oCtx.stroke();
-
-          oCtx.strokeStyle = 'rgba(0, 0, 0, 0.95)';
-          oCtx.beginPath();
-          oCtx.moveTo(x - 1, y);
-          oCtx.lineTo(x + 1, y);
-          oCtx.moveTo(x, y - 1);
-          oCtx.lineTo(x, y + 1);
-          oCtx.stroke();
-
-          oCtx.restore();
-        }
-
-        // 6. PIPETA: CELOWNIK, OBSZAR ZBIERANIA ORAZ OKRĄGŁA LUPA PRZYBLIŻENIA
-        if (oCtx && activeTool === 'pipette' && cursorPosRef.current) {
-          const { x, y } = cursorPosRef.current;
-          const pSettings = pipetteSettings || { sampleSource: 'image', sampleDiameter: 1, showLoupe: true };
-          const diameter = pSettings.sampleDiameter || 1;
-          const sampleSource = pSettings.sampleSource || 'image';
-
-          // Przelicz współrzędne ekranowe na współrzędne dokumentu
-          const screenCenterX = cWidth / 2 + panOffset.x;
-          const screenCenterY = cHeight / 2 + panOffset.y;
-          const docX = (x - screenCenterX) / zoom + engine.width / 2;
-          const docY = (y - screenCenterY) / zoom + engine.height / 2;
-
-          const isInsideDoc = docX >= 0 && docX < engine.width && docY >= 0 && docY < engine.height;
-
-          // 1. Obrys obszaru zbierania na samym płótnie
-          oCtx.save();
-          if (diameter > 1) {
-            const screenR = (diameter / 2) * zoom;
-            // Zewnętrzne kółko 1px białe
-            oCtx.strokeStyle = 'rgba(255, 255, 255, 0.9)';
-            oCtx.lineWidth = 1;
-            oCtx.beginPath();
-            oCtx.arc(x, y, screenR + 1, 0, Math.PI * 2);
-            oCtx.stroke();
-
-            // Środkowe kółko 1px czarne
-            oCtx.strokeStyle = 'rgba(0, 0, 0, 0.95)';
-            oCtx.lineWidth = 1;
-            oCtx.beginPath();
-            oCtx.arc(x, y, screenR, 0, Math.PI * 2);
-            oCtx.stroke();
-
-            // Wewnętrzne kółko 1px białe
-            if (screenR > 1.5) {
-              oCtx.strokeStyle = 'rgba(255, 255, 255, 0.9)';
-              oCtx.lineWidth = 1;
-              oCtx.beginPath();
-              oCtx.arc(x, y, Math.max(0.5, screenR - 1), 0, Math.PI * 2);
-              oCtx.stroke();
-            }
-          }
-
-          // Precyzyjny krzyżyk celownika pipety w punkcie kliknięcia (biało-czarny)
-          oCtx.strokeStyle = 'rgba(255, 255, 255, 0.9)';
-          oCtx.lineWidth = 1;
-          oCtx.beginPath();
-          oCtx.moveTo(x - 6, y);
-          oCtx.lineTo(x + 6, y);
-          oCtx.moveTo(x, y - 6);
-          oCtx.lineTo(x + 6, y);
-          oCtx.stroke();
-
-          oCtx.strokeStyle = 'rgba(0, 0, 0, 0.95)';
-          oCtx.beginPath();
-          oCtx.moveTo(x - 3, y);
-          oCtx.lineTo(x + 3, y);
-          oCtx.moveTo(x, y - 3);
-          oCtx.lineTo(x, y + 3);
-          oCtx.stroke();
-          oCtx.restore();
-
-          // 2. Okrągły obszar przybliżenia (Lupa)
-          if (pSettings.showLoupe && isInsideDoc) {
-            const currentLiveColor = engine.pickColor(docX, docY, sampleSource, diameter);
-            const outerR = 54;
-            const innerR = 40;
-
-            // Ustal pozycję lupy (domyślnie pod kursorem o 72px)
-            let loupeX = x;
-            let loupeY = y + 72;
-            let isFlippedAbove = false;
-            // Jeśli kursor jest nisko obszaru rysowania, przenieś lupę nad kursor
-            if (loupeY + outerR + 26 > cHeight) {
-              loupeY = y - 72;
-              isFlippedAbove = true;
-            }
-            if (loupeX - outerR < 15) loupeX = 15 + outerR;
-            if (loupeX + outerR > cWidth - 15) loupeX = cWidth - 15 - outerR;
-
+          // 7b. PODGLĄD LINII PROSTEJ SHIFT+KLIK DLA PĘDZLA I GUMKI
+          if (
+            (activeTool === 'brush' || activeTool === 'eraser') &&
+            isShiftKeyDown &&
+            !isQuickPipetteActive &&
+            lastBrushStrokeDocPointRef.current &&
+            lastDocPtRef.current &&
+            !isDrawing
+          ) {
+            const p0 = lastBrushStrokeDocPointRef.current;
+            const p1 = lastDocPtRef.current;
             oCtx.save();
-
-            // Wskaźnik łączący lupę z punktem pobierania
-            oCtx.strokeStyle = 'rgba(0, 0, 0, 0.45)';
-            oCtx.lineWidth = 1.5;
+            oCtx.setLineDash([4 / zoom, 4 / zoom]);
+            oCtx.strokeStyle = activeTool === 'eraser' ? 'rgba(239, 68, 68, 0.85)' : 'rgba(59, 130, 246, 0.85)';
+            oCtx.lineWidth = Math.max(1, Math.min(3, brushSettings.size / 6)) / zoom;
             oCtx.beginPath();
-            oCtx.moveTo(loupeX, isFlippedAbove ? loupeY + outerR : loupeY - outerR);
-            oCtx.lineTo(x, y);
+            oCtx.moveTo(p0.x, p0.y);
+            oCtx.lineTo(p1.x, p1.y);
             oCtx.stroke();
 
-            // Cień lupy
-            oCtx.shadowColor = 'rgba(0, 0, 0, 0.45)';
-            oCtx.shadowBlur = 12;
-            oCtx.shadowOffsetY = 4;
+            // Znacznik punktu początkowego (identyczny jak w narzędziu "linia" - puste kółko z podwójnym obrysem)
+            oCtx.setLineDash([]);
+            const r = 6 / zoom;
+            // Zewnętrzny czarny obrys
+            oCtx.strokeStyle = '#000000';
+            oCtx.lineWidth = 2.5 / zoom;
             oCtx.beginPath();
-            oCtx.arc(loupeX, loupeY, outerR, 0, Math.PI * 2);
-            oCtx.fillStyle = '#222222';
-            oCtx.fill();
-            oCtx.shadowColor = 'transparent';
-
-            // Wycinek przybliżonego obrazu (17x17 px)
-            const sampleBoxSize = 17;
-            const loupeSampleCanvas = engine.getLoupeSampleCanvas(docX, docY, sampleBoxSize, sampleSource);
-            const zoomAreaDiameter = innerR * 2;
-
-            // Obrys okrągłego otworu lupy (clipping mask)
-            oCtx.save();
-            oCtx.beginPath();
-            oCtx.arc(loupeX, loupeY, innerR, 0, Math.PI * 2);
-            oCtx.clip();
-
-            oCtx.imageSmoothingEnabled = false;
-            oCtx.drawImage(
-              loupeSampleCanvas,
-              0, 0, sampleBoxSize, sampleBoxSize,
-              loupeX - innerR, loupeY - innerR, zoomAreaDiameter, zoomAreaDiameter
-            );
-
-            // Siatka pikseli wewnątrz powiększenia
-            const pixelStep = zoomAreaDiameter / sampleBoxSize;
-            oCtx.lineWidth = 0.5;
-            oCtx.strokeStyle = 'rgba(0, 0, 0, 0.15)';
-            for (let i = 0; i <= sampleBoxSize; i++) {
-              const pos = loupeX - innerR + i * pixelStep;
-              oCtx.beginPath();
-              oCtx.moveTo(pos, loupeY - innerR);
-              oCtx.lineTo(pos, loupeY + innerR);
-              oCtx.stroke();
-
-              const posY = loupeY - innerR + i * pixelStep;
-              oCtx.beginPath();
-              oCtx.moveTo(loupeX - innerR, posY);
-              oCtx.lineTo(loupeX + innerR, posY);
-              oCtx.stroke();
-            }
-
-            // Oznaczenie obszaru zbierania w lupie
-            if (diameter > 1) {
-              const loupeR = (diameter / 2) * pixelStep;
-              oCtx.lineWidth = 2;
-              oCtx.strokeStyle = '#000000';
-              oCtx.beginPath();
-              oCtx.arc(loupeX, loupeY, loupeR, 0, Math.PI * 2);
-              oCtx.stroke();
-
-              oCtx.lineWidth = 1;
-              oCtx.strokeStyle = '#ffffff';
-              oCtx.beginPath();
-              oCtx.arc(loupeX, loupeY, loupeR, 0, Math.PI * 2);
-              oCtx.stroke();
-            } else {
-              // Wyróżnienie centralnego pojedynczego piksela
-              const centerLeft = loupeX - pixelStep / 2;
-              const centerTop = loupeY - pixelStep / 2;
-              oCtx.lineWidth = 1.5;
-              oCtx.strokeStyle = '#00e5ff';
-              oCtx.strokeRect(centerLeft, centerTop, pixelStep, pixelStep);
-            }
-
-            // Celownik w centrum lupy
-            oCtx.strokeStyle = 'rgba(0, 0, 0, 0.8)';
-            oCtx.lineWidth = 1;
-            oCtx.beginPath();
-            oCtx.moveTo(loupeX - 4, loupeY);
-            oCtx.lineTo(loupeX + 4, loupeY);
-            oCtx.moveTo(loupeX, loupeY - 4);
-            oCtx.lineTo(loupeX, loupeY + 4);
+            oCtx.arc(p0.x, p0.y, r, 0, Math.PI * 2);
             oCtx.stroke();
-
-            oCtx.restore(); // Koniec clip aperture
-
-            // Pierścień próbnika kolorów (Annulus od innerR do outerR)
-            // Górna połowa: Nowo pobierany kolor
-            oCtx.save();
-            oCtx.beginPath();
-            oCtx.arc(loupeX, loupeY, outerR, Math.PI, 0, false);
-            oCtx.arc(loupeX, loupeY, innerR, 0, Math.PI, true);
-            oCtx.closePath();
-            oCtx.fillStyle = skColorToRgbaString(currentLiveColor);
-            oCtx.fill();
-
-            // Dolna połowa: Poprzedni bieżący kolor podstawowy
-            const prevColor = primaryColor || { r: 0, g: 0, b: 0, a: 255 };
-            oCtx.beginPath();
-            oCtx.arc(loupeX, loupeY, outerR, 0, Math.PI, false);
-            oCtx.arc(loupeX, loupeY, innerR, Math.PI, 0, true);
-            oCtx.closePath();
-            oCtx.fillStyle = skColorToRgbaString(prevColor);
-            oCtx.fill();
-
-            // Poziome linie podziału po lewej i prawej stronie pierścienia
-            oCtx.strokeStyle = '#222222';
-            oCtx.lineWidth = 1.5;
-            oCtx.beginPath();
-            oCtx.moveTo(loupeX - outerR, loupeY);
-            oCtx.lineTo(loupeX - innerR, loupeY);
-            oCtx.moveTo(loupeX + innerR, loupeY);
-            oCtx.lineTo(loupeX + outerR, loupeY);
-            oCtx.stroke();
-
-            // Krawędzie pierścienia (zewnętrzna i wewnętrzna)
-            oCtx.lineWidth = 1.5;
+            // Wewnętrzny biały obrys
             oCtx.strokeStyle = '#ffffff';
+            oCtx.lineWidth = 1.2 / zoom;
             oCtx.beginPath();
-            oCtx.arc(loupeX, loupeY, outerR, 0, Math.PI * 2);
+            oCtx.arc(p0.x, p0.y, r, 0, Math.PI * 2);
             oCtx.stroke();
-
-            oCtx.strokeStyle = '#1e1e1e';
-            oCtx.lineWidth = 1;
-            oCtx.beginPath();
-            oCtx.arc(loupeX, loupeY, outerR + 1, 0, Math.PI * 2);
-            oCtx.stroke();
-
-            oCtx.strokeStyle = '#ffffff';
-            oCtx.lineWidth = 1.5;
-            oCtx.beginPath();
-            oCtx.arc(loupeX, loupeY, innerR, 0, Math.PI * 2);
-            oCtx.stroke();
-
-            // Etykieta HEX i RGB pod lupą
-            const hex = skColorToHex(currentLiveColor);
-            const labelText = `${hex} (${currentLiveColor.r}, ${currentLiveColor.g}, ${currentLiveColor.b})`;
-            oCtx.font = '10px monospace';
-            const textWidth = oCtx.measureText(labelText).width;
-            const badgeW = textWidth + 12;
-            const badgeH = 18;
-            const badgeY = isFlippedAbove ? loupeY - outerR - 22 : loupeY + outerR + 6;
-
-            oCtx.fillStyle = 'rgba(26, 26, 26, 0.9)';
-            oCtx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
-            oCtx.lineWidth = 1;
-            oCtx.beginPath();
-            if (typeof oCtx.roundRect === 'function') {
-              oCtx.roundRect(loupeX - badgeW / 2, badgeY, badgeW, badgeH, 4);
-            } else {
-              oCtx.rect(loupeX - badgeW / 2, badgeY, badgeW, badgeH);
-            }
-            oCtx.fill();
-            oCtx.stroke();
-
-            oCtx.fillStyle = '#ffffff';
-            oCtx.textAlign = 'center';
-            oCtx.textBaseline = 'middle';
-            oCtx.fillText(labelText, loupeX, badgeY + badgeH / 2);
 
             oCtx.restore();
+          }
+
+          // 8. INTERFEJS PRZEKSZTAŁCANIA ZAZNACZENIA / ZAWARTOŚCI NA ŻYWO (RAMKA, 8 UCHWYTÓW, PIVOT)
+          if (isTransformTool && engine.selectionManager.transformState) {
+            const st = engine.selectionManager.transformState;
+            oCtx.save();
+
+            // Przesunięcie i obrót do środka i kąta transformacji
+            oCtx.translate(st.pos.x, st.pos.y);
+            oCtx.rotate(st.angle);
+
+            // Podwójna ramka obwiedni (Bounding box): niebieska + biała przerywana
+            oCtx.lineWidth = 1.2 / zoom;
+            oCtx.strokeStyle = '#007acc';
+            oCtx.strokeRect(-st.width / 2, -st.height / 2, st.width, st.height);
+
+            oCtx.lineWidth = 1 / zoom;
+            oCtx.setLineDash([4 / zoom, 4 / zoom]);
+            oCtx.strokeStyle = '#ffffff';
+            oCtx.strokeRect(-st.width / 2, -st.height / 2, st.width, st.height);
+            oCtx.setLineDash([]);
+
+            // Uchwyt obrotu na górze (ramię + koło, identyczny jak dla figur)
+            const rotStem = 22 / zoom;
+            oCtx.strokeStyle = '#007acc';
+            oCtx.lineWidth = 1.5 / zoom;
+            oCtx.beginPath();
+            oCtx.moveTo(0, -st.height / 2);
+            oCtx.lineTo(0, -st.height / 2 - rotStem);
+            oCtx.stroke();
+
+            const isRotateHover = transformHoverHandle === 'rotate' || transformActiveHandle === 'rotate';
+            oCtx.fillStyle = isRotateHover ? '#00e5ff' : '#ffffff';
+            oCtx.strokeStyle = '#007acc';
+            oCtx.lineWidth = 2 / zoom;
+            oCtx.beginPath();
+            oCtx.arc(0, -st.height / 2 - rotStem, 5.5 / zoom, 0, Math.PI * 2);
+            oCtx.fill();
+            oCtx.stroke();
+
+            // 8 Uchwytów skalowania na krawędziach i narożnikach
+            const handleSize = 8 / zoom;
+            const localCoords: Record<string, { u: number; v: number }> = {
+              nw: { u: -0.5, v: -0.5 },
+              n: { u: 0, v: -0.5 },
+              ne: { u: 0.5, v: -0.5 },
+              e: { u: 0.5, v: 0 },
+              se: { u: 0.5, v: 0.5 },
+              s: { u: 0, v: 0.5 },
+              sw: { u: -0.5, v: 0.5 },
+              w: { u: -0.5, v: 0 },
+            };
+
+            for (const [key, lc] of Object.entries(localCoords)) {
+              const hx = lc.u * st.width - handleSize / 2;
+              const hy = lc.v * st.height - handleSize / 2;
+              const isHover = transformHoverHandle === key || transformActiveHandle === key;
+
+              oCtx.fillStyle = isHover ? '#00e5ff' : '#ffffff';
+              oCtx.strokeStyle = '#000000';
+              oCtx.lineWidth = 1.5 / zoom;
+              oCtx.fillRect(hx, hy, handleSize, handleSize);
+              oCtx.strokeRect(hx, hy, handleSize, handleSize);
+
+              oCtx.strokeStyle = isHover ? '#007acc' : '#555555';
+              oCtx.lineWidth = 1 / zoom;
+              oCtx.strokeRect(hx, hy, handleSize, handleSize);
+            }
+
+            // Punkt obrotu / Pivot (celownik)
+            const cos = Math.cos(st.angle);
+            const sin = Math.sin(st.angle);
+            const pdx = st.pivot.x - st.pos.x;
+            const pdy = st.pivot.y - st.pos.y;
+            const plx = pdx * cos + pdy * sin;
+            const ply = -pdx * sin + pdy * cos;
+            const isPivotHover = transformHoverHandle === 'pivot' || transformActiveHandle === 'pivot';
+            const pr = 5 / zoom;
+
+            oCtx.fillStyle = isPivotHover ? '#ffeb3b' : 'rgba(255, 255, 255, 0.9)';
+            oCtx.strokeStyle = '#000000';
+            oCtx.lineWidth = 1.5 / zoom;
+            oCtx.beginPath();
+            oCtx.arc(plx, ply, pr, 0, Math.PI * 2);
+            oCtx.fill();
+            oCtx.stroke();
+
+            // Krzyżyk w środku pivotu
+            oCtx.strokeStyle = '#007acc';
+            oCtx.lineWidth = 1 / zoom;
+            oCtx.beginPath();
+            oCtx.moveTo(plx - pr - 2 / zoom, ply);
+            oCtx.lineTo(plx + pr + 2 / zoom, ply);
+            oCtx.moveTo(plx, ply - pr - 2 / zoom);
+            oCtx.lineTo(plx, ply + pr + 2 / zoom);
+            oCtx.stroke();
+
+            oCtx.restore();
+          }
+
+          oCtx.restore();
+
+          // 9. KURSOR OKRĘGU I PLUSIKA DLA PĘDZLA I GUMKI (W PRZESTRZENI EKRANU)
+          if (
+            cursorPosRef.current &&
+            (activeTool === 'brush' || activeTool === 'eraser') &&
+            !isQuickPipetteActive
+          ) {
+            const { x: cx, y: cy } = cursorPosRef.current;
+            const brushRadiusScreen = (brushSettings.size / 2) * zoom;
+            oCtx.save();
+
+            // Okrągły obrys pędzla
+            if (brushRadiusScreen >= 1.5) {
+              oCtx.strokeStyle = 'rgba(0, 0, 0, 0.6)';
+              oCtx.lineWidth = 2.5;
+              oCtx.beginPath();
+              oCtx.arc(cx, cy, brushRadiusScreen, 0, Math.PI * 2);
+              oCtx.stroke();
+
+              oCtx.strokeStyle = '#ffffff';
+              oCtx.lineWidth = 1.2;
+              oCtx.beginPath();
+              oCtx.arc(cx, cy, brushRadiusScreen, 0, Math.PI * 2);
+              oCtx.stroke();
+            }
+
+            // Idealnie ostry, dopasowany do siatki pikseli czarny plusik 1px z białym obramowaniem 1px
+            const ix = Math.round(cx);
+            const iy = Math.round(cy);
+            const arm = 4; // długość ramienia w px (łączna rozpiętość 9px)
+
+            // 1. Białe obramowanie 1px (podkład)
+            oCtx.fillStyle = '#ffffff';
+            oCtx.fillRect(ix - arm - 1, iy - 1, arm * 2 + 3, 3);
+            oCtx.fillRect(ix - 1, iy - arm - 1, 3, arm * 2 + 3);
+
+            // 2. Czarny plusik 1px w środku
+            oCtx.fillStyle = '#000000';
+            oCtx.fillRect(ix - arm, iy, arm * 2 + 1, 1);
+            oCtx.fillRect(ix, iy - arm, 1, arm * 2 + 1);
+
+            oCtx.restore();
+          }
+
+          // 9b. KURSOR I MODYFIKATOR DLA NARZĘDZI ZAZNACZANIA (W PRZESTRZENI EKRANU)
+          const isSelectionTool =
+            activeTool === 'select-rect' ||
+            activeTool === 'select-ellipse' ||
+            activeTool === 'select-lasso' ||
+            activeTool === 'magic-wand';
+
+          if (cursorPosRef.current && isSelectionTool) {
+            const { x: cx, y: cy } = cursorPosRef.current;
+            oCtx.save();
+
+            // Rysujemy identyczny plusik jak dla pędzla
+            const ix = Math.round(cx);
+            const iy = Math.round(cy);
+            const arm = 4; // długość ramienia w px (rozpiętość 9px)
+
+            // 1. Białe obramowanie 1px (podkład)
+            oCtx.fillStyle = '#ffffff';
+            oCtx.fillRect(ix - arm - 1, iy - 1, arm * 2 + 3, 3);
+            oCtx.fillRect(ix - 1, iy - arm - 1, 3, arm * 2 + 3);
+
+            // 2. Czarny plusik 1px w środku
+            oCtx.fillStyle = '#000000';
+            oCtx.fillRect(ix - arm, iy, arm * 2 + 1, 1);
+            oCtx.fillRect(ix, iy - arm, 1, arm * 2 + 1);
+
+            // 3. Rysujemy modyfikator obok plusika (+ / - / ∩)
+            const mode = selectionSettings.mode;
+            let badge = '';
+            if (mode === 'add') badge = '+';
+            else if (mode === 'subtract') badge = '-';
+            else if (mode === 'intersect') badge = '∩';
+
+            if (badge) {
+              const bx = ix + 7;
+              const by = iy + 4;
+              const size = 9; // 9x9 pixels
+
+              // 1. Biały kwadracik (podkład)
+              oCtx.fillStyle = '#ffffff';
+              oCtx.fillRect(bx, by, size, size);
+
+              // 2. Czarna ramka 1px wokół kwadracika
+              oCtx.strokeStyle = '#000000';
+              oCtx.lineWidth = 1;
+              oCtx.strokeRect(bx + 0.5, by + 0.5, size - 1, size - 1);
+
+              // 3. Czarny pixel-art symbol wewnątrz kwadracika (absolutnie ostry, 0% rozmycia)
+              oCtx.fillStyle = '#000000';
+
+              if (badge === '+') {
+                // Pionowa kreska: szerokość 1px, wysokość 5px
+                oCtx.fillRect(bx + 4, by + 2, 1, 5);
+                // Pozioma kreska: szerokość 5px, wysokość 1px
+                oCtx.fillRect(bx + 2, by + 4, 5, 1);
+              } else if (badge === '-') {
+                // Pozioma kreska: szerokość 5px, wysokość 1px
+                oCtx.fillRect(bx + 2, by + 4, 5, 1);
+              } else if (badge === '∩') {
+                // Kształt przecięcia (∩) o szerokości 5px i wysokości 5px
+                oCtx.fillRect(bx + 2, by + 4, 1, 3); // Lewa nóżka
+                oCtx.fillRect(bx + 6, by + 4, 1, 3); // Prawa nóżka
+                oCtx.fillRect(bx + 3, by + 2, 3, 1); // Górna pozioma
+                oCtx.fillRect(bx + 2, by + 3, 1, 1); // Łącznik lewy
+                oCtx.fillRect(bx + 6, by + 3, 1, 1); // Łącznik praw
+              }
+            }
+
+            oCtx.restore();
+          }
+
+          // 10. INTERAKTYWNA LUPA DLA PIPETY I SZYBKIEJ PIPETY (W PRZESTRZENI EKRANU)
+          const isPipetteTool = activeTool === 'pipette' || isQuickPipetteActive;
+          if (isPipetteTool && cursorPosRef.current) {
+            const { x: cx, y: cy } = cursorPosRef.current;
+            const showLoupe = pipetteSettings?.showLoupe ?? true;
+            const docX = (cx - screenCenterX) / zoom + engine.width / 2;
+            const docY = (cy - screenCenterY) / zoom + engine.height / 2;
+            const isInside = docX >= 0 && docX < engine.width && docY >= 0 && docY < engine.height;
+
+            if (showLoupe && isInside) {
+              const sampleDiam = pipetteSettings?.sampleDiameter || 1;
+              const sampleSrc = pipetteSettings?.sampleSource || 'image';
+              const pickedColor = engine.pickColor(docX, docY, sampleSrc, sampleDiam);
+
+              const loupeRadius = 48;
+              const boxSize = 19;
+              const loupeCanvas = engine.getLoupeSampleCanvas(docX, docY, boxSize, sampleSrc);
+
+              oCtx.save();
+              // Cień zewnętrzny lupy
+              oCtx.shadowColor = 'rgba(0, 0, 0, 0.45)';
+              oCtx.shadowBlur = 12;
+              oCtx.shadowOffsetX = 0;
+              oCtx.shadowOffsetY = 4;
+
+              // Okrągły klip powiększenia
+              oCtx.beginPath();
+              oCtx.arc(cx, cy, loupeRadius, 0, Math.PI * 2);
+              oCtx.fillStyle = '#1e1e1e';
+              oCtx.fill();
+
+              oCtx.save();
+              oCtx.clip();
+
+              // Rysujemy powiększony wycinek pikseli (pixelated)
+              oCtx.imageSmoothingEnabled = false;
+              oCtx.drawImage(
+                loupeCanvas,
+                cx - loupeRadius,
+                cy - loupeRadius,
+                loupeRadius * 2,
+                loupeRadius * 2
+              );
+
+              // Siatka pikseli
+              const pixelStep = (loupeRadius * 2) / boxSize;
+              oCtx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
+              oCtx.lineWidth = 0.5;
+              for (let step = 0; step <= boxSize; step++) {
+                const gx = cx - loupeRadius + step * pixelStep;
+                const gy = cy - loupeRadius + step * pixelStep;
+                oCtx.beginPath();
+                oCtx.moveTo(gx, cy - loupeRadius);
+                oCtx.lineTo(gx, cy + loupeRadius);
+                oCtx.stroke();
+                oCtx.beginPath();
+                oCtx.moveTo(cx - loupeRadius, gy);
+                oCtx.lineTo(cx + loupeRadius, gy);
+                oCtx.stroke();
+              }
+
+              // Dolny wąski panel z próbnikiem koloru i wartością HEX (przesunięty niżej)
+              const h = loupeRadius * 0.48; // Linia podziału na wysokości 48% promienia poniżej środka
+              const startAngle = Math.asin(h / loupeRadius);
+              const endAngle = Math.PI - startAngle;
+
+              oCtx.beginPath();
+              oCtx.arc(cx, cy, loupeRadius, startAngle, endAngle, false);
+              oCtx.closePath();
+              oCtx.fillStyle = `rgba(${pickedColor.r}, ${pickedColor.g}, ${pickedColor.b}, ${pickedColor.a / 255})`;
+              oCtx.fill();
+              oCtx.strokeStyle = '#ffffff';
+              oCtx.lineWidth = 1.5;
+              oCtx.stroke();
+
+              const hex = `#${((1 << 24) + (pickedColor.r << 16) + (pickedColor.g << 8) + pickedColor.b).toString(16).slice(1).toUpperCase()}`;
+              oCtx.font = 'bold 9px monospace';
+              oCtx.textAlign = 'center';
+              oCtx.textBaseline = 'middle';
+              oCtx.strokeStyle = '#000000';
+              oCtx.lineWidth = 2.5;
+
+              // Precyzyjne centrowanie tekstu wewnątrz wąskiego dolnego segmentu
+              const textY = cy + (loupeRadius + h) / 2;
+              oCtx.strokeText(hex, cx, textY);
+              oCtx.fillStyle = '#ffffff';
+              oCtx.fillText(hex, cx, textY);
+
+              oCtx.restore(); // koniec clip
+
+              // Zewnętrzny podwójny pierścień obwódki lupy
+              oCtx.shadowColor = 'transparent';
+              oCtx.strokeStyle = '#000000';
+              oCtx.lineWidth = 3;
+              oCtx.beginPath();
+              oCtx.arc(cx, cy, loupeRadius, 0, Math.PI * 2);
+              oCtx.stroke();
+
+              oCtx.strokeStyle = '#ffffff';
+              oCtx.lineWidth = 1.5;
+              oCtx.beginPath();
+              oCtx.arc(cx, cy, loupeRadius, 0, Math.PI * 2);
+              oCtx.stroke();
+
+              // Idealnie ostry celownik środkowy wewnątrz lupy (dopasowany do siatki pikseli za pomocą fillRect)
+              const ix = Math.round(cx);
+              const iy = Math.round(cy);
+              const pArm = 5;
+
+              // 1. Białe obramowanie 1px (podkład pod spodem)
+              oCtx.fillStyle = '#ffffff';
+              oCtx.fillRect(ix - pArm - 1, iy - 1, pArm * 2 + 3, 3);
+              oCtx.fillRect(ix - 1, iy - pArm - 1, 3, pArm * 2 + 3);
+
+              // 2. Czarny plusik 1px w środku
+              oCtx.fillStyle = '#000000';
+              oCtx.fillRect(ix - pArm, iy, pArm * 2 + 1, 1);
+              oCtx.fillRect(ix, iy - pArm, 1, pArm * 2 + 1);
+
+              oCtx.restore();
+            } else {
+              // Standalone ostry celownik gdy lupa jest wyłączona lub poza płótnem
+              oCtx.save();
+              const ix = Math.round(cx);
+              const iy = Math.round(cy);
+              const pArm = 5;
+
+              // 1. Białe obramowanie 1px
+              oCtx.fillStyle = '#ffffff';
+              oCtx.fillRect(ix - pArm - 1, iy - 1, pArm * 2 + 3, 3);
+              oCtx.fillRect(ix - 1, iy - pArm - 1, 3, pArm * 2 + 3);
+
+              // 2. Czarny plusik 1px w środku
+              oCtx.fillStyle = '#000000';
+              oCtx.fillRect(ix - pArm, iy, pArm * 2 + 1, 1);
+              oCtx.fillRect(ix, iy - pArm, 1, pArm * 2 + 1);
+
+              oCtx.restore();
+            }
           }
         }
       }
@@ -1218,14 +2577,26 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     activeTool,
     isTransformTool,
     selectionSettings,
+    pipetteSettings,
     brushSettings.size,
-    pipetteSettings?.sampleDiameter,
-    pipetteSettings?.sampleSource,
-    pipetteSettings?.showLoupe,
+    gradientSettings,
     primaryColor,
-    getTransformScreenGeometry,
+    secondaryColor,
+    activeVectorLineSession,
+    activeVectorBezierSession,
+    activeVectorShapeSession,
+    hoverVectorHandle,
+    vectorShapeSettings,
+    getShapeModifierDocPoint,
+    gradientHoverHandle,
+    transformHoverHandle,
+    transformActiveHandle,
+    isShiftKeyDown,
+    isCtrlKeyDown,
+    isQuickPipetteActive,
   ]);
 
+  // ZOOM I PAN
   const handleWheel = (e: React.WheelEvent) => {
     e.preventDefault();
     if (!containerRef.current) return;
@@ -1247,243 +2618,31 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     onUpdatePan({ x: newPanX, y: newPanY });
   };
 
-  // Interakcja przekształcania ze skrótami klawiszowymi (Shift: kąt 15°, blokada osi, proporcje; Alt: skalowanie z pivotu)
-  const updateTransformInteraction = useCallback(
-    (pt: SKPoint, shiftKey: boolean, altKey: boolean) => {
-      const activeHandle = transformActiveHandleRef.current;
-      if (!activeHandle || !transformInitialStateRef.current || !transformDragStartDocPtRef.current) {
-        return;
-      }
+  const getModifiedSelectionSettings = (e: React.PointerEvent) => {
+    const isSelectionTool =
+      activeTool === 'select-rect' ||
+      activeTool === 'select-ellipse' ||
+      activeTool === 'select-lasso' ||
+      activeTool === 'magic-wand';
 
-      const init = transformInitialStateRef.current;
-      const startPt = transformDragStartDocPtRef.current;
+    if (!isSelectionTool) return selectionSettings;
 
-      // 1. Przenoszenie zaznaczenia (wraz ze środkiem ciężkości)
-      if (activeHandle === 'move') {
-        let dx = pt.x - startPt.x;
-        let dy = pt.y - startPt.y;
+    let mode = selectionSettings.mode;
+    if (e.shiftKey && e.altKey) {
+      mode = 'intersect';
+    } else if (e.altKey) {
+      mode = 'subtract';
+    } else if (e.shiftKey) {
+      mode = 'add';
+    }
 
-        // Przytrzymanie SHIFT: ruch ściśle w poziomie lub pionie
-        if (shiftKey) {
-          if (Math.abs(dx) >= Math.abs(dy)) {
-            dy = 0;
-          } else {
-            dx = 0;
-          }
-        }
+    return {
+      ...selectionSettings,
+      mode,
+    };
+  };
 
-        engine.selectionManager.updateTransformSelection({
-          pos: { x: init.pos.x + dx, y: init.pos.y + dy },
-          pivot: { x: init.pivot.x + dx, y: init.pivot.y + dy },
-        });
-        onCanvasModified();
-        return;
-      }
-
-      // 2. Przenoszenie środka ciężkości (nie rusza zaznaczenia ani ramki)
-      if (activeHandle === 'pivot') {
-        engine.selectionManager.updateTransformSelection({
-          pivot: { x: pt.x, y: pt.y },
-        });
-        onCanvasModified();
-        return;
-      }
-
-      // 3. Obrót wokół środka ciężkości (pivot)
-      if (activeHandle === 'rotate' || activeHandle.startsWith('rotate')) {
-        const P = init.pivot;
-        const startAngle = Math.atan2(startPt.y - P.y, startPt.x - P.x);
-        const curAngle = Math.atan2(pt.y - P.y, pt.x - P.x);
-        let deltaAngle = curAngle - startAngle;
-
-        let targetAngle = init.angle + deltaAngle;
-        // Przytrzymanie SHIFT: przybliżamy kąt obrotu do pełnych wielokrotności 15 stopni
-        if (shiftKey) {
-          const step = (15 * Math.PI) / 180;
-          targetAngle = Math.round(targetAngle / step) * step;
-          deltaAngle = targetAngle - init.angle;
-        }
-
-        // Środek ramki obraca się wokół pivotu
-        const dx = init.pos.x - P.x;
-        const dy = init.pos.y - P.y;
-        const cos = Math.cos(deltaAngle);
-        const sin = Math.sin(deltaAngle);
-
-        const newPosX = P.x + dx * cos - dy * sin;
-        const newPosY = P.y + dx * sin + dy * cos;
-
-        engine.selectionManager.updateTransformSelection({
-          angle: targetAngle,
-          pos: { x: newPosX, y: newPosY },
-        });
-        onCanvasModified();
-        return;
-      }
-
-      // 4. Skalowanie z 8 uchwytów
-      let uA = 0;
-      let vA = 0;
-
-      if (activeHandle === 'e') {
-        uA = -0.5;
-        vA = 0;
-      } else if (activeHandle === 'w') {
-        uA = 0.5;
-        vA = 0;
-      } else if (activeHandle === 's') {
-        uA = 0;
-        vA = -0.5;
-      } else if (activeHandle === 'n') {
-        uA = 0;
-        vA = 0.5;
-      } else if (activeHandle === 'se') {
-        uA = -0.5;
-        vA = -0.5;
-      } else if (activeHandle === 'nw') {
-        uA = 0.5;
-        vA = 0.5;
-      } else if (activeHandle === 'ne') {
-        uA = -0.5;
-        vA = 0.5;
-      } else if (activeHandle === 'sw') {
-        uA = 0.5;
-        vA = -0.5;
-      }
-
-      const uH = -uA;
-      const vH = -vA;
-
-      const cos0 = Math.cos(init.angle);
-      const sin0 = Math.sin(init.angle);
-      const Ux = { x: cos0, y: sin0 };
-      const Uy = { x: -sin0, y: cos0 };
-
-      let newW = init.width;
-      let newH = init.height;
-
-      // Pozycja punktu kotwiczenia (przeciwległy uchwyt)
-      const anchorDocX = init.pos.x + uA * init.width * cos0 - vA * init.height * sin0;
-      const anchorDocY = init.pos.y + uA * init.width * sin0 + vA * init.height * cos0;
-
-      if (altKey) {
-        // TRYB ALT: Skalowanie względem środka obrotu (init.pivot), a nie przeciwległego uchwytu
-        const Vp = { x: pt.x - init.pivot.x, y: pt.y - init.pivot.y };
-        const projPivX = Vp.x * Ux.x + Vp.y * Ux.y;
-        const projPivY = Vp.x * Uy.x + Vp.y * Uy.y;
-
-        // Początkowa odległość uchwytu od środka obrotu
-        const H0x = init.pos.x + uH * init.width * cos0 - vH * init.height * sin0;
-        const H0y = init.pos.y + uH * init.width * sin0 + vH * init.height * cos0;
-        const VH0 = { x: H0x - init.pivot.x, y: H0y - init.pivot.y };
-        const projH0_X = VH0.x * Ux.x + VH0.y * Ux.y;
-        const projH0_Y = VH0.x * Uy.x + VH0.y * Uy.y;
-
-        if (uH !== 0) {
-          if (Math.abs(projH0_X) > 0.001) {
-            const signX = projH0_X >= 0 ? 1 : -1;
-            const scaleX = Math.max(0.01, (projPivX * signX) / Math.abs(projH0_X));
-            newW = Math.max(2, init.width * scaleX);
-          } else {
-            newW = Math.max(2, Math.abs(projPivX) * 2);
-          }
-        }
-
-        if (vH !== 0) {
-          if (Math.abs(projH0_Y) > 0.001) {
-            const signY = projH0_Y >= 0 ? 1 : -1;
-            const scaleY = Math.max(0.01, (projPivY * signY) / Math.abs(projH0_Y));
-            newH = Math.max(2, init.height * scaleY);
-          } else {
-            newH = Math.max(2, Math.abs(projPivY) * 2);
-          }
-        }
-      } else {
-        // STANDARDOWE SKALOWANIE: Względem przeciwległego uchwytu (anchor)
-        const V = { x: pt.x - anchorDocX, y: pt.y - anchorDocY };
-        const projX = V.x * Ux.x + V.y * Ux.y;
-        const projY = V.x * Uy.x + V.y * Uy.y;
-
-        if (uH !== 0) {
-          newW = Math.max(2, projX * Math.sign(uH));
-        }
-        if (vH !== 0) {
-          newH = Math.max(2, projY * Math.sign(vH));
-        }
-      }
-
-      // Przytrzymanie SHIFT: blokujemy proporcje zaznaczenia
-      if (shiftKey) {
-        const initialAspect = init.width / Math.max(1, init.height);
-        if (uH !== 0 && vH !== 0) {
-          const scaleW = newW / Math.max(1, init.width);
-          const scaleH = newH / Math.max(1, init.height);
-          if (Math.abs(scaleW - 1) >= Math.abs(scaleH - 1)) {
-            newH = Math.max(2, newW / initialAspect);
-          } else {
-            newW = Math.max(2, newH * initialAspect);
-          }
-        } else if (uH !== 0) {
-          newH = Math.max(2, newW / initialAspect);
-        } else if (vH !== 0) {
-          newW = Math.max(2, newH * initialAspect);
-        }
-      }
-
-      let newPosX: number;
-      let newPosY: number;
-      let newPivDocX: number;
-      let newPivDocY: number;
-
-      if (altKey) {
-        // Środek obrotu pozostaje w tym samym punkcie dokumentu
-        newPivDocX = init.pivot.x;
-        newPivDocY = init.pivot.y;
-
-        const dxPiv = init.pos.x - init.pivot.x;
-        const dyPiv = init.pos.y - init.pivot.y;
-        const localCenterFromPivX = dxPiv * cos0 + dyPiv * sin0;
-        const localCenterFromPivY = -dxPiv * sin0 + dyPiv * cos0;
-        const finalScaleX = newW / Math.max(1, init.width);
-        const finalScaleY = newH / Math.max(1, init.height);
-
-        const scaledLocalCenterX = localCenterFromPivX * finalScaleX;
-        const scaledLocalCenterY = localCenterFromPivY * finalScaleY;
-
-        newPosX = init.pivot.x + scaledLocalCenterX * cos0 - scaledLocalCenterY * sin0;
-        newPosY = init.pivot.y + scaledLocalCenterX * sin0 + scaledLocalCenterY * cos0;
-      } else {
-        // Pozycja środka wyliczana względem stałego przeciwległego uchwytu (anchor)
-        newPosX = anchorDocX - uA * newW * Ux.x - vA * newH * Uy.x;
-        newPosY = anchorDocY - uA * newW * Ux.y - vA * newH * Uy.y;
-
-        // Przelicz proporcjonalnie nową pozycję środka obrotu (pivot) wewnątrz przeskalowanej ramki
-        const dxPiv = init.pivot.x - init.pos.x;
-        const dyPiv = init.pivot.y - init.pos.y;
-        const localPivX = dxPiv * cos0 + dyPiv * sin0;
-        const localPivY = -dxPiv * sin0 + dyPiv * cos0;
-        const uPiv = localPivX / Math.max(1, init.width);
-        const vPiv = localPivY / Math.max(1, init.height);
-
-        const newLocalPivX = uPiv * newW;
-        const newLocalPivY = vPiv * newH;
-        newPivDocX = newPosX + newLocalPivX * cos0 - newLocalPivY * sin0;
-        newPivDocY = newPosY + newLocalPivX * sin0 + newLocalPivY * cos0;
-      }
-
-      engine.selectionManager.updateTransformSelection({
-        width: newW,
-        height: newH,
-        pos: { x: newPosX, y: newPosY },
-        pivot: { x: newPivDocX, y: newPivDocY },
-      });
-      onCanvasModified();
-    },
-    [engine, onCanvasModified]
-  );
-
-  updateTransformInteractionRef.current = updateTransformInteraction;
-
+  // POINTER DOWN
   const handlePointerDown = (e: React.PointerEvent) => {
     if (e.button === 1 || isSpacePressed || activeTool === 'pan') {
       setIsPanning(true);
@@ -1496,18 +2655,46 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
 
     if (e.button !== 0) return;
 
+    if (containerRef.current) {
+      const rect = containerRef.current.getBoundingClientRect();
+      cursorPosRef.current = {
+        x: e.clientX - rect.left,
+        y: e.clientY - rect.top,
+      };
+    }
+
     const pt = getDocPoint(e);
     if (!pt) return;
+    lastDocPtRef.current = pt;
 
     try {
       (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     } catch {}
 
-    // OBSŁUGA NARZĘDZI PRZEKSZTAŁCANIA (ZAZNACZENIA LUB ZAWARTOŚCI)
+    // SZYBKA PIPETA (Ctrl + Klik / Przeciąganie we wszystkich narzędziach rysowania) lub narzędzie pipety
+    const isQuickPipette = (e.ctrlKey || e.metaKey || isCtrlKeyDown) && isDrawingTool(activeTool);
+    if (activeTool === 'pipette' || isQuickPipette) {
+      isSamplingPipetteRef.current = true;
+      setIsDrawingSynced(true);
+      const color = engine.pickColor(
+        pt.x,
+        pt.y,
+        pipetteSettings?.sampleSource || 'image',
+        pipetteSettings?.sampleDiameter || 1
+      );
+      onPipettePick(color);
+      return;
+    }
+
+    // OBSŁUGA NARZĘDZI TRANSFORMACJI ZAZNACZENIA / ZAWARTOŚCI
     if (isTransformTool) {
       if (activeTool === 'transform-content' && !engine.transformContentSession) {
         engine.beginTransformContent(selectionSettings.interpolation || 'bilinear');
-      } else if (activeTool === 'transform-selection' && !engine.selectionManager.transformState && engine.selectionManager.hasActiveSelection) {
+      } else if (
+        activeTool === 'transform-selection' &&
+        !engine.selectionManager.transformState &&
+        engine.selectionManager.hasActiveSelection
+      ) {
         engine.selectionManager.beginTransformSelection();
       }
 
@@ -1528,20 +2715,58 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       return;
     }
 
-    const layer = engine.getActiveLayer();
-    if (!layer || !layer.visible) return;
-
-    if (activeTool === 'pipette') {
-      setIsDrawing(true);
-      const color = engine.pickColor(
-        pt.x,
-        pt.y,
-        pipetteSettings?.sampleSource || 'image',
-        pipetteSettings?.sampleDiameter || 1
-      );
-      onPipettePick(color);
+    // OBSŁUGA AKTYWNYCH UCHWYTÓW WEKTOROWYCH (LINIA, BEZIER, FIGURA)
+    const vecHit = hitTestVectorHandles(e);
+    if (vecHit) {
+      setActiveVectorHandleSynced(vecHit);
+      vectorDragStartPtRef.current = pt;
+      if (activeVectorLineSession) {
+        vectorInitialSessionStateRef.current = { ...activeVectorLineSession };
+      } else if (activeVectorBezierSession) {
+        vectorInitialSessionStateRef.current = { ...activeVectorBezierSession };
+      } else if (activeVectorShapeSession) {
+        vectorInitialSessionStateRef.current = {
+          ...activeVectorShapeSession,
+          settings: { ...vectorShapeSettings },
+        };
+      }
       return;
     }
+
+    // JEŚLI KLIKNIĘTO POZA ISTNIEJĄCĄ SESJĄ WEKTOROWĄ LUB TRANSFORMACJĄ, ZATWIERDŹ POPRZEDNIĄ
+    if (
+      activeTool === 'line' ||
+      activeTool === 'bezier' ||
+      activeTool === 'shapes' ||
+      activeTool === 'select-rect' ||
+      activeTool === 'select-ellipse' ||
+      activeTool === 'select-lasso'
+    ) {
+      if (activeVectorLineSession || activeVectorBezierSession || activeVectorShapeSession) {
+        commitActiveVectorSession();
+      }
+      if (engine.transformContentSession) {
+        engine.commitTransformContent();
+        onCanvasModified();
+      } else if (engine.selectionManager.transformState) {
+        engine.selectionManager.commitTransformSelection();
+        onCanvasModified();
+      } else if (engine.bucketSeedPoint) {
+        engine.commitPaintBucketSession();
+        onCanvasModified();
+      }
+    }
+
+    if (activeTool === 'line' || activeTool === 'bezier' || activeTool === 'shapes') {
+      const p = { x: Math.round(pt.x), y: Math.round(pt.y) };
+      setDragStartPointSynced(p);
+      setCurrentDragPoint(p);
+      setIsDrawingSynced(true);
+      return;
+    }
+
+    const layer = engine.getActiveLayer();
+    if (!layer || !layer.visible) return;
 
     if (activeTool === 'magic-wand') {
       const sp = engine.selectionManager.wandSeedPoint;
@@ -1550,26 +2775,25 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         setIsDraggingWandHandle(true);
         return;
       }
-
-      engine.applyMagicWand(pt, selectionSettings);
+      engine.applyMagicWand(pt, getModifiedSelectionSettings(e));
       onCanvasModified();
       return;
     }
 
     if (activeTool === 'select-rect' || activeTool === 'select-ellipse') {
       engine.selectionManager.wandSeedPoint = null;
-      setDragStartPoint(pt);
+      setDragStartPointSynced(pt);
       setCurrentDragPoint(pt);
-      setIsDrawing(true);
+      setIsDrawingSynced(true);
       return;
     }
 
     if (activeTool === 'select-lasso') {
       engine.selectionManager.wandSeedPoint = null;
-      setDragStartPoint(pt);
+      setDragStartPointSynced(pt);
       setCurrentDragPoint(pt);
       setLassoPoints([pt]);
-      setIsDrawing(true);
+      setIsDrawingSynced(true);
       return;
     }
 
@@ -1579,7 +2803,6 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         setIsDraggingBucketHandle(true);
         return;
       }
-
       engine.applyPaintBucket(pt, selectionSettings, brushSettings, true);
       onCanvasModified();
       return;
@@ -1588,7 +2811,6 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     if (activeTool === 'gradient') {
       const p0 = engine.gradientStartPoint;
       const p1 = engine.gradientEndPoint;
-      // Sprawdź czy użytkownik kliknął w uchwyt początkowy 0 lub końcowy 1
       if (p0 && Math.hypot(pt.x - p0.x, pt.y - p0.y) * zoom <= 14) {
         setIsDraggingGradientHandle(0);
         return;
@@ -1597,34 +2819,72 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         setIsDraggingGradientHandle(1);
         return;
       }
+      if (p0 && p1) {
+        const mid = { x: (p0.x + p1.x) / 2, y: (p0.y + p1.y) / 2 };
+        if (Math.hypot(pt.x - mid.x, pt.y - mid.y) * zoom <= 14) {
+          setIsDraggingGradientHandle('move');
+          dragStartPointRef.current = pt;
+          gradientDragInitialStartPtRef.current = { ...p0 };
+          gradientDragInitialEndPtRef.current = { ...p1 };
+          return;
+        }
+      }
 
-      // Nowe przeciąganie gradientu od punktu do punktu
-      setDragStartPoint(pt);
+      setDragStartPointSynced(pt);
       setCurrentDragPoint(pt);
-      setIsDrawing(true);
-      engine.applyGradient(pt, pt, gradientSettings, primaryColor, secondaryColor, brushSettings.blendMode, true);
+      setIsDrawingSynced(true);
+      engine.applyGradient(
+        pt,
+        pt,
+        gradientSettings,
+        primaryColor,
+        secondaryColor,
+        gradientSettings.blendMode || 'SrcOver',
+        true
+      );
       onCanvasModified();
       return;
     }
 
-    if (activeTool === 'shapes' || activeTool === 'line') {
-      setDragStartPoint(pt);
-      setCurrentDragPoint(pt);
-      setIsDrawing(true);
-      return;
-    }
-
     if (activeTool === 'brush' || activeTool === 'eraser') {
-      setIsDrawing(true);
+      setIsDrawingSynced(true);
       const isEraser = activeTool === 'eraser';
-      const strokeResult = engine.brushEngine.beginStroke(pt, layer, brushSettings, isEraser);
 
-      if (canvasRef.current && strokeResult.dirtyRect.width > 0) {
-        engine.compositeToViewport(canvasRef.current, strokeResult.dirtyRect);
+      if (e.shiftKey && lastBrushStrokeDocPointRef.current) {
+        const fromPt = lastBrushStrokeDocPointRef.current;
+        const toPt = pt;
+        const strokeResult1 = engine.brushEngine.beginStroke(fromPt, layer, brushSettings, isEraser);
+        const strokeResult2 = engine.brushEngine.continueStroke(toPt, layer, brushSettings, isEraser);
+
+        const left = Math.min(strokeResult1.dirtyRect.left, strokeResult2.dirtyRect.left);
+        const top = Math.min(strokeResult1.dirtyRect.top, strokeResult2.dirtyRect.top);
+        const right = Math.max(strokeResult1.dirtyRect.right, strokeResult2.dirtyRect.right);
+        const bottom = Math.max(strokeResult1.dirtyRect.bottom, strokeResult2.dirtyRect.bottom);
+        const combinedDirty: SKRectI = {
+          left,
+          top,
+          right,
+          bottom,
+          width: Math.max(0, right - left),
+          height: Math.max(0, bottom - top),
+        };
+
+        if (canvasRef.current && combinedDirty.width > 0) {
+          engine.compositeToViewport(canvasRef.current, combinedDirty);
+        }
+        lastBrushStrokeDocPointRef.current = { ...toPt };
+      } else {
+        const strokeResult = engine.brushEngine.beginStroke(pt, layer, brushSettings, isEraser);
+
+        if (canvasRef.current && strokeResult.dirtyRect.width > 0) {
+          engine.compositeToViewport(canvasRef.current, strokeResult.dirtyRect);
+        }
+        lastBrushStrokeDocPointRef.current = { ...pt };
       }
     }
   };
 
+  // POINTER MOVE
   const handlePointerMove = (e: React.PointerEvent) => {
     if (containerRef.current) {
       const rect = containerRef.current.getBoundingClientRect();
@@ -1635,6 +2895,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     }
 
     const pt = getDocPoint(e);
+    lastDocPtRef.current = pt;
     updateStatusBarPos(pt);
 
     if (isPanning) {
@@ -1645,18 +2906,41 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       return;
     }
 
-    // INTERAKCJA PRZEKSZTAŁCANIA ZAZNACZENIA LUB ZAWARTOŚCI
+    // INTERAKCJA PRZEKSZTAŁCANIA ZAZNACZENIA
     if (isTransformTool) {
-      if (transformActiveHandle && transformInitialStateRef.current && transformDragStartDocPtRef.current && pt) {
+      if (
+        transformActiveHandle &&
+        transformInitialStateRef.current &&
+        transformDragStartDocPtRef.current &&
+        pt
+      ) {
         lastTransformPtRef.current = pt;
         updateTransformInteraction(pt, e.shiftKey, e.altKey);
         return;
       }
-
-      // Aktualizacja hover kursora
       const hoverHit = hitTestTransformHandles(e);
       setTransformHoverHandle(hoverHit);
       return;
+    }
+
+    // INTERAKCJA PRZECIĄGANIA UCHWYTU WEKTOROWEGO
+    if (activeVectorHandle && pt) {
+      updateVectorHandleInteraction(pt, e.shiftKey, e.altKey);
+      return;
+    }
+
+    // Aktualizacja podświetlenia uchwytów
+    if (isAnyVectorSessionActive) {
+      const hover = hitTestVectorHandles(e);
+      setHoverVectorHandle(hover);
+    }
+
+    // PIERWOTNE ROZCIĄGANIE NOWEJ FIGURY / LINII / KRZYWEJ
+    if (isDrawing && pt && dragStartPoint) {
+      if (activeTool === 'line' || activeTool === 'bezier' || activeTool === 'shapes') {
+        updateInitialDrawingDrag(pt, e.shiftKey, e.altKey);
+        return;
+      }
     }
 
     if (isDraggingWandHandle && pt) {
@@ -1672,34 +2956,94 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     }
 
     if (activeTool === 'gradient') {
+      if (isDraggingGradientHandle === 'move' && pt && dragStartPointRef.current && gradientDragInitialStartPtRef.current && gradientDragInitialEndPtRef.current) {
+        const dx = pt.x - dragStartPointRef.current.x;
+        const dy = pt.y - dragStartPointRef.current.y;
+        const newP0 = { x: gradientDragInitialStartPtRef.current.x + dx, y: gradientDragInitialStartPtRef.current.y + dy };
+        const newP1 = { x: gradientDragInitialEndPtRef.current.x + dx, y: gradientDragInitialEndPtRef.current.y + dy };
+        engine.applyGradient(
+          newP0,
+          newP1,
+          gradientSettings,
+          primaryColor,
+          secondaryColor,
+          gradientSettings.blendMode || 'SrcOver',
+          false
+        );
+        onCanvasModified();
+        return;
+      }
       if (isDraggingGradientHandle === 0 && pt && engine.gradientEndPoint) {
-        engine.applyGradient(pt, engine.gradientEndPoint, gradientSettings, primaryColor, secondaryColor, brushSettings.blendMode, false);
+        engine.applyGradient(
+          pt,
+          engine.gradientEndPoint,
+          gradientSettings,
+          primaryColor,
+          secondaryColor,
+          gradientSettings.blendMode || 'SrcOver',
+          false
+        );
         onCanvasModified();
         return;
       }
       if (isDraggingGradientHandle === 1 && pt && engine.gradientStartPoint) {
-        engine.applyGradient(engine.gradientStartPoint, pt, gradientSettings, primaryColor, secondaryColor, brushSettings.blendMode, false);
+        engine.applyGradient(
+          engine.gradientStartPoint,
+          pt,
+          gradientSettings,
+          primaryColor,
+          secondaryColor,
+          gradientSettings.blendMode || 'SrcOver',
+          false
+        );
         onCanvasModified();
         return;
       }
       if (isDrawing && pt && dragStartPoint) {
         setCurrentDragPoint(pt);
-        engine.applyGradient(dragStartPoint, pt, gradientSettings, primaryColor, secondaryColor, brushSettings.blendMode, false);
+        engine.applyGradient(
+          dragStartPoint,
+          pt,
+          gradientSettings,
+          primaryColor,
+          secondaryColor,
+          gradientSettings.blendMode || 'SrcOver',
+          false
+        );
         onCanvasModified();
         return;
       }
 
-      if (pt && engine.gradientStartPoint && Math.hypot(pt.x - engine.gradientStartPoint.x, pt.y - engine.gradientStartPoint.y) * zoom <= 14) {
+      if (
+        pt &&
+        engine.gradientStartPoint &&
+        Math.hypot(pt.x - engine.gradientStartPoint.x, pt.y - engine.gradientStartPoint.y) * zoom <= 14
+      ) {
         setGradientHoverHandle(0);
-      } else if (pt && engine.gradientEndPoint && Math.hypot(pt.x - engine.gradientEndPoint.x, pt.y - engine.gradientEndPoint.y) * zoom <= 14) {
+      } else if (
+        pt &&
+        engine.gradientEndPoint &&
+        Math.hypot(pt.x - engine.gradientEndPoint.x, pt.y - engine.gradientEndPoint.y) * zoom <= 14
+      ) {
         setGradientHoverHandle(1);
+      } else if (
+        pt &&
+        engine.gradientStartPoint &&
+        engine.gradientEndPoint
+      ) {
+        const mid = { x: (engine.gradientStartPoint.x + engine.gradientEndPoint.x) / 2, y: (engine.gradientStartPoint.y + engine.gradientEndPoint.y) / 2 };
+        if (Math.hypot(pt.x - mid.x, pt.y - mid.y) * zoom <= 14) {
+          setGradientHoverHandle('move');
+        } else {
+          setGradientHoverHandle(null);
+        }
       } else {
         setGradientHoverHandle(null);
       }
       return;
     }
 
-    if (activeTool === 'pipette') {
+    if (activeTool === 'pipette' || isSamplingPipetteRef.current) {
       if (isDrawing && pt) {
         const color = engine.pickColor(
           pt.x,
@@ -1728,21 +3072,6 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       return;
     }
 
-    if (activeTool === 'shapes' || activeTool === 'line') {
-      setCurrentDragPoint(pt);
-      if (canvasRef.current && dragStartPoint) {
-        engine.compositeToViewport(
-          canvasRef.current,
-          null,
-          dragStartPoint,
-          pt,
-          activeTool === 'line' ? 'line' : activeShapeType,
-          brushSettings
-        );
-      }
-      return;
-    }
-
     if (activeTool === 'brush' || activeTool === 'eraser') {
       const isEraser = activeTool === 'eraser';
       const native = e.nativeEvent as PointerEvent;
@@ -1759,10 +3088,12 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         if (canvasRef.current && strokeResult.dirtyRect.width > 0) {
           engine.compositeToViewport(canvasRef.current, strokeResult.dirtyRect);
         }
+        lastBrushStrokeDocPointRef.current = { ...subPt };
       }
     }
   };
 
+  // POINTER UP
   const handlePointerUp = (e: React.PointerEvent) => {
     try {
       (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
@@ -1773,7 +3104,16 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       return;
     }
 
-    // ZAKOŃCZENIE POJEDYNCZEGO PRZECIĄGNIĘCIA TRANSFORMACJI
+    // ZAKOŃCZENIE PRZECIĄGANIA UCHWYTU WEKTOROWEGO
+    if (activeVectorHandle) {
+      setActiveVectorHandleSynced(null);
+      vectorDragStartPtRef.current = null;
+      vectorInitialSessionStateRef.current = null;
+      redraw();
+      return;
+    }
+
+    // ZAKOŃCZENIE TRANSFORMACJI ZAZNACZENIA
     if (isTransformTool && transformActiveHandle) {
       setTransformActiveHandleSynced(null);
       lastTransformPtRef.current = null;
@@ -1793,7 +3133,11 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       setIsDraggingWandHandle(false);
       if (wandDragInitialSnapshotRef.current) {
         const finalSnapshot = engine.selectionManager.getMaskSnapshot();
-        engine.pushSelectionAction(wandDragInitialSnapshotRef.current, finalSnapshot, 'Przeniesienie punktu różdżki');
+        engine.pushSelectionAction(
+          wandDragInitialSnapshotRef.current,
+          finalSnapshot,
+          'Przeniesienie punktu różdżki'
+        );
         wandDragInitialSnapshotRef.current = null;
       }
       return;
@@ -1808,61 +3152,90 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     if (activeTool === 'gradient') {
       if (isDraggingGradientHandle !== null) {
         setIsDraggingGradientHandle(null);
+        gradientDragInitialStartPtRef.current = null;
+        gradientDragInitialEndPtRef.current = null;
         onCanvasModified();
         return;
       }
       if (isDrawing) {
-        setIsDrawing(false);
+        setIsDrawingSynced(false);
         const pt = getDocPoint(e);
         if (dragStartPoint && pt) {
-          engine.applyGradient(dragStartPoint, pt, gradientSettings, primaryColor, secondaryColor, brushSettings.blendMode, false);
+          engine.applyGradient(
+            dragStartPoint,
+            pt,
+            gradientSettings,
+            primaryColor,
+            secondaryColor,
+            gradientSettings.blendMode || 'SrcOver',
+            false
+          );
         }
-        setDragStartPoint(null);
+        setDragStartPointSynced(null);
         setCurrentDragPoint(null);
         onCanvasModified();
         return;
       }
     }
 
+    // ZAKOŃCZENIE POCZĄTKOWEGO RYSOWANIA WEKTOROWEGO
+    if (activeTool === 'line' || activeTool === 'bezier' || activeTool === 'shapes') {
+      setIsDrawingSynced(false);
+      setDragStartPointSynced(null);
+      setCurrentDragPoint(null);
+      redraw();
+      return;
+    }
+
+    // ZAKOŃCZENIE PRÓBKOWANIA PIPETY / SZYBKIEJ PIPETY
+    if (activeTool === 'pipette' || isSamplingPipetteRef.current) {
+      isSamplingPipetteRef.current = false;
+      setIsDrawingSynced(false);
+      return;
+    }
+
     if (!isDrawing) return;
-    setIsDrawing(false);
+    setIsDrawingSynced(false);
 
     const layer = engine.getActiveLayer();
 
     if ((activeTool === 'select-rect' || activeTool === 'select-ellipse') && dragStartPoint && currentDragPoint) {
-      engine.applySelectionShape(
-        activeTool === 'select-rect' ? 'rect' : 'ellipse',
-        [dragStartPoint, currentDragPoint],
-        selectionSettings
+      const dist = Math.hypot(
+        currentDragPoint.x - dragStartPoint.x,
+        currentDragPoint.y - dragStartPoint.y
       );
-      setDragStartPoint(null);
+      const isFixedSize = selectionSettings.constraint === 'fixed-size';
+      // W trybie ustalonych wymiarów pojedyncze kliknięcie lub przeciągnięcie wyznacza lewy górny narożnik
+      // W trybie dowolnym i ustalonych proporcji pojedyncze kliknięcie (< 3 px) nie tworzy zaznaczenia
+      if (isFixedSize || dist >= 3) {
+        engine.applySelectionShape(
+          activeTool === 'select-rect' ? 'rect' : 'ellipse',
+          [dragStartPoint, currentDragPoint],
+          getModifiedSelectionSettings(e)
+        );
+        onCanvasModified();
+      }
+      setDragStartPointSynced(null);
       setCurrentDragPoint(null);
-      onCanvasModified();
       return;
     }
 
-    if (activeTool === 'select-lasso' && lassoPoints.length > 2) {
-      engine.applySelectionShape('lasso', lassoPoints, selectionSettings);
-      setDragStartPoint(null);
+    if (activeTool === 'select-lasso') {
+      let maxDist = 0;
+      if (lassoPoints.length > 2 && dragStartPoint) {
+        for (const lp of lassoPoints) {
+          const d = Math.hypot(lp.x - dragStartPoint.x, lp.y - dragStartPoint.y);
+          if (d > maxDist) maxDist = d;
+        }
+      }
+      // Pojedyncze kliknięcie / brak przeciągnięcia nie modyfikuje zaznaczenia
+      if (lassoPoints.length > 2 && maxDist >= 3) {
+        engine.applySelectionShape('lasso', lassoPoints, getModifiedSelectionSettings(e));
+        onCanvasModified();
+      }
+      setDragStartPointSynced(null);
       setCurrentDragPoint(null);
       setLassoPoints([]);
-      onCanvasModified();
-      return;
-    }
-
-    if ((activeTool === 'shapes' || activeTool === 'line') && dragStartPoint && currentDragPoint) {
-      engine.commitShape(
-        dragStartPoint,
-        currentDragPoint,
-        activeTool === 'line' ? 'line' : activeShapeType,
-        brushSettings
-      );
-      setDragStartPoint(null);
-      setCurrentDragPoint(null);
-      if (canvasRef.current) {
-        engine.compositeToViewport(canvasRef.current);
-      }
-      onCanvasModified();
       return;
     }
 
@@ -1886,27 +3259,42 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     }
   };
 
-  // Dobór kursora myszy dla narzędzia modyfikacji zaznaczenia i zawartości
+  // KURSOR MYSZY
   const getCursorStyle = (): string => {
     if (isPanning || isSpacePressed || activeTool === 'pan') {
       return isPanning ? 'grabbing' : 'grab';
     }
-    if (activeTool === 'brush' || activeTool === 'eraser' || activeTool === 'pipette') {
+    if (
+      activeTool === 'brush' ||
+      activeTool === 'eraser' ||
+      activeTool === 'pipette' ||
+      isQuickPipetteActive
+    ) {
       return 'none';
+    }
+    if (isAnyVectorSessionActive && hoverVectorHandle) {
+      if (hoverVectorHandle === 'move') return 'move';
+      if (hoverVectorHandle === 'modifier' || hoverVectorHandle === 'modifier-shaft') return 'crosshair';
+      if (hoverVectorHandle === 'rotate') {
+        const boxAngleDeg = Math.round(
+          ((activeVectorShapeSession?.angle || 0) * 180) / Math.PI
+        );
+        return getRotateCursorUrl(boxAngleDeg - 90);
+      }
+      if (hoverVectorHandle === 'nw' || hoverVectorHandle === 'se') return 'nwse-resize';
+      if (hoverVectorHandle === 'ne' || hoverVectorHandle === 'sw') return 'nesw-resize';
+      if (hoverVectorHandle === 'n' || hoverVectorHandle === 's') return 'ns-resize';
+      if (hoverVectorHandle === 'e' || hoverVectorHandle === 'w') return 'ew-resize';
+      return 'pointer';
     }
     if (isTransformTool) {
       const h = transformActiveHandle || transformHoverHandle;
       if (h === 'pivot' || h === 'move') return 'move';
-      if (h && (h === 'rotate' || h.startsWith('rotate'))) {
-        let baseAngle = -45;
-        if (h === 'rotate-ne') baseAngle = -45;
-        else if (h === 'rotate-se') baseAngle = 45;
-        else if (h === 'rotate-sw') baseAngle = 135;
-        else if (h === 'rotate-nw') baseAngle = 225;
+      if (h === 'rotate') {
         const boxAngleDeg = Math.round(
           ((engine.selectionManager.transformState?.angle || 0) * 180) / Math.PI
         );
-        return getRotateCursorUrl(baseAngle + boxAngleDeg);
+        return getRotateCursorUrl(boxAngleDeg - 90);
       }
       if (h === 'nw' || h === 'se') return 'nwse-resize';
       if (h === 'ne' || h === 'sw') return 'nesw-resize';
@@ -1915,6 +3303,9 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       return 'default';
     }
     if (activeTool.startsWith('select') || activeTool === 'magic-wand') {
+      return 'none';
+    }
+    if (activeTool === 'line' || activeTool === 'bezier' || activeTool === 'shapes') {
       return 'crosshair';
     }
     if (activeTool === 'gradient') {
@@ -1923,28 +3314,25 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       }
       return 'crosshair';
     }
-    return 'crosshair';
+    return 'default';
   };
 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
-    e.stopPropagation();
-    if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      const file = e.dataTransfer.files[0];
+    const files = e.dataTransfer.files;
+    if (files.length > 0) {
+      const file = files[0];
       if (file.type.startsWith('image/')) {
-        const img = new Image();
-        img.onload = () => {
-          const cvs = document.createElement('canvas');
-          cvs.width = engine.width;
-          cvs.height = engine.height;
-          const ctx = cvs.getContext('2d')!;
-          const dx = Math.max(0, Math.round((engine.width - img.width) / 2));
-          const dy = Math.max(0, Math.round((engine.height - img.height) / 2));
-          ctx.drawImage(img, dx, dy, Math.min(img.width, engine.width), Math.min(img.height, engine.height));
-          engine.pasteCanvas(cvs);
-          onCanvasModified();
+        const reader = new FileReader();
+        reader.onload = (event) => {
+          const img = new Image();
+          img.onload = () => {
+            engine.importImage(img, file.name);
+            onCanvasModified();
+          };
+          img.src = event.target?.result as string;
         };
-        img.src = URL.createObjectURL(file);
+        reader.readAsDataURL(file);
       }
     }
   };
@@ -1973,12 +3361,13 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       onPointerLeave={() => {
         updateStatusBarPos(null);
         setTransformHoverHandle(null);
+        setHoverVectorHandle(null);
         cursorPosRef.current = null;
       }}
       className="relative flex-1 h-full overflow-hidden select-none bg-[#6f6f6f] touch-none"
       style={{ cursor: getCursorStyle() }}
     >
-      {/* JEDNOLITA STRUKTURA PŁÓTNA: SZACHOWNICA + RYSUNEK + 1PX RAMKA W JEDNYM WSPÓLNYM PUDEŁKU */}
+      {/* JEDNOLITA STRUKTURA PŁÓTNA: SZACHOWNICA + RYSUNEK + 1PX RAMKA */}
       <div
         className="absolute origin-top-left overflow-hidden"
         style={{
@@ -2018,4 +3407,22 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       />
     </div>
   );
+};
+
+const crosshairSvg = (badge: string) => {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
+    <!-- White outline crosshair for dark backgrounds -->
+    <path d="M16,5 L16,11 M16,21 L16,27 M5,16 L11,16 M21,16 L27,16" stroke="#ffffff" stroke-width="3" stroke-linecap="round"/>
+    <!-- Black core lines -->
+    <path d="M16,5 L16,11 M16,21 L16,27 M5,16 L11,16 M21,16 L27,16" stroke="#000000" stroke-width="1.2" stroke-linecap="round"/>
+    <!-- Central dot -->
+    <circle cx="16" cy="16" r="1.5" fill="#ffffff" stroke="#000000" stroke-width="0.8"/>
+    
+    <!-- Badge text -->
+    ${badge ? `
+      <text x="24" y="26" font-family="system-ui, -apple-system, sans-serif" font-size="12" font-weight="900" fill="#ffffff" stroke="#ffffff" stroke-width="2.5" paint-order="stroke fill" text-anchor="middle">${badge}</text>
+      <text x="24" y="26" font-family="system-ui, -apple-system, sans-serif" font-size="12" font-weight="900" fill="#00bcd4" stroke="#000000" stroke-width="0.5" paint-order="stroke fill" text-anchor="middle">${badge}</text>
+    ` : ''}
+  </svg>`;
+  return 'url("data:image/svg+xml;utf8,' + encodeURIComponent(svg) + '") 16 16, crosshair';
 };
