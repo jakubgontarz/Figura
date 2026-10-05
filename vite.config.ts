@@ -6,14 +6,13 @@ import { defineConfig } from 'vite';
 export default defineConfig(() => {
   return {
     plugins: [react(), tailwindcss()],
-    base: '/Figura/', // Pamiętaj o ukośnikach na początku i na końcu!
+    base: '/Figura/',
     resolve: {
       alias: {
         '@': path.resolve(__dirname, '.'),
       },
     },
     build: {
-      // Ignorujemy pliki serwera Express podczas budowania frontendu
       rollupOptions: {
         external: ['express', 'dotenv', 'server.js'],
       },
