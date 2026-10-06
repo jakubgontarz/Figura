@@ -15,6 +15,7 @@ export class Layer {
   public id: string;
   public name: string;
   public visible: boolean = true;
+  public locked: boolean = false;
   public opacity: number = 1.0; // 0.0 .. 1.0
   public blendMode: SKBlendMode = 'SrcOver';
   public tileGrid: TileGrid;
@@ -69,6 +70,7 @@ export class Layer {
       this.tileGrid.tileSize
     );
     copy.visible = this.visible;
+    copy.locked = this.locked;
     copy.opacity = this.opacity;
     copy.blendMode = this.blendMode;
     copy.tileGrid = this.tileGrid.clone();

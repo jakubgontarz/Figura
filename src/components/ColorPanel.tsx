@@ -185,40 +185,60 @@ export const ColorPanel: React.FC<ColorPanelProps> = ({
   };
 
   return (
-    <div className="border border-[#3c3c3c] bg-[#1e1e1e] rounded p-2 text-xs select-none">
-      {/* Nagłówek Grupy w stylu Paint.NET / WPF GroupBox */}
-      <div className="flex items-center gap-2 mb-2">
-        <span className="text-[11px] font-semibold text-[#c8c8c8] tracking-wide">Kolor</span>
-        <div className="h-[1px] bg-[#3a3a3a] flex-1" />
+    <div className="bg-transparent text-xs select-none">
+      {/* Pasek Zakładek (Tab Strip) */}
+      <div className="flex items-center border-b border-[#333] mb-2 pb-0.5">
+        <button
+          type="button"
+          className="text-[11px] font-semibold tracking-wide text-white border-b-2 border-[#007acc] pb-1 px-0.5 focus:outline-none cursor-pointer"
+        >
+          Kolor
+        </button>
       </div>
 
       {/* Górny wiersz: Podgląd Kolorów + Hex + Przycisk Metoda */}
-      <div className="flex items-center justify-between gap-2 mb-2.5">
-        <div className="flex items-center gap-1.5">
+      <div className="flex items-center justify-between gap-1 mb-2">
+        <div className="flex items-center gap-1">
           {/* Nakładające się kwadraty koloru głównego i dodatkowego */}
-          <div className="relative w-8 h-8">
+          <div className="relative w-8 h-8 shrink-0">
             {/* Dodatkowy (w tle) */}
             <div
               onClick={() => setActiveSlot('secondary')}
               title="Kolor dodatkowy (kliknij, aby edytować)"
-              className={`absolute right-0 bottom-0 w-5 h-5 rounded-xs border cursor-pointer z-0 transition-transform ${
-                activeSlot === 'secondary' ? 'border-[#007acc] scale-110 z-20 shadow-md' : 'border-[#222]'
+              className={`absolute right-0 bottom-0 w-[22px] h-[22px] rounded-xs border cursor-pointer z-0 transition-transform overflow-hidden ${
+                activeSlot === 'secondary' ? 'border-[#007acc] scale-110 z-20 shadow-md' : 'border-[#333]'
               }`}
               style={{
-                backgroundColor: `rgba(${secondaryColor.r}, ${secondaryColor.g}, ${secondaryColor.b}, ${secondaryColor.a / 255})`,
+                backgroundImage: `repeating-conic-gradient(#e4e4e4 0% 25%, #ffffff 0% 50%)`,
+                backgroundSize: '8px 8px',
               }}
-            />
+            >
+              <div
+                className="w-full h-full"
+                style={{
+                  backgroundColor: `rgba(${secondaryColor.r}, ${secondaryColor.g}, ${secondaryColor.b}, ${secondaryColor.a / 255})`,
+                }}
+              />
+            </div>
             {/* Główny (na wierzchu) */}
             <div
               onClick={() => setActiveSlot('primary')}
               title="Kolor główny (kliknij, aby edytować)"
-              className={`absolute left-0 top-0 w-5 h-5 rounded-xs border cursor-pointer z-10 transition-transform ${
-                activeSlot === 'primary' ? 'border-[#007acc] scale-110 z-20 shadow-md' : 'border-[#222]'
+              className={`absolute left-0 top-0 w-[22px] h-[22px] rounded-xs border cursor-pointer z-10 transition-transform overflow-hidden ${
+                activeSlot === 'primary' ? 'border-[#007acc] scale-110 z-20 shadow-md' : 'border-[#333]'
               }`}
               style={{
-                backgroundColor: `rgba(${primaryColor.r}, ${primaryColor.g}, ${primaryColor.b}, ${primaryColor.a / 255})`,
+                backgroundImage: `repeating-conic-gradient(#e4e4e4 0% 25%, #ffffff 0% 50%)`,
+                backgroundSize: '8px 8px',
               }}
-            />
+            >
+              <div
+                className="w-full h-full"
+                style={{
+                  backgroundColor: `rgba(${primaryColor.r}, ${primaryColor.g}, ${primaryColor.b}, ${primaryColor.a / 255})`,
+                }}
+              />
+            </div>
           </div>
 
           {/* Przycisk zamiany ⇄ */}
@@ -226,14 +246,14 @@ export const ColorPanel: React.FC<ColorPanelProps> = ({
             type="button"
             onClick={swapColors}
             title="Zamień kolory (X)"
-            className="p-1 text-[#888] hover:text-white hover:bg-[#333] rounded"
+            className="p-1 text-[#888] hover:text-white hover:bg-[#333] rounded cursor-pointer"
           >
-            <ArrowLeftRight size={12} />
+            <ArrowLeftRight size={11} />
           </button>
         </div>
 
-        {/* Pole Hex */}
-        <div className="flex items-center gap-1">
+        {/* Pole Hex i Przycisk Metoda */}
+        <div className="flex items-center gap-1 shrink-0">
           <input
             type="text"
             value={hexInput}
@@ -246,12 +266,12 @@ export const ColorPanel: React.FC<ColorPanelProps> = ({
               }
             }}
             onBlur={() => setHexInput(hexString)}
-            className="w-18 h-5 bg-[#121212] border border-[#444] rounded px-1.5 text-[11px] font-mono text-white text-center focus:outline-none focus:border-[#007acc]"
+            className="w-16 h-5 bg-[#121212] border border-[#444] rounded px-1 text-[10px] font-mono text-white text-center focus:outline-none focus:border-[#007acc]"
           />
           <button
             type="button"
             onClick={() => setColorMode(colorMode === 'hsv' ? 'rgb' : 'hsv')}
-            className="h-5 px-2 bg-[#2a2a2a] hover:bg-[#3a3a3a] text-[#aaa] hover:text-white border border-[#444] rounded text-[10px]"
+            className="h-5 px-1.5 bg-[#2a2a2a] hover:bg-[#3a3a3a] text-[#aaa] hover:text-white border border-[#444] rounded text-[9.5px] cursor-pointer"
             title="Przełącz tryb suwaków (HSV / RGB)"
           >
             Metoda
@@ -259,8 +279,8 @@ export const ColorPanel: React.FC<ColorPanelProps> = ({
         </div>
       </div>
 
-      {/* Kwadrat 2D Saturation-Value + Pasek Hue */}
-      <div className="flex gap-2 mb-2">
+      {/* 2D Saturation-Value + Pasek Hue (CSS Grid, zredukowana wysokość 2:1) */}
+      <div className="grid grid-cols-[1fr_14px] gap-2 mb-2 items-stretch">
         {/* Saturation-Value Box */}
         <div
           ref={svBoxRef}
@@ -268,7 +288,7 @@ export const ColorPanel: React.FC<ColorPanelProps> = ({
             setIsDraggingSv(true);
             handleSvPointer(e);
           }}
-          className="relative flex-1 h-[140px] rounded-xs cursor-crosshair overflow-hidden border border-[#333]"
+          className="relative w-full aspect-[2/1] rounded-xs cursor-crosshair overflow-hidden border border-[#333]"
           style={{
             backgroundColor: `hsl(${hue}, 100%, 50%)`,
           }}
@@ -289,7 +309,7 @@ export const ColorPanel: React.FC<ColorPanelProps> = ({
           />
           {/* Wskaźnik wybranego koloru */}
           <div
-            className="absolute w-3 h-3 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white pointer-events-none shadow"
+            className="absolute w-2.5 h-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white pointer-events-none shadow"
             style={{
               left: `${hsv.s * 100}%`,
               top: `${(1 - hsv.v) * 100}%`,
@@ -297,36 +317,37 @@ export const ColorPanel: React.FC<ColorPanelProps> = ({
           />
         </div>
 
-        {/* Pasek Tęczy (Hue Slider) */}
+        {/* Pasek Tęczy (Hue Slider - ciągnący się na pełną wysokość) */}
         <div
           ref={hueStripRef}
           onMouseDown={(e) => {
             setIsDraggingHue(true);
             handleHuePointer(e);
           }}
-          className="relative w-4 h-[140px] rounded-xs cursor-ns-resize border border-[#333]"
+          className="relative w-full h-full min-h-0 rounded-xs cursor-ns-resize border border-[#333]"
           style={{
             background:
               'linear-gradient(to bottom, #ff0000 0%, #ffff00 17%, #00ff00 33%, #00ffff 50%, #0000ff 67%, #ff00ff 83%, #ff0000 100%)',
           }}
         >
           <div
-            className="absolute left-0 right-0 h-1.5 -translate-y-1/2 border border-black bg-white shadow-sm pointer-events-none"
+            className="absolute left-0 right-0 h-1 -translate-y-1/2 border border-black bg-white shadow-sm pointer-events-none"
             style={{ top: `${(hue / 360) * 100}%` }}
           />
         </div>
       </div>
 
       {/* Suwak przezroczystości (Alpha / Krycie pędzla) */}
-      <div className="mb-2.5">
-        <div className="flex justify-between text-[10px] text-[#999] mb-1">
-          <span>Przezroczystość (Alfa):</span>
-          <span className="font-mono text-[#ccc]">{currentColor.a} ({Math.round((currentColor.a / 255) * 100)}%)</span>
+      <div className="mb-2">
+        <div className="flex justify-between text-[10px] text-[#999] mb-0.5">
+          <span>Przezroczystość:</span>
+          <span className="font-mono text-[#ccc]">{Math.round((currentColor.a / 255) * 100)}%</span>
         </div>
         <div
-          className="relative h-4 rounded-xs border border-[#333] overflow-hidden"
+          className="relative h-3.5 rounded-xs border border-[#333] overflow-hidden"
           style={{
-            backgroundImage: `repeating-conic-gradient(#bbb 0% 25%, #eee 0% 50%) 50% / 8px 8px`,
+            backgroundImage: `repeating-conic-gradient(#e4e4e4 0% 25%, #ffffff 0% 50%)`,
+            backgroundSize: '8px 8px',
           }}
         >
           {/* Gradient koloru od alfa 0 do 255 */}
@@ -336,9 +357,9 @@ export const ColorPanel: React.FC<ColorPanelProps> = ({
               background: `linear-gradient(to right, rgba(${currentColor.r},${currentColor.g},${currentColor.b},0), rgba(${currentColor.r},${currentColor.g},${currentColor.b},1))`,
             }}
           />
-          {/* Pionowy znacznik w stylu paska barwy */}
+          {/* Pionowy znacznik */}
           <div
-            className="absolute top-0 bottom-0 w-1.5 -translate-x-1/2 border border-black bg-white shadow-sm pointer-events-none z-10"
+            className="absolute top-0 bottom-0 w-1 -translate-x-1/2 border border-black bg-white shadow-sm pointer-events-none z-10"
             style={{ left: `${(currentColor.a / 255) * 100}%` }}
           />
           <input
@@ -352,16 +373,16 @@ export const ColorPanel: React.FC<ColorPanelProps> = ({
         </div>
       </div>
 
-      {/* Paleta próbek kolorów (32 kolory w dwóch wierszach) */}
-      <div className="border-t border-[#333] pt-2">
-        <div className="flex items-center justify-between mb-1.5">
+      {/* Paleta próbek kolorów (kwadratowe próbki barw) */}
+      <div className="border-t border-[#2a2a2a] pt-1.5">
+        <div className="flex items-center justify-between mb-1">
           <span className="text-[10px] text-[#888]">Próbki barw</span>
           <div className="flex items-center gap-1">
             <button
               type="button"
               onClick={addColorToPalette}
               title="Dodaj obecny kolor do palety"
-              className="p-0.5 text-[#888] hover:text-white hover:bg-[#333] rounded"
+              className="p-0.5 text-[#888] hover:text-white hover:bg-[#333] rounded cursor-pointer"
             >
               <Plus size={11} />
             </button>
@@ -369,7 +390,7 @@ export const ColorPanel: React.FC<ColorPanelProps> = ({
               type="button"
               onClick={() => setPalette(DEFAULT_PALETTE_HEX)}
               title="Przywróć domyślną paletę"
-              className="p-0.5 text-[#888] hover:text-white hover:bg-[#333] rounded"
+              className="p-0.5 text-[#888] hover:text-white hover:bg-[#333] rounded cursor-pointer"
             >
               <Palette size={11} />
             </button>
@@ -377,20 +398,11 @@ export const ColorPanel: React.FC<ColorPanelProps> = ({
         </div>
 
         <div className="grid grid-cols-8 gap-1">
-          {palette.slice(0, 16).map((c, i) => (
+          {palette.slice(0, 32).map((c, i) => (
             <div
-              key={`row1-${i}`}
+              key={`swatch-${i}`}
               onClick={() => updateCurrentColor(hexToSkColor(c, currentColor.a))}
-              className="w-full h-3.5 rounded-xs border border-[#222] cursor-pointer hover:scale-110 hover:border-white transition-transform"
-              style={{ backgroundColor: c }}
-              title={c}
-            />
-          ))}
-          {palette.slice(16, 32).map((c, i) => (
-            <div
-              key={`row2-${i}`}
-              onClick={() => updateCurrentColor(hexToSkColor(c, currentColor.a))}
-              className="w-full h-3.5 rounded-xs border border-[#222] cursor-pointer hover:scale-110 hover:border-white transition-transform"
+              className="w-full aspect-[2/1] rounded-xs border border-[#222] cursor-pointer hover:scale-110 hover:border-white transition-transform"
               style={{ backgroundColor: c }}
               title={c}
             />

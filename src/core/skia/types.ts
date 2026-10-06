@@ -226,9 +226,81 @@ export interface LineAndCurveSettings {
   blendMode: SKBlendMode;
 }
 
+export type CorrectionBrushType =
+  | 'dodge-burn'          // Rozjaśnij / Ściemnij
+  | 'blur-sharpen'        // Rozmyj / Wyostrz
+  | 'saturate-desaturate';// Saturuj / Desaturuj
+
+export type CorrectionSubAction =
+  | 'dodge'
+  | 'burn'
+  | 'blur'
+  | 'sharpen'
+  | 'saturate'
+  | 'desaturate';
+
+export interface CorrectionBrushSettings {
+  brushType: CorrectionBrushType; // 'dodge-burn' | 'blur-sharpen' | 'saturate-desaturate'
+  size: number;                   // 1..2000 px
+  hardness: number;               // 0..100%
+  antiAliasing: boolean;          // Wygładzanie
+  spacing: number;                // 1..500%
+  invertAction: boolean;          // Odwróć działanie (zamienia LPM z PPM)
+}
+
+export type DeformActionType =
+  | 'expand-shrink'   // Zwiększ / Zmniejsz
+  | 'smudge'          // Przesuń (Smudge / Warp)
+  | 'twirl';          // Obróć (Twirl)
+
+export type DeformSubAction =
+  | 'expand'
+  | 'shrink'
+  | 'smudge'
+  | 'smudge-rev'
+  | 'twirl-cw'
+  | 'twirl-ccw';
+
+export interface DeformSettings {
+  actionType: DeformActionType; // 'expand-shrink' | 'smudge' | 'twirl'
+  size: number;                 // 1..2000 px
+  hardness: number;             // 0..100%
+  antiAliasing: boolean;        // Wygładzanie
+  spacing: number;              // 1..500%
+  invertAction: boolean;        // Odwróć działanie
+}
+
+export type ColorReplaceMode = 'single' | 'secondary';
+
+export interface ColorReplaceSettings {
+  size: number;          // 1..2000 px
+  hardness: number;      // 0..100%
+  antiAliasing: boolean; // Wygładzanie
+  spacing: number;       // 1..500%
+  tolerance: number;     // 0..100%
+  mode: ColorReplaceMode;// 'single' = Pojedynczy (próbkowany przy kliknięciu) | 'secondary' = Kolor dodatkowy
+}
+
+export type StampSampleSource = 'image' | 'layer';
+export type StampSourceMode = 'fixed' | 'selected' | 'relative'; // 'nieruchomy' | 'wybrany' | 'względny'
+
+export interface StampSettings {
+  size: number;                    // 1..2000 px
+  hardness: number;                // 0..100%
+  antiAliasing: boolean;           // Wygładzanie
+  spacing: number;                 // 1..500%
+  blendMode: SKBlendMode;          // Tryb mieszania
+  sampleSource: StampSampleSource; // 'image' | 'layer'
+  sourceMode: StampSourceMode;     // 'fixed' | 'selected' | 'relative'
+}
+
 export type ToolType =
   | 'brush'
   | 'eraser'
+  | 'correction-brush'
+  | 'color-replace'
+  | 'stamp'
+  | 'deform'
   | 'pipette'
   | 'select-rect'
   | 'select-ellipse'
@@ -238,7 +310,6 @@ export type ToolType =
   | 'transform-content'
   | 'bucket'
   | 'gradient'
-  | 'stamp'
   | 'shapes'
   | 'line'
   | 'bezier'

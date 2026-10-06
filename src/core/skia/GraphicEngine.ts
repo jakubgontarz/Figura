@@ -18,6 +18,8 @@ import {
   SKPoint,
   SKRectI,
   SelectionSettings,
+  StampSampleSource,
+  StampSettings,
   VectorShapeSettings,
   WandSampleSource,
   getCanvasCompositeOperation,
@@ -471,10 +473,10 @@ export class GraphicEngine {
   }
 
   public cut(): boolean {
-    if (!this.copy()) return false;
-
     const layer = this.getActiveLayer();
-    if (!layer) return false;
+    if (!layer || layer.locked) return false;
+
+    if (!this.copy()) return false;
 
     const tilesBefore = layer.tileGrid.getTilesSnapshot();
     const mask = this.selectionManager.hasActiveSelection ? this.selectionManager.maskCanvas : null;
@@ -513,7 +515,7 @@ export class GraphicEngine {
 
   public pasteCanvas(pastedCanvas: HTMLCanvasElement, customMaskCanvas?: HTMLCanvasElement | null): boolean {
     const layer = this.getActiveLayer();
-    if (!layer) return false;
+    if (!layer || layer.locked) return false;
 
     if (this.transformContentSession) {
       this.commitTransformContent();
@@ -636,6 +638,8 @@ export class GraphicEngine {
 
   public removeActiveLayer(): boolean {
     if (this.layers.length <= 1) return false;
+    const active = this.getActiveLayer();
+    if (active?.locked) return false;
     this.saveFullSnapshot('Usunięcie warstwy');
     this.layers.splice(this.activeLayerIndex, 1);
     this.activeLayerIndex = Math.max(0, this.activeLayerIndex - 1);
@@ -655,10 +659,10 @@ export class GraphicEngine {
 
   public mergeLayerDown(): boolean {
     if (this.activeLayerIndex <= 0) return false;
-    this.saveFullSnapshot('Scalenie w dół');
-
     const topLayer = this.layers[this.activeLayerIndex];
     const bottomLayer = this.layers[this.activeLayerIndex - 1];
+    if (topLayer?.locked || bottomLayer?.locked) return false;
+    this.saveFullSnapshot('Scalenie w dół');
 
     const topFlat = topLayer.tileGrid.compositeToFlatCanvas();
     const mergedCanvas = document.createElement('canvas');
@@ -754,6 +758,13 @@ export class GraphicEngine {
       const newVal = !oldVal;
       this.pushPropertyAction(index, 'visible', oldVal, newVal, 'Zmiana widoczności');
       this.layers[index].visible = newVal;
+      this.markAllLayersDirty();
+    }
+  }
+
+  public toggleLayerLock(index: number): void {
+    if (index >= 0 && index < this.layers.length) {
+      this.layers[index].locked = !this.layers[index].locked;
       this.markAllLayersDirty();
     }
   }
@@ -1542,7 +1553,7 @@ export class GraphicEngine {
       dirtyRect = null;
     }
 
-    const isDrawingLive = this.brushEngine.isDrawing && !!this.brushEngine.activeBrushSettings;
+    const isDrawingLive = this.brushEngine.isDrawing && (!!this.brushEngine.activeBrushSettings || !!this.brushEngine.activeStampSettings);
 
     // SZYBKI DIRTY-RECT PODCZAS RYSOWANIA
     if (dirtyRect && dirtyRect.width > 0 && dirtyRect.height > 0) {
@@ -1591,13 +1602,17 @@ export class GraphicEngine {
               }
             }
 
-            const bSettings = this.brushEngine.activeBrushSettings!;
+            const isStamp = !!this.brushEngine.activeStampSettings;
+            const bSettings = isStamp ? this.brushEngine.activeStampSettings! : this.brushEngine.activeBrushSettings!;
             const brushBlend = this.brushEngine.isEraser ? 'Clear' : bSettings.blendMode;
+            const brushAlpha = isStamp
+              ? this.brushEngine.activeStampAlpha
+              : ('color' in bSettings ? bSettings.color.a / 255 : 1.0);
 
             // 2. Jeśli aktywne jest zaznaczenie, zamaskuj TYLKO pędzel (nie wymazując warstwy)
             if (!this.selectionManager.hasActiveSelection) {
               sctx.save();
-              sctx.globalAlpha = bSettings.color.a / 255;
+              sctx.globalAlpha = brushAlpha;
               sctx.globalCompositeOperation = getCanvasCompositeOperation(brushBlend);
               sctx.drawImage(
                 this.brushEngine.strokeCanvas,
@@ -1624,7 +1639,7 @@ export class GraphicEngine {
               );
 
               sctx.save();
-              sctx.globalAlpha = bSettings.color.a / 255;
+              sctx.globalAlpha = brushAlpha;
               sctx.globalCompositeOperation = getCanvasCompositeOperation(brushBlend);
               sctx.drawImage(brushScratch, 0, 0);
               sctx.restore();
@@ -1653,7 +1668,7 @@ export class GraphicEngine {
       const layer = this.layers[i];
       if (!layer.visible || layer.opacity <= 0) continue;
 
-      const isLiveBrushActive = (i === this.activeLayerIndex && isDrawingLive && !!this.brushEngine.activeBrushSettings);
+      const isLiveBrushActive = (i === this.activeLayerIndex && isDrawingLive && (!!this.brushEngine.activeBrushSettings || !!this.brushEngine.activeStampSettings));
       const isCustomPreviewActive = (i === this.activeLayerIndex && !!customPreviewRenderer);
 
       if (!isLiveBrushActive && !isCustomPreviewActive) {
@@ -1667,12 +1682,16 @@ export class GraphicEngine {
         const activeFlat = layer.tileGrid.compositeToFlatCanvas();
         const afCtx = activeFlat.getContext('2d')!;
 
-        const bSettings = this.brushEngine.activeBrushSettings!;
+        const isStamp = !!this.brushEngine.activeStampSettings;
+        const bSettings = isStamp ? this.brushEngine.activeStampSettings! : this.brushEngine.activeBrushSettings!;
         const brushBlend = this.brushEngine.isEraser ? 'Clear' : bSettings.blendMode;
+        const brushAlpha = isStamp
+          ? this.brushEngine.activeStampAlpha
+          : ('color' in bSettings ? bSettings.color.a / 255 : 1.0);
 
         if (!this.selectionManager.hasActiveSelection) {
           afCtx.save();
-          afCtx.globalAlpha = bSettings.color.a / 255;
+          afCtx.globalAlpha = brushAlpha;
           afCtx.globalCompositeOperation = getCanvasCompositeOperation(brushBlend);
           afCtx.drawImage(this.brushEngine.strokeCanvas, 0, 0);
           afCtx.restore();
@@ -1687,7 +1706,7 @@ export class GraphicEngine {
           bsCtx.drawImage(this.selectionManager.maskCanvas, 0, 0);
 
           afCtx.save();
-          afCtx.globalAlpha = bSettings.color.a / 255;
+          afCtx.globalAlpha = brushAlpha;
           afCtx.globalCompositeOperation = getCanvasCompositeOperation(brushBlend);
           afCtx.drawImage(brushScratch, 0, 0);
           afCtx.restore();
@@ -2063,6 +2082,34 @@ export class GraphicEngine {
     });
 
     layer.updateThumbnail();
+  }
+
+  public drawCroppedComposite(
+    ctx: CanvasRenderingContext2D,
+    cropX: number,
+    cropY: number,
+    cropWidth: number,
+    cropHeight: number,
+    sampleSource: StampSampleSource = 'image'
+  ): void {
+    if (sampleSource === 'layer') {
+      const layer = this.getActiveLayer();
+      if (layer && layer.visible && layer.opacity > 0) {
+        ctx.save();
+        ctx.globalAlpha = layer.opacity;
+        layer.tileGrid.drawCroppedToContext(ctx, cropX, cropY, cropWidth, cropHeight);
+        ctx.restore();
+      }
+    } else {
+      for (const layer of this.layers) {
+        if (!layer.visible || layer.opacity <= 0) continue;
+        ctx.save();
+        ctx.globalAlpha = layer.opacity;
+        ctx.globalCompositeOperation = getCanvasCompositeOperation(layer.blendMode);
+        layer.tileGrid.drawCroppedToContext(ctx, cropX, cropY, cropWidth, cropHeight);
+        ctx.restore();
+      }
+    }
   }
 
   public pickColor(

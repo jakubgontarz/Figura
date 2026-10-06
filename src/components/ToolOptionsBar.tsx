@@ -12,6 +12,12 @@ import {
 import {
   BLEND_MODES,
   BrushSettings,
+  ColorReplaceMode,
+  ColorReplaceSettings,
+  CorrectionBrushSettings,
+  CorrectionBrushType,
+  DeformActionType,
+  DeformSettings,
   GradientSettings,
   LineAndCurveSettings,
   MarkerType,
@@ -21,6 +27,9 @@ import {
   SelectionSettings,
   ShapeFillMode,
   ShapeKind,
+  StampSampleSource,
+  StampSettings,
+  StampSourceMode,
   StrokeAlignment,
   StrokeCornerJoin,
   StrokeDashStyle,
@@ -30,6 +39,16 @@ import {
 interface ToolOptionsBarProps {
   brushSettings: BrushSettings;
   onChangeSettings: (newSettings: Partial<BrushSettings>) => void;
+  correctionBrushSettings?: CorrectionBrushSettings;
+  onChangeCorrectionBrushSettings?: (newSettings: Partial<CorrectionBrushSettings>) => void;
+  deformSettings?: DeformSettings;
+  onChangeDeformSettings?: (newSettings: Partial<DeformSettings>) => void;
+  colorReplaceSettings?: ColorReplaceSettings;
+  onChangeColorReplaceSettings?: (newSettings: Partial<ColorReplaceSettings>) => void;
+  stampSettings?: StampSettings;
+  onChangeStampSettings?: (newSettings: Partial<StampSettings>) => void;
+  stampBasePoint?: { x: number; y: number } | null;
+  onResetStampBasePoint?: () => void;
   selectionSettings: SelectionSettings;
   onChangeSelectionSettings: (newSettings: Partial<SelectionSettings>) => void;
   pipetteSettings: PipetteSettings;
@@ -42,6 +61,7 @@ interface ToolOptionsBarProps {
   onChangeLineAndCurveSettings: (newSettings: Partial<LineAndCurveSettings>) => void;
   primaryColor?: SKColor;
   secondaryColor?: SKColor;
+  onChangePrimaryColorAlpha?: (alpha: number) => void;
   activeTool: string;
   onFlipHorizontal?: () => void;
   onFlipVertical?: () => void;
@@ -77,6 +97,45 @@ function spacingToSlider(spacing: number): number {
 export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
   brushSettings,
   onChangeSettings,
+  correctionBrushSettings = {
+    brushType: 'dodge-burn',
+    size: 20,
+    hardness: 90,
+    antiAliasing: true,
+    spacing: 15,
+    invertAction: false,
+  },
+  onChangeCorrectionBrushSettings,
+  colorReplaceSettings = {
+    size: 20,
+    hardness: 90,
+    antiAliasing: true,
+    spacing: 15,
+    tolerance: 30,
+    mode: 'single',
+  },
+  onChangeColorReplaceSettings,
+  stampSettings = {
+    size: 30,
+    hardness: 85,
+    antiAliasing: true,
+    spacing: 15,
+    blendMode: 'SrcOver',
+    sampleSource: 'image',
+    sourceMode: 'relative',
+  },
+  onChangeStampSettings,
+  stampBasePoint,
+  onResetStampBasePoint,
+  deformSettings = {
+    actionType: 'expand-shrink',
+    size: 60,
+    hardness: 50,
+    antiAliasing: true,
+    spacing: 15,
+    invertAction: false,
+  },
+  onChangeDeformSettings,
   selectionSettings,
   onChangeSelectionSettings,
   pipetteSettings,
@@ -89,6 +148,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
   onChangeLineAndCurveSettings,
   primaryColor,
   secondaryColor,
+  onChangePrimaryColorAlpha,
   activeTool,
   onFlipHorizontal,
   onFlipVertical,
@@ -936,6 +996,566 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
                 </option>
               ))}
             </select>
+          </div>
+        </div>
+      ) : activeTool === 'correction-brush' ? (
+        /* 7b. PASEK OPCJI PĘDZLA KOREKCYJNEGO */
+        <div className="flex items-center gap-3 flex-1 flex-shrink-0">
+          {/* Rodzaj korekcji */}
+          <div className="flex items-center gap-1.5">
+            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Działanie:</label>
+            <select
+              value={correctionBrushSettings.brushType}
+              onChange={(e) =>
+                onChangeCorrectionBrushSettings?.({
+                  brushType: e.target.value as CorrectionBrushType,
+                })
+              }
+              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer font-medium"
+            >
+              <option value="dodge-burn">Rozjaśnij / Ściemnij</option>
+              <option value="blur-sharpen">Rozmyj / Wyostrz</option>
+              <option value="saturate-desaturate">Saturuj / Desaturuj</option>
+            </select>
+          </div>
+
+          {/* Rozmiar */}
+          <div className="flex items-center gap-1.5">
+            <label className="text-[11px] whitespace-nowrap">Rozmiar:</label>
+            <input
+              type="number"
+              min="1"
+              max="2000"
+              value={correctionBrushSettings.size}
+              onChange={(e) => {
+                const val = parseInt(e.target.value);
+                if (!isNaN(val)) {
+                  onChangeCorrectionBrushSettings?.({ size: Math.max(1, Math.min(2000, val)) });
+                }
+              }}
+              className="w-14 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white focus:outline-none focus:border-[#007acc] font-mono"
+            />
+            <input
+              type="range"
+              min="0"
+              max="1000"
+              value={sizeToSlider(correctionBrushSettings.size)}
+              onChange={(e) => {
+                const size = sliderToSize(parseInt(e.target.value));
+                onChangeCorrectionBrushSettings?.({ size });
+              }}
+              className="w-24 h-1 bg-[#444] accent-[#007acc] rounded-lg appearance-none cursor-pointer"
+              title={`Rozmiar: ${correctionBrushSettings.size} px`}
+            />
+          </div>
+
+          {/* Twardość */}
+          <div className="flex items-center gap-1.5">
+            <label className="text-[11px] whitespace-nowrap">Twardość:</label>
+            <span className="text-[11px] text-[#ccc] w-9 text-right font-mono">{correctionBrushSettings.hardness}%</span>
+            <input
+              type="range"
+              min="0"
+              max="100"
+              value={correctionBrushSettings.hardness}
+              onChange={(e) => onChangeCorrectionBrushSettings?.({ hardness: parseInt(e.target.value) })}
+              className="w-20 h-1 bg-[#444] accent-[#007acc] rounded-lg appearance-none cursor-pointer"
+            />
+          </div>
+
+          {/* Wygładzanie */}
+          <label className="flex items-center gap-1.5 cursor-pointer text-[11px] hover:text-white">
+            <input
+              type="checkbox"
+              checked={correctionBrushSettings.antiAliasing}
+              onChange={(e) => onChangeCorrectionBrushSettings?.({ antiAliasing: e.target.checked })}
+              className="rounded bg-[#1e1e1e] border-[#555] text-[#007acc] focus:ring-0 focus:ring-offset-0 h-3.5 w-3.5 cursor-pointer"
+            />
+            <span>Wygładzanie</span>
+          </label>
+
+          {/* Odstęp */}
+          <div className="flex items-center gap-1.5">
+            <label className="text-[11px] whitespace-nowrap">Odstęp:</label>
+            <input
+              type="number"
+              min="1"
+              max="500"
+              value={correctionBrushSettings.spacing}
+              onChange={(e) => {
+                const val = parseInt(e.target.value);
+                if (!isNaN(val)) {
+                  onChangeCorrectionBrushSettings?.({ spacing: Math.max(1, Math.min(500, val)) });
+                }
+              }}
+              className="w-12 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white focus:outline-none focus:border-[#007acc] font-mono"
+            />
+            <span className="text-[10px] text-[#888]">%</span>
+            <input
+              type="range"
+              min="0"
+              max="1000"
+              value={spacingToSlider(correctionBrushSettings.spacing)}
+              onChange={(e) => {
+                const spacing = sliderToSpacing(parseInt(e.target.value));
+                onChangeCorrectionBrushSettings?.({ spacing });
+              }}
+              className="w-20 h-1 bg-[#444] accent-[#007acc] rounded-lg appearance-none cursor-pointer"
+            />
+          </div>
+
+          {/* Odwróć działanie */}
+          <label className="flex items-center gap-1.5 cursor-pointer text-[11px] hover:text-white border-l border-[#444] pl-2.5">
+            <input
+              type="checkbox"
+              checked={correctionBrushSettings.invertAction}
+              onChange={(e) => onChangeCorrectionBrushSettings?.({ invertAction: e.target.checked })}
+              className="rounded bg-[#1e1e1e] border-[#555] text-[#007acc] focus:ring-0 focus:ring-offset-0 h-3.5 w-3.5 cursor-pointer"
+            />
+            <span>Odwróć działanie</span>
+          </label>
+
+          {/* Intensywność (zależna od kanału Alfa) */}
+          <div className="flex items-center gap-1.5 border-l border-[#444] pl-2.5">
+            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Intensywność:</label>
+            <span className="text-[11px] text-[#ccc] w-9 text-right font-mono">
+              {Math.round(((primaryColor?.a ?? 255) / 255) * 100)}%
+            </span>
+            <input
+              type="range"
+              min="1"
+              max="255"
+              value={primaryColor?.a ?? 255}
+              onChange={(e) => {
+                const a = parseInt(e.target.value);
+                onChangePrimaryColorAlpha?.(a);
+              }}
+              className="w-20 h-1 bg-[#444] accent-[#007acc] rounded-lg appearance-none cursor-pointer"
+              title={`Intensywność: ${Math.round(((primaryColor?.a ?? 255) / 255) * 100)}%`}
+            />
+          </div>
+        </div>
+      ) : activeTool === 'color-replace' ? (
+        /* 7c. PASEK OPCJI PĘDZLA ZMIANY KOLORU */
+        <div className="flex items-center gap-3 flex-1 flex-shrink-0">
+          {/* Tryb: Pojedynczy / Kolor dodatkowy */}
+          <div className="flex items-center gap-1.5">
+            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Tryb:</label>
+            <select
+              value={colorReplaceSettings.mode}
+              onChange={(e) =>
+                onChangeColorReplaceSettings?.({
+                  mode: e.target.value as ColorReplaceMode,
+                })
+              }
+              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#10b981] cursor-pointer font-medium"
+            >
+              <option value="single">Pojedynczy (próbkowany)</option>
+              <option value="secondary">Kolor dodatkowy</option>
+            </select>
+          </div>
+
+          {/* Tolerancja */}
+          <div className="flex items-center gap-1.5 border-l border-[#444] pl-2.5">
+            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Tolerancja:</label>
+            <input
+              type="number"
+              min="0"
+              max="100"
+              value={colorReplaceSettings.tolerance}
+              onChange={(e) => {
+                const val = parseInt(e.target.value);
+                if (!isNaN(val)) {
+                  onChangeColorReplaceSettings?.({ tolerance: Math.max(0, Math.min(100, val)) });
+                }
+              }}
+              className="w-12 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white focus:outline-none focus:border-[#10b981] font-mono"
+            />
+            <span className="text-[10px] text-[#888] font-mono w-6">{colorReplaceSettings.tolerance}%</span>
+            <input
+              type="range"
+              min="0"
+              max="100"
+              value={colorReplaceSettings.tolerance}
+              onChange={(e) =>
+                onChangeColorReplaceSettings?.({ tolerance: parseInt(e.target.value) })
+              }
+              className="w-20 h-1 bg-[#444] accent-[#10b981] rounded-lg appearance-none cursor-pointer"
+              title={`Tolerancja koloru: ${colorReplaceSettings.tolerance}%`}
+            />
+          </div>
+
+          {/* Rozmiar */}
+          <div className="flex items-center gap-1.5 border-l border-[#444] pl-2.5">
+            <label className="text-[11px] whitespace-nowrap">Rozmiar:</label>
+            <input
+              type="number"
+              min="1"
+              max="2000"
+              value={colorReplaceSettings.size}
+              onChange={(e) => {
+                const val = parseInt(e.target.value);
+                if (!isNaN(val)) {
+                  onChangeColorReplaceSettings?.({ size: Math.max(1, Math.min(2000, val)) });
+                }
+              }}
+              className="w-14 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white focus:outline-none focus:border-[#10b981] font-mono"
+            />
+            <input
+              type="range"
+              min="0"
+              max="1000"
+              value={sizeToSlider(colorReplaceSettings.size)}
+              onChange={(e) => {
+                const size = sliderToSize(parseInt(e.target.value));
+                onChangeColorReplaceSettings?.({ size });
+              }}
+              className="w-24 h-1 bg-[#444] accent-[#10b981] rounded-lg appearance-none cursor-pointer"
+              title={`Rozmiar: ${colorReplaceSettings.size} px`}
+            />
+          </div>
+
+          {/* Twardość */}
+          <div className="flex items-center gap-1.5">
+            <label className="text-[11px] whitespace-nowrap">Twardość:</label>
+            <span className="text-[11px] text-[#ccc] w-9 text-right font-mono">{colorReplaceSettings.hardness}%</span>
+            <input
+              type="range"
+              min="0"
+              max="100"
+              value={colorReplaceSettings.hardness}
+              onChange={(e) => onChangeColorReplaceSettings?.({ hardness: parseInt(e.target.value) })}
+              className="w-20 h-1 bg-[#444] accent-[#10b981] rounded-lg appearance-none cursor-pointer"
+            />
+          </div>
+
+          {/* Wygładzanie */}
+          <label className="flex items-center gap-1.5 cursor-pointer text-[11px] hover:text-white">
+            <input
+              type="checkbox"
+              checked={colorReplaceSettings.antiAliasing}
+              onChange={(e) => onChangeColorReplaceSettings?.({ antiAliasing: e.target.checked })}
+              className="rounded bg-[#1e1e1e] border-[#555] text-[#10b981] focus:ring-0 focus:ring-offset-0 h-3.5 w-3.5 cursor-pointer"
+            />
+            <span>Wygładzanie</span>
+          </label>
+
+          {/* Odstęp */}
+          <div className="flex items-center gap-1.5">
+            <label className="text-[11px] whitespace-nowrap">Odstęp:</label>
+            <input
+              type="number"
+              min="1"
+              max="500"
+              value={colorReplaceSettings.spacing}
+              onChange={(e) => {
+                const val = parseInt(e.target.value);
+                if (!isNaN(val)) {
+                  onChangeColorReplaceSettings?.({ spacing: Math.max(1, Math.min(500, val)) });
+                }
+              }}
+              className="w-12 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white focus:outline-none focus:border-[#10b981] font-mono"
+            />
+            <span className="text-[10px] text-[#888]">%</span>
+            <input
+              type="range"
+              min="0"
+              max="1000"
+              value={spacingToSlider(colorReplaceSettings.spacing)}
+              onChange={(e) => {
+                const spacing = sliderToSpacing(parseInt(e.target.value));
+                onChangeColorReplaceSettings?.({ spacing });
+              }}
+              className="w-20 h-1 bg-[#444] accent-[#10b981] rounded-lg appearance-none cursor-pointer"
+            />
+          </div>
+        </div>
+      ) : activeTool === 'stamp' ? (
+        /* 7d. PASEK OPCJI PIECZĄTKI (CLONE STAMP) */
+        <div className="flex items-center gap-3 flex-1 flex-shrink-0">
+          {/* Rozmiar */}
+          <div className="flex items-center gap-1.5">
+            <label className="text-[11px] whitespace-nowrap">Rozmiar:</label>
+            <input
+              type="number"
+              min="1"
+              max="2000"
+              value={stampSettings.size}
+              onChange={(e) => {
+                const val = parseInt(e.target.value);
+                if (!isNaN(val)) {
+                  onChangeStampSettings?.({ size: Math.max(1, Math.min(2000, val)) });
+                }
+              }}
+              className="w-14 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white focus:outline-none focus:border-[#007acc] font-mono"
+            />
+            <input
+              type="range"
+              min="0"
+              max="1000"
+              value={sizeToSlider(stampSettings.size)}
+              onChange={(e) => {
+                const size = sliderToSize(parseInt(e.target.value));
+                onChangeStampSettings?.({ size });
+              }}
+              className="w-24 h-1 bg-[#444] accent-[#007acc] rounded-lg appearance-none cursor-pointer"
+              title={`Rozmiar: ${stampSettings.size} px`}
+            />
+          </div>
+
+          {/* Twardość */}
+          <div className="flex items-center gap-1.5 border-l border-[#444] pl-2.5">
+            <label className="text-[11px] whitespace-nowrap">Twardość:</label>
+            <span className="text-[11px] text-[#ccc] w-9 text-right font-mono">{stampSettings.hardness}%</span>
+            <input
+              type="range"
+              min="0"
+              max="100"
+              value={stampSettings.hardness}
+              onChange={(e) => onChangeStampSettings?.({ hardness: parseInt(e.target.value) })}
+              className="w-20 h-1 bg-[#444] accent-[#007acc] rounded-lg appearance-none cursor-pointer"
+            />
+          </div>
+
+          {/* Wygładzanie */}
+          <label className="flex items-center gap-1.5 cursor-pointer text-[11px] hover:text-white border-l border-[#444] pl-2.5">
+            <input
+              type="checkbox"
+              checked={stampSettings.antiAliasing}
+              onChange={(e) => onChangeStampSettings?.({ antiAliasing: e.target.checked })}
+              className="rounded bg-[#1e1e1e] border-[#555] text-[#007acc] focus:ring-0 focus:ring-offset-0 h-3.5 w-3.5 cursor-pointer"
+            />
+            <span>Wygładzanie</span>
+          </label>
+
+          {/* Odstęp */}
+          <div className="flex items-center gap-1.5 border-l border-[#444] pl-2.5">
+            <label className="text-[11px] whitespace-nowrap">Odstęp:</label>
+            <input
+              type="number"
+              min="1"
+              max="500"
+              value={stampSettings.spacing}
+              onChange={(e) => {
+                const val = parseInt(e.target.value);
+                if (!isNaN(val)) {
+                  onChangeStampSettings?.({ spacing: Math.max(1, Math.min(500, val)) });
+                }
+              }}
+              className="w-12 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white focus:outline-none focus:border-[#007acc] font-mono"
+            />
+            <span className="text-[10px] text-[#888]">%</span>
+            <input
+              type="range"
+              min="0"
+              max="1000"
+              value={spacingToSlider(stampSettings.spacing)}
+              onChange={(e) => {
+                const spacing = sliderToSpacing(parseInt(e.target.value));
+                onChangeStampSettings?.({ spacing });
+              }}
+              className="w-20 h-1 bg-[#444] accent-[#007acc] rounded-lg appearance-none cursor-pointer"
+            />
+          </div>
+
+          {/* Tryb mieszania */}
+          <div className="flex items-center gap-1.5 border-l border-[#444] pl-2.5">
+            <label className="text-[11px] whitespace-nowrap">Mieszanie:</label>
+            <select
+              value={stampSettings.blendMode}
+              onChange={(e) => onChangeStampSettings?.({ blendMode: e.target.value as SKBlendMode })}
+              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+            >
+              {BLEND_MODES.map((mode) => (
+                <option key={mode.id} value={mode.id}>
+                  {mode.namePl}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* Próbkowanie (obraz / warstwa) */}
+          <div className="flex items-center gap-1.5 border-l border-[#444] pl-2.5">
+            <label className="text-[11px] whitespace-nowrap">Próbkowanie:</label>
+            <select
+              value={stampSettings.sampleSource}
+              onChange={(e) => onChangeStampSettings?.({ sampleSource: e.target.value as StampSampleSource })}
+              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+            >
+              <option value="image">Obraz</option>
+              <option value="layer">Warstwa</option>
+            </select>
+          </div>
+
+          {/* Punkt bazowy (nieruchomy / wybrany / względny) */}
+          <div className="flex items-center gap-1.5 border-l border-[#444] pl-2.5">
+            <label className="text-[11px] whitespace-nowrap">Punkt bazowy:</label>
+            <select
+              value={stampSettings.sourceMode}
+              onChange={(e) => onChangeStampSettings?.({ sourceMode: e.target.value as StampSourceMode })}
+              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+            >
+              <option value="relative">Względny</option>
+              <option value="selected">Wybrany</option>
+              <option value="fixed">Nieruchomy</option>
+            </select>
+          </div>
+
+          {/* Krycie (z kanału alfa koloru) */}
+          <div className="flex items-center gap-1.5 border-l border-[#444] pl-2.5">
+            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Krycie:</label>
+            <span className="text-[11px] text-[#ccc] w-9 text-right font-mono">
+              {Math.round(((primaryColor?.a ?? 255) / 255) * 100)}%
+            </span>
+            <input
+              type="range"
+              min="1"
+              max="255"
+              value={primaryColor?.a ?? 255}
+              onChange={(e) => {
+                const a = parseInt(e.target.value);
+                onChangePrimaryColorAlpha?.(a);
+              }}
+              className="w-20 h-1 bg-[#444] accent-[#007acc] rounded-lg appearance-none cursor-pointer"
+              title={`Krycie pieczątki (kanał alfa): ${Math.round(((primaryColor?.a ?? 255) / 255) * 100)}%`}
+            />
+          </div>
+        </div>
+      ) : activeTool === 'deform' ? (
+        /* 7e. PASEK OPCJI DEFORMACJI */
+        <div className="flex items-center gap-3 flex-1 flex-shrink-0">
+          {/* Rodzaj działania */}
+          <div className="flex items-center gap-1.5">
+            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Działanie:</label>
+            <select
+              value={deformSettings.actionType}
+              onChange={(e) =>
+                onChangeDeformSettings?.({
+                  actionType: e.target.value as DeformActionType,
+                })
+              }
+              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer font-medium"
+            >
+              <option value="expand-shrink">Zwiększ / Zmniejsz</option>
+              <option value="smudge">Przesuń</option>
+              <option value="twirl">Obróć</option>
+            </select>
+          </div>
+
+          {/* Rozmiar */}
+          <div className="flex items-center gap-1.5">
+            <label className="text-[11px] whitespace-nowrap">Rozmiar:</label>
+            <input
+              type="number"
+              min="1"
+              max="2000"
+              value={deformSettings.size}
+              onChange={(e) => {
+                const val = parseInt(e.target.value);
+                if (!isNaN(val)) {
+                  onChangeDeformSettings?.({ size: Math.max(1, Math.min(2000, val)) });
+                }
+              }}
+              className="w-14 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white focus:outline-none focus:border-[#007acc] font-mono"
+            />
+            <input
+              type="range"
+              min="0"
+              max="1000"
+              value={sizeToSlider(deformSettings.size)}
+              onChange={(e) => {
+                const size = sliderToSize(parseInt(e.target.value));
+                onChangeDeformSettings?.({ size });
+              }}
+              className="w-24 h-1 bg-[#444] accent-[#007acc] rounded-lg appearance-none cursor-pointer"
+              title={`Rozmiar: ${deformSettings.size} px`}
+            />
+          </div>
+
+          {/* Twardość */}
+          <div className="flex items-center gap-1.5">
+            <label className="text-[11px] whitespace-nowrap">Twardość:</label>
+            <span className="text-[11px] text-[#ccc] w-9 text-right font-mono">{deformSettings.hardness}%</span>
+            <input
+              type="range"
+              min="0"
+              max="100"
+              value={deformSettings.hardness}
+              onChange={(e) => onChangeDeformSettings?.({ hardness: parseInt(e.target.value) })}
+              className="w-20 h-1 bg-[#444] accent-[#007acc] rounded-lg appearance-none cursor-pointer"
+            />
+          </div>
+
+          {/* Wygładzanie */}
+          <label className="flex items-center gap-1.5 cursor-pointer text-[11px] hover:text-white">
+            <input
+              type="checkbox"
+              checked={deformSettings.antiAliasing}
+              onChange={(e) => onChangeDeformSettings?.({ antiAliasing: e.target.checked })}
+              className="rounded bg-[#1e1e1e] border-[#555] text-[#007acc] focus:ring-0 focus:ring-offset-0 h-3.5 w-3.5 cursor-pointer"
+            />
+            <span>Wygładzanie</span>
+          </label>
+
+          {/* Odstęp */}
+          <div className="flex items-center gap-1.5">
+            <label className="text-[11px] whitespace-nowrap">Odstęp:</label>
+            <input
+              type="number"
+              min="1"
+              max="500"
+              value={deformSettings.spacing}
+              onChange={(e) => {
+                const val = parseInt(e.target.value);
+                if (!isNaN(val)) {
+                  onChangeDeformSettings?.({ spacing: Math.max(1, Math.min(500, val)) });
+                }
+              }}
+              className="w-12 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white focus:outline-none focus:border-[#007acc] font-mono"
+            />
+            <span className="text-[10px] text-[#888]">%</span>
+            <input
+              type="range"
+              min="0"
+              max="1000"
+              value={spacingToSlider(deformSettings.spacing)}
+              onChange={(e) => {
+                const spacing = sliderToSpacing(parseInt(e.target.value));
+                onChangeDeformSettings?.({ spacing });
+              }}
+              className="w-20 h-1 bg-[#444] accent-[#007acc] rounded-lg appearance-none cursor-pointer"
+            />
+          </div>
+
+          {/* Odwróć działanie */}
+          <label className="flex items-center gap-1.5 cursor-pointer text-[11px] hover:text-white border-l border-[#444] pl-2.5">
+            <input
+              type="checkbox"
+              checked={deformSettings.invertAction}
+              onChange={(e) => onChangeDeformSettings?.({ invertAction: e.target.checked })}
+              className="rounded bg-[#1e1e1e] border-[#555] text-[#007acc] focus:ring-0 focus:ring-offset-0 h-3.5 w-3.5 cursor-pointer"
+            />
+            <span>Odwróć działanie</span>
+          </label>
+
+          {/* Intensywność (zależna od kanału Alfa) */}
+          <div className="flex items-center gap-1.5 border-l border-[#444] pl-2.5">
+            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Intensywność:</label>
+            <span className="text-[11px] text-[#ccc] w-9 text-right font-mono">
+              {Math.round(((primaryColor?.a ?? 255) / 255) * 100)}%
+            </span>
+            <input
+              type="range"
+              min="1"
+              max="255"
+              value={primaryColor?.a ?? 255}
+              onChange={(e) => {
+                const a = parseInt(e.target.value);
+                onChangePrimaryColorAlpha?.(a);
+              }}
+              className="w-20 h-1 bg-[#444] accent-[#007acc] rounded-lg appearance-none cursor-pointer"
+              title={`Intensywność: ${Math.round(((primaryColor?.a ?? 255) / 255) * 100)}%`}
+            />
           </div>
         </div>
       ) : activeTool === 'pan' ? (

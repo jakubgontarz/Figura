@@ -7,6 +7,12 @@ import React, { useRef, useEffect, useState, useCallback } from 'react';
 import { GraphicEngine } from '../core/skia/GraphicEngine.ts';
 import {
   BrushSettings,
+  ColorReplaceSettings,
+  CorrectionBrushSettings,
+  CorrectionSubAction,
+  DeformActionType,
+  DeformSettings,
+  DeformSubAction,
   GradientSettings,
   LineAndCurveSettings,
   PipetteSettings,
@@ -15,6 +21,7 @@ import {
   SKRectI,
   SelectionSettings,
   ShapeKind,
+  StampSettings,
   ToolType,
   VectorShapeSettings,
   skColorToHex,
@@ -31,6 +38,12 @@ interface CanvasViewportProps {
   engine: GraphicEngine;
   engineRevision: number;
   brushSettings: BrushSettings;
+  correctionBrushSettings?: CorrectionBrushSettings;
+  deformSettings?: DeformSettings;
+  colorReplaceSettings?: ColorReplaceSettings;
+  stampSettings?: StampSettings;
+  stampBasePoint?: { x: number; y: number } | null;
+  onSetStampBasePoint?: (pt: { x: number; y: number } | null) => void;
   selectionSettings: SelectionSettings;
   pipetteSettings?: PipetteSettings;
   gradientSettings?: GradientSettings;
@@ -52,6 +65,7 @@ interface CanvasViewportProps {
   onLiveVectorSessionChange?: (isActive: boolean) => void;
   liveVectorCommitTrigger?: number;
   liveVectorCancelTrigger?: number;
+  onShowToast?: (msg: string) => void;
 }
 
 type TransformHandleType =
@@ -185,6 +199,41 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   engine,
   engineRevision,
   brushSettings,
+  correctionBrushSettings = {
+    brushType: 'dodge-burn',
+    size: 20,
+    hardness: 90,
+    antiAliasing: true,
+    spacing: 15,
+    invertAction: false,
+  },
+  deformSettings = {
+    actionType: 'expand-shrink',
+    size: 60,
+    hardness: 50,
+    antiAliasing: true,
+    spacing: 15,
+    invertAction: false,
+  },
+  colorReplaceSettings = {
+    size: 20,
+    hardness: 90,
+    antiAliasing: true,
+    spacing: 15,
+    tolerance: 30,
+    mode: 'single',
+  },
+  stampSettings = {
+    size: 30,
+    hardness: 85,
+    antiAliasing: true,
+    spacing: 15,
+    blendMode: 'SrcOver',
+    sampleSource: 'image',
+    sourceMode: 'relative',
+  },
+  stampBasePoint: externalStampBasePoint,
+  onSetStampBasePoint,
   selectionSettings,
   pipetteSettings,
   gradientSettings = { type: 'linear', repeat: 'none', reverse: false },
@@ -205,6 +254,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   onLiveVectorSessionChange,
   liveVectorCommitTrigger,
   liveVectorCancelTrigger,
+  onShowToast,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -280,11 +330,57 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   const [isShiftKeyDown, setIsShiftKeyDown] = useState<boolean>(false);
   const [isCtrlKeyDown, setIsCtrlKeyDown] = useState<boolean>(false);
   const isSamplingPipetteRef = useRef<boolean>(false);
+  const activeCorrectionButtonRef = useRef<number>(0);
+  const colorReplaceTargetColorRef = useRef<SKColor>({ r: 0, g: 0, b: 0, a: 255 });
+  const stampBasePointRef = useRef<SKPoint | null>(null);
+  const stampStrokeStartPointRef = useRef<SKPoint | null>(null);
+  const stampRelativeOffsetRef = useRef<SKPoint | null>(null);
+
+  useEffect(() => {
+    if (externalStampBasePoint) {
+      stampBasePointRef.current = { ...externalStampBasePoint };
+    }
+  }, [externalStampBasePoint]);
+
+  const getCorrectionSubAction = useCallback(
+    (button: number): CorrectionSubAction => {
+      const isRightClick = button === 2;
+      const isReversed = correctionBrushSettings.invertAction ? !isRightClick : isRightClick;
+      const type = correctionBrushSettings.brushType || 'dodge-burn';
+      if (type === 'dodge-burn') {
+        return isReversed ? 'burn' : 'dodge';
+      } else if (type === 'blur-sharpen') {
+        return isReversed ? 'sharpen' : 'blur';
+      } else {
+        return isReversed ? 'desaturate' : 'saturate';
+      }
+    },
+    [correctionBrushSettings]
+  );
+
+  const getDeformSubAction = useCallback(
+    (button: number): DeformSubAction => {
+      const isRightClick = button === 2;
+      const isReversed = deformSettings.invertAction ? !isRightClick : isRightClick;
+      const action = deformSettings.actionType || 'expand-shrink';
+      if (action === 'expand-shrink') {
+        return isReversed ? 'shrink' : 'expand';
+      } else if (action === 'smudge') {
+        return isReversed ? 'smudge-rev' : 'smudge';
+      } else {
+        return isReversed ? 'twirl-ccw' : 'twirl-cw';
+      }
+    },
+    [deformSettings]
+  );
 
   const isDrawingTool = useCallback((tool: ToolType): boolean => {
     return (
       tool === 'brush' ||
       tool === 'eraser' ||
+      tool === 'correction-brush' ||
+      tool === 'deform' ||
+      tool === 'color-replace' ||
       tool === 'bucket' ||
       tool === 'gradient' ||
       tool === 'line' ||
@@ -295,7 +391,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     );
   }, []);
 
-  const isQuickPipetteActive = isCtrlKeyDown && isDrawingTool(activeTool);
+  const isQuickPipetteActive = isCtrlKeyDown && isDrawingTool(activeTool) && activeTool !== 'stamp';
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -2302,16 +2398,77 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
             oCtx.restore();
           }
 
+          // 7c. WSKAŹNIK PUNKTU BAZOWEGO PIECZĄTKI (CLONE STAMP)
+          if (activeTool === 'stamp' && (stampBasePointRef.current || externalStampBasePoint)) {
+            const bp = stampBasePointRef.current || externalStampBasePoint!;
+            let srcPos: SKPoint = { ...bp };
+            const isDrawingStamp = isDrawing && engine.brushEngine.isStamp;
+
+            if (isDrawingStamp) {
+              if (stampSettings.sourceMode === 'selected' && stampStrokeStartPointRef.current && lastDocPtRef.current) {
+                srcPos = {
+                  x: bp.x + (lastDocPtRef.current.x - stampStrokeStartPointRef.current.x),
+                  y: bp.y + (lastDocPtRef.current.y - stampStrokeStartPointRef.current.y),
+                };
+              } else if (stampSettings.sourceMode === 'relative' && stampRelativeOffsetRef.current && lastDocPtRef.current) {
+                srcPos = {
+                  x: lastDocPtRef.current.x - stampRelativeOffsetRef.current.x,
+                  y: lastDocPtRef.current.y - stampRelativeOffsetRef.current.y,
+                };
+              }
+            } else if (stampSettings.sourceMode === 'relative' && stampRelativeOffsetRef.current && lastDocPtRef.current) {
+              srcPos = {
+                x: lastDocPtRef.current.x - stampRelativeOffsetRef.current.x,
+                y: lastDocPtRef.current.y - stampRelativeOffsetRef.current.y,
+              };
+            }
+
+            const radius = Math.max(0.5, stampSettings.size / 2);
+            oCtx.save();
+
+            // 1. Zewnętrzny ciemny obrys
+            oCtx.strokeStyle = 'rgba(0, 0, 0, 0.6)';
+            oCtx.lineWidth = 2.5 / zoom;
+            oCtx.beginPath();
+            oCtx.arc(srcPos.x, srcPos.y, radius, 0, Math.PI * 2);
+            oCtx.stroke();
+
+            // 2. Wewnętrzny biały przerywany obrys
+            oCtx.strokeStyle = 'rgba(255, 255, 255, 0.85)';
+            oCtx.lineWidth = 1.2 / zoom;
+            oCtx.setLineDash([4 / zoom, 4 / zoom]);
+            oCtx.beginPath();
+            oCtx.arc(srcPos.x, srcPos.y, radius, 0, Math.PI * 2);
+            oCtx.stroke();
+
+            oCtx.restore();
+          }
+
           oCtx.restore();
 
-          // 9. KURSOR OKRĘGU I PLUSIKA DLA PĘDZLA I GUMKI (W PRZESTRZENI EKRANU)
+          // 9. KURSOR OKRĘGU I PLUSIKA DLA PĘDZLA, GUMKI, PĘDZLA KOREKCYJNEGO, DEFORMACJI, ZMIANY KOLORU I PIECZĄTKI (W PRZESTRZENI EKRANU)
           if (
             cursorPosRef.current &&
-            (activeTool === 'brush' || activeTool === 'eraser') &&
+            (activeTool === 'brush' ||
+              activeTool === 'eraser' ||
+              activeTool === 'correction-brush' ||
+              activeTool === 'deform' ||
+              activeTool === 'color-replace' ||
+              activeTool === 'stamp') &&
             !isQuickPipetteActive
           ) {
             const { x: cx, y: cy } = cursorPosRef.current;
-            const brushRadiusScreen = (brushSettings.size / 2) * zoom;
+            const currentSize =
+              activeTool === 'stamp'
+                ? stampSettings.size
+                : activeTool === 'deform'
+                ? deformSettings.size
+                : activeTool === 'color-replace'
+                ? colorReplaceSettings.size
+                : activeTool === 'correction-brush'
+                ? correctionBrushSettings.size
+                : brushSettings.size;
+            const brushRadiusScreen = (currentSize / 2) * zoom;
             oCtx.save();
 
             // Okrągły obrys pędzla
@@ -2329,7 +2486,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
               oCtx.stroke();
             }
 
-            // Idealnie ostry, dopasowany do siatki pikseli czarny plusik 1px z białym obramowaniem 1px
+            // Standardowy, idealnie ostry czarny plusik 1px z białym obramowaniem 1px w centrum kursora
             const ix = Math.round(cx);
             const iy = Math.round(cy);
             const arm = 4; // długość ramienia w px (łączna rozpiętość 9px)
@@ -2343,6 +2500,47 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
             oCtx.fillStyle = '#000000';
             oCtx.fillRect(ix - arm, iy, arm * 2 + 1, 1);
             oCtx.fillRect(ix, iy - arm, 1, arm * 2 + 1);
+
+            // Jeśli przytrzymujemy Ctrl w narzędziu pieczątki: dodaj obok małą kotwicę w czarno-białym kwadraciku
+            if (activeTool === 'stamp' && isCtrlKeyDown) {
+              const bx = ix + 9;
+              const by = iy + 9;
+              const bw = 13;
+              const bh = 13;
+
+              // Czarno-biały kwadracik (podkład biały z czarną ramką)
+              oCtx.fillStyle = '#ffffff';
+              oCtx.fillRect(bx, by, bw, bh);
+              oCtx.strokeStyle = '#000000';
+              oCtx.lineWidth = 1;
+              oCtx.strokeRect(bx + 0.5, by + 0.5, bw - 1, bh - 1);
+
+              // Mała czarna kotwica w środku
+              oCtx.strokeStyle = '#000000';
+              oCtx.fillStyle = '#000000';
+              oCtx.lineWidth = 1;
+
+              // 1. Górne kółko kotwicy
+              const acx = bx + 6.5;
+              oCtx.beginPath();
+              oCtx.arc(acx, by + 3.5, 1.2, 0, Math.PI * 2);
+              oCtx.stroke();
+
+              // 2. Pionowy trzon
+              oCtx.fillRect(bx + 6, by + 4, 1, 5);
+
+              // 3. Pozioma belka
+              oCtx.fillRect(bx + 4, by + 5, 5, 1);
+
+              // 4. Dolny łuk kotwicy
+              oCtx.beginPath();
+              oCtx.arc(acx, by + 8, 3, 0.15 * Math.PI, 0.85 * Math.PI);
+              oCtx.stroke();
+
+              // 5. Zadzior / groty łuku
+              oCtx.fillRect(bx + 3, by + 7.5, 1, 1);
+              oCtx.fillRect(bx + 9, by + 7.5, 1, 1);
+            }
 
             oCtx.restore();
           }
@@ -2579,6 +2777,12 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     selectionSettings,
     pipetteSettings,
     brushSettings.size,
+    correctionBrushSettings.size,
+    deformSettings.size,
+    colorReplaceSettings.size,
+    stampSettings.size,
+    externalStampBasePoint,
+    stampSettings.sourceMode,
     gradientSettings,
     primaryColor,
     secondaryColor,
@@ -2653,7 +2857,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       return;
     }
 
-    if (e.button !== 0) return;
+    if (e.button !== 0 && !((activeTool === 'correction-brush' || activeTool === 'deform') && e.button === 2)) return;
 
     if (containerRef.current) {
       const rect = containerRef.current.getBoundingClientRect();
@@ -2672,7 +2876,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     } catch {}
 
     // SZYBKA PIPETA (Ctrl + Klik / Przeciąganie we wszystkich narzędziach rysowania) lub narzędzie pipety
-    const isQuickPipette = (e.ctrlKey || e.metaKey || isCtrlKeyDown) && isDrawingTool(activeTool);
+    const isQuickPipette = (e.ctrlKey || e.metaKey || isCtrlKeyDown) && isDrawingTool(activeTool) && activeTool !== 'stamp';
     if (activeTool === 'pipette' || isQuickPipette) {
       isSamplingPipetteRef.current = true;
       setIsDrawingSynced(true);
@@ -2684,6 +2888,32 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       );
       onPipettePick(color);
       return;
+    }
+
+    // PIECZĄTKA: Ctrl+Klik ustala punkt bazowy (próbkowany)
+    if (activeTool === 'stamp') {
+      if (e.ctrlKey || e.metaKey || isCtrlKeyDown) {
+        const basePt = { x: pt.x, y: pt.y };
+        stampBasePointRef.current = basePt;
+        stampRelativeOffsetRef.current = null;
+        onSetStampBasePoint?.(basePt);
+        redraw();
+        return;
+      }
+
+      if (!stampBasePointRef.current) {
+        onShowToast?.('Przytrzymaj Ctrl i kliknij na płótnie, aby wybrać punkt bazowy.');
+        return;
+      }
+    }
+
+    // SPRAWDZENIE CZY WARSTWA JEST ZABLOKOWANA DLA NARZĘDZI EDYCYJNYCH
+    const activeLayer = engine.getActiveLayer();
+    if (activeLayer?.locked) {
+      if (isDrawingTool(activeTool) || activeTool === 'transform-content') {
+        onShowToast?.('Warstwa jest zablokowana');
+        return;
+      }
     }
 
     // OBSŁUGA NARZĘDZI TRANSFORMACJI ZAZNACZENIA / ZAWARTOŚCI
@@ -2758,6 +2988,9 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     }
 
     if (activeTool === 'line' || activeTool === 'bezier' || activeTool === 'shapes') {
+      if (activeVectorLineSession || activeVectorBezierSession || activeVectorShapeSession) {
+        commitActiveVectorSession();
+      }
       const p = { x: Math.round(pt.x), y: Math.round(pt.y) };
       setDragStartPointSynced(p);
       setCurrentDragPoint(p);
@@ -2881,6 +3114,109 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         }
         lastBrushStrokeDocPointRef.current = { ...pt };
       }
+    }
+
+    if (activeTool === 'correction-brush') {
+      setIsDrawingSynced(true);
+      activeCorrectionButtonRef.current = e.button;
+      const subAction = getCorrectionSubAction(e.button);
+      const intensity = primaryColor.a;
+      const mask = engine.selectionManager.hasActiveSelection ? engine.selectionManager.maskCanvas : null;
+      const strokeResult = engine.brushEngine.beginCorrectionStroke(
+        pt,
+        layer,
+        correctionBrushSettings,
+        subAction,
+        intensity,
+        mask
+      );
+
+      if (canvasRef.current && strokeResult.dirtyRect.width > 0) {
+        engine.compositeToViewport(canvasRef.current, strokeResult.dirtyRect);
+      }
+      lastBrushStrokeDocPointRef.current = { ...pt };
+    }
+
+    if (activeTool === 'deform') {
+      setIsDrawingSynced(true);
+      activeCorrectionButtonRef.current = e.button;
+      const subAction = getDeformSubAction(e.button);
+      const intensity = primaryColor.a;
+      const mask = engine.selectionManager.hasActiveSelection ? engine.selectionManager.maskCanvas : null;
+      const strokeResult = engine.brushEngine.beginDeformStroke(
+        pt,
+        layer,
+        deformSettings,
+        subAction,
+        intensity,
+        mask
+      );
+
+      if (canvasRef.current && strokeResult.dirtyRect.width > 0) {
+        engine.compositeToViewport(canvasRef.current, strokeResult.dirtyRect);
+      }
+      lastBrushStrokeDocPointRef.current = { ...pt };
+    }
+
+    if (activeTool === 'color-replace') {
+      setIsDrawingSynced(true);
+      let targetColor: SKColor;
+      if (colorReplaceSettings.mode === 'secondary') {
+        targetColor = secondaryColor || { r: 255, g: 255, b: 255, a: 255 };
+      } else {
+        const sampled = engine.pickColor(pt.x, pt.y, 'layer', 1);
+        if (sampled.a === 0) {
+          const imgSample = engine.pickColor(pt.x, pt.y, 'image', 1);
+          targetColor = imgSample.a > 0 ? imgSample : sampled;
+        } else {
+          targetColor = sampled;
+        }
+      }
+      colorReplaceTargetColorRef.current = targetColor;
+
+      const repColor = primaryColor || { r: 255, g: 0, b: 0, a: 255 };
+      const mask = engine.selectionManager.hasActiveSelection ? engine.selectionManager.maskCanvas : null;
+      const strokeResult = engine.brushEngine.beginColorReplaceStroke(
+        pt,
+        layer,
+        colorReplaceSettings,
+        targetColor,
+        repColor,
+        mask
+      );
+
+      if (canvasRef.current && strokeResult.dirtyRect.width > 0) {
+        engine.compositeToViewport(canvasRef.current, strokeResult.dirtyRect);
+      }
+      lastBrushStrokeDocPointRef.current = { ...pt };
+    }
+
+    if (activeTool === 'stamp' && stampBasePointRef.current) {
+      setIsDrawingSynced(true);
+      const alpha = (primaryColor.a ?? 255) / 255;
+      stampStrokeStartPointRef.current = { ...pt };
+
+      if (stampSettings.sourceMode === 'relative' && !stampRelativeOffsetRef.current) {
+        stampRelativeOffsetRef.current = {
+          x: pt.x - stampBasePointRef.current.x,
+          y: pt.y - stampBasePointRef.current.y,
+        };
+      }
+
+      const strokeResult = engine.brushEngine.beginStampStroke(
+        pt,
+        layer,
+        engine,
+        stampSettings,
+        alpha,
+        stampBasePointRef.current,
+        stampRelativeOffsetRef.current
+      );
+
+      if (canvasRef.current && strokeResult.dirtyRect.width > 0) {
+        engine.compositeToViewport(canvasRef.current, strokeResult.dirtyRect);
+      }
+      lastBrushStrokeDocPointRef.current = { ...pt };
     }
   };
 
@@ -3091,6 +3427,117 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         lastBrushStrokeDocPointRef.current = { ...subPt };
       }
     }
+
+    if (activeTool === 'correction-brush') {
+      const subAction = getCorrectionSubAction(activeCorrectionButtonRef.current);
+      const intensity = primaryColor.a;
+      const mask = engine.selectionManager.hasActiveSelection ? engine.selectionManager.maskCanvas : null;
+      const native = e.nativeEvent as PointerEvent;
+      const events: (React.PointerEvent | PointerEvent)[] =
+        typeof native.getCoalescedEvents === 'function' && native.getCoalescedEvents().length > 0
+          ? native.getCoalescedEvents()
+          : [e];
+
+      for (const ev of events) {
+        const subPt = getDocPoint(ev);
+        if (!subPt) continue;
+        const strokeResult = engine.brushEngine.continueCorrectionStroke(
+          subPt,
+          layer,
+          correctionBrushSettings,
+          subAction,
+          intensity,
+          mask
+        );
+
+        if (canvasRef.current && strokeResult.dirtyRect.width > 0) {
+          engine.compositeToViewport(canvasRef.current, strokeResult.dirtyRect);
+        }
+        lastBrushStrokeDocPointRef.current = { ...subPt };
+      }
+    }
+
+    if (activeTool === 'deform') {
+      const subAction = getDeformSubAction(activeCorrectionButtonRef.current);
+      const intensity = primaryColor.a;
+      const mask = engine.selectionManager.hasActiveSelection ? engine.selectionManager.maskCanvas : null;
+      const native = e.nativeEvent as PointerEvent;
+      const events: (React.PointerEvent | PointerEvent)[] =
+        typeof native.getCoalescedEvents === 'function' && native.getCoalescedEvents().length > 0
+          ? native.getCoalescedEvents()
+          : [e];
+
+      for (const ev of events) {
+        const subPt = getDocPoint(ev);
+        if (!subPt) continue;
+        const strokeResult = engine.brushEngine.continueDeformStroke(
+          subPt,
+          layer,
+          deformSettings,
+          subAction,
+          intensity,
+          mask
+        );
+
+        if (canvasRef.current && strokeResult.dirtyRect.width > 0) {
+          engine.compositeToViewport(canvasRef.current, strokeResult.dirtyRect);
+        }
+        lastBrushStrokeDocPointRef.current = { ...subPt };
+      }
+    }
+
+    if (activeTool === 'color-replace' && engine.brushEngine.isColorReplace) {
+      const targetColor = colorReplaceTargetColorRef.current;
+      const repColor = primaryColor || { r: 255, g: 0, b: 0, a: 255 };
+      const mask = engine.selectionManager.hasActiveSelection ? engine.selectionManager.maskCanvas : null;
+      const native = e.nativeEvent as PointerEvent;
+      const events: (React.PointerEvent | PointerEvent)[] =
+        typeof native.getCoalescedEvents === 'function' && native.getCoalescedEvents().length > 0
+          ? native.getCoalescedEvents()
+          : [e];
+
+      for (const ev of events) {
+        const subPt = getDocPoint(ev);
+        if (!subPt) continue;
+        const strokeResult = engine.brushEngine.continueColorReplaceStroke(
+          subPt,
+          layer,
+          colorReplaceSettings,
+          targetColor,
+          repColor,
+          mask
+        );
+
+        if (canvasRef.current && strokeResult.dirtyRect.width > 0) {
+          engine.compositeToViewport(canvasRef.current, strokeResult.dirtyRect);
+        }
+        lastBrushStrokeDocPointRef.current = { ...subPt };
+      }
+    }
+
+    if (activeTool === 'stamp' && engine.brushEngine.isStamp && stampBasePointRef.current) {
+      const native = e.nativeEvent as PointerEvent;
+      const events: (React.PointerEvent | PointerEvent)[] =
+        typeof native.getCoalescedEvents === 'function' && native.getCoalescedEvents().length > 0
+          ? native.getCoalescedEvents()
+          : [e];
+
+      for (const ev of events) {
+        const subPt = getDocPoint(ev);
+        if (!subPt) continue;
+        const strokeResult = engine.brushEngine.continueStampStroke(
+          subPt,
+          layer,
+          engine,
+          stampSettings
+        );
+
+        if (canvasRef.current && strokeResult.dirtyRect.width > 0) {
+          engine.compositeToViewport(canvasRef.current, strokeResult.dirtyRect);
+        }
+        lastBrushStrokeDocPointRef.current = { ...subPt };
+      }
+    }
   };
 
   // POINTER UP
@@ -3257,6 +3704,95 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       }
       onCanvasModified();
     }
+
+    if (activeTool === 'correction-brush') {
+      const subAction = getCorrectionSubAction(activeCorrectionButtonRef.current);
+      const endResult = engine.brushEngine.endCorrectionStroke(layer);
+      if (endResult) {
+        let actionName = 'Korekcja';
+        if (subAction === 'dodge') actionName = 'Rozjaśnienie';
+        else if (subAction === 'burn') actionName = 'Ściemnienie';
+        else if (subAction === 'blur') actionName = 'Rozmycie';
+        else if (subAction === 'sharpen') actionName = 'Wyostrzenie';
+        else if (subAction === 'saturate') actionName = 'Nasycenie';
+        else if (subAction === 'desaturate') actionName = 'Odsycenie';
+
+        engine.pushTileAction({
+          type: 'tiles',
+          description: `Pędzel korekcyjny (${actionName})`,
+          layerIndex: engine.activeLayerIndex,
+          before: endResult.before,
+          after: endResult.after,
+        });
+
+        if (canvasRef.current) {
+          engine.compositeToViewport(canvasRef.current, endResult.dirtyRect);
+        }
+      }
+      onCanvasModified();
+    }
+
+    if (activeTool === 'deform') {
+      const subAction = getDeformSubAction(activeCorrectionButtonRef.current);
+      const endResult = engine.brushEngine.endDeformStroke(layer);
+      if (endResult) {
+        let actionName = 'Deformacja';
+        if (subAction === 'expand') actionName = 'Powiększenie';
+        else if (subAction === 'shrink') actionName = 'Pomniejszenie';
+        else if (subAction === 'smudge' || subAction === 'smudge-rev') actionName = 'Przesunięcie';
+        else if (subAction === 'twirl-cw' || subAction === 'twirl-ccw') actionName = 'Obrót';
+
+        engine.pushTileAction({
+          type: 'tiles',
+          description: `Deformacja (${actionName})`,
+          layerIndex: engine.activeLayerIndex,
+          before: endResult.before,
+          after: endResult.after,
+        });
+
+        if (canvasRef.current) {
+          engine.compositeToViewport(canvasRef.current, endResult.dirtyRect);
+        }
+      }
+      onCanvasModified();
+    }
+
+    if (activeTool === 'color-replace') {
+      const endResult = engine.brushEngine.endColorReplaceStroke(layer);
+      if (endResult) {
+        engine.pushTileAction({
+          type: 'tiles',
+          description: 'Pędzel zmiany koloru',
+          layerIndex: engine.activeLayerIndex,
+          before: endResult.before,
+          after: endResult.after,
+        });
+
+        if (canvasRef.current) {
+          engine.compositeToViewport(canvasRef.current, endResult.dirtyRect);
+        }
+      }
+      onCanvasModified();
+    }
+
+    if (activeTool === 'stamp') {
+      const mask = engine.selectionManager.hasActiveSelection ? engine.selectionManager.maskCanvas : null;
+      const endResult = engine.brushEngine.endStampStroke(layer, mask);
+      if (endResult) {
+        engine.pushTileAction({
+          type: 'tiles',
+          description: 'Pieczątka (Klonowanie)',
+          layerIndex: engine.activeLayerIndex,
+          before: endResult.before,
+          after: endResult.after,
+        });
+
+        if (canvasRef.current) {
+          engine.compositeToViewport(canvasRef.current, endResult.dirtyRect);
+        }
+      }
+      onCanvasModified();
+    }
   };
 
   // KURSOR MYSZY
@@ -3267,6 +3803,9 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     if (
       activeTool === 'brush' ||
       activeTool === 'eraser' ||
+      activeTool === 'correction-brush' ||
+      activeTool === 'color-replace' ||
+      activeTool === 'stamp' ||
       activeTool === 'pipette' ||
       isQuickPipetteActive
     ) {
@@ -3349,6 +3888,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   return (
     <div
       ref={containerRef}
+      onContextMenu={(e) => e.preventDefault()}
       onWheel={handleWheel}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}

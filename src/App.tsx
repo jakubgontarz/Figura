@@ -4,9 +4,13 @@
  */
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { Lock } from 'lucide-react';
 import { GraphicEngine } from './core/skia/GraphicEngine.ts';
 import {
   BrushSettings,
+  ColorReplaceSettings,
+  CorrectionBrushSettings,
+  DeformSettings,
   GradientSettings,
   LineAndCurveSettings,
   PipetteSettings,
@@ -14,6 +18,7 @@ import {
   SKColor,
   SelectionSettings,
   ShapeKind,
+  StampSettings,
   ToolType,
   VectorShapeSettings,
 } from './core/skia/types.ts';
@@ -48,6 +53,20 @@ export default function App() {
     setEngineRevision((r) => r + 1);
   }, []);
 
+  // Stan powiadomień Toast (np. dla zablokowanej warstwy)
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  const showToast = useCallback((msg: string) => {
+    setToastMessage(msg);
+  }, []);
+
+  useEffect(() => {
+    if (toastMessage) {
+      const timer = setTimeout(() => setToastMessage(null), 2500);
+      return () => clearTimeout(timer);
+    }
+  }, [toastMessage]);
+
   // Kolory
   const [primaryColor, setPrimaryColor] = useState<SKColor>({ r: 255, g: 0, b: 0, a: 255 });
   const [secondaryColor, setSecondaryColor] = useState<SKColor>({ r: 255, g: 255, b: 255, a: 255 });
@@ -65,6 +84,64 @@ export default function App() {
   useEffect(() => {
     setBrushSettings((prev) => ({ ...prev, color: primaryColor }));
   }, [primaryColor]);
+
+  // Ustawienia pędzla korekcyjnego
+  const [correctionBrushSettings, setCorrectionBrushSettings] = useState<CorrectionBrushSettings>({
+    brushType: 'dodge-burn',
+    size: 20,
+    hardness: 90,
+    antiAliasing: true,
+    spacing: 15,
+    invertAction: false,
+  });
+
+  const handleUpdateCorrectionBrushSettings = (newSettings: Partial<CorrectionBrushSettings>) => {
+    setCorrectionBrushSettings((prev) => ({ ...prev, ...newSettings }));
+  };
+
+  // Ustawienia pędzla podmiany koloru
+  const [colorReplaceSettings, setColorReplaceSettings] = useState<ColorReplaceSettings>({
+    size: 20,
+    hardness: 90,
+    antiAliasing: true,
+    spacing: 15,
+    tolerance: 30,
+    mode: 'single',
+  });
+
+  const handleUpdateColorReplaceSettings = (newSettings: Partial<ColorReplaceSettings>) => {
+    setColorReplaceSettings((prev) => ({ ...prev, ...newSettings }));
+  };
+
+  // Ustawienia pieczątki (klonowania)
+  const [stampSettings, setStampSettings] = useState<StampSettings>({
+    size: 30,
+    hardness: 85,
+    antiAliasing: true,
+    spacing: 15,
+    blendMode: 'SrcOver',
+    sampleSource: 'image',
+    sourceMode: 'relative',
+  });
+  const [stampBasePoint, setStampBasePoint] = useState<{ x: number; y: number } | null>(null);
+
+  const handleUpdateStampSettings = (newSettings: Partial<StampSettings>) => {
+    setStampSettings((prev) => ({ ...prev, ...newSettings }));
+  };
+
+  // Ustawienia deformacji
+  const [deformSettings, setDeformSettings] = useState<DeformSettings>({
+    actionType: 'expand-shrink',
+    size: 60,
+    hardness: 50,
+    antiAliasing: true,
+    spacing: 15,
+    invertAction: false,
+  });
+
+  const handleUpdateDeformSettings = (newSettings: Partial<DeformSettings>) => {
+    setDeformSettings((prev) => ({ ...prev, ...newSettings }));
+  };
 
   // Ustawienia zaznaczania
   const [selectionSettings, setSelectionSettings] = useState<SelectionSettings>({
@@ -309,16 +386,24 @@ export default function App() {
   };
 
   const handleCut = useCallback(() => {
+    if (engine.getActiveLayer()?.locked) {
+      showToast('Warstwa jest zablokowana');
+      return;
+    }
     if (engine.cut()) {
       bumpEngineRevision();
     }
-  }, [engine, bumpEngineRevision]);
+  }, [engine, bumpEngineRevision, showToast]);
 
   const handleCopy = useCallback(() => {
     engine.copy();
   }, [engine]);
 
   const pasteImageBlob = useCallback((file: File | Blob) => {
+    if (engine.getActiveLayer()?.locked) {
+      showToast('Warstwa jest zablokowana');
+      return;
+    }
     const img = new Image();
     img.onload = () => {
       const cvs = document.createElement('canvas');
@@ -336,9 +421,13 @@ export default function App() {
       bumpEngineRevision();
     };
     img.src = URL.createObjectURL(file);
-  }, [engine, bumpEngineRevision]);
+  }, [engine, bumpEngineRevision, showToast]);
 
   const handlePaste = useCallback(() => {
+    if (engine.getActiveLayer()?.locked) {
+      showToast('Warstwa jest zablokowana');
+      return;
+    }
     // 1. Najpierw spróbuj odczytać aktualny obraz ze schowka systemowego (zrzuty ekranu, skopiowane obrazy z przeglądarki/OS)
     if (navigator.clipboard && typeof navigator.clipboard.read === 'function') {
       navigator.clipboard
@@ -518,6 +607,10 @@ export default function App() {
       else if (key === 't') setActiveTool('transform-selection');
       else if (key === 'b') setActiveTool('brush');
       else if (key === 'e') setActiveTool('eraser');
+      else if (key === 'j') setActiveTool('correction-brush');
+      else if (key === 'r') setActiveTool('color-replace');
+      else if (key === 'c') setActiveTool('stamp');
+      else if (key === 'd' && !(e.ctrlKey || e.metaKey)) setActiveTool('deform');
       else if (key === 'k') setActiveTool('pipette');
       else if (key === 'f') setActiveTool('bucket');
       else if (key === 'g') setActiveTool('gradient');
@@ -527,6 +620,19 @@ export default function App() {
       else if (key === 'x') {
         setPrimaryColor(secondaryColor);
         setSecondaryColor(primaryColor);
+      } else if (e.key === '[' || e.key === ']') {
+        const delta = e.key === ']' ? 5 : -5;
+        if (activeTool === 'brush' || activeTool === 'eraser') {
+          setBrushSettings((prev) => ({ ...prev, size: Math.max(1, Math.min(2000, prev.size + delta)) }));
+        } else if (activeTool === 'correction-brush') {
+          setCorrectionBrushSettings((prev) => ({ ...prev, size: Math.max(1, Math.min(2000, prev.size + delta)) }));
+        } else if (activeTool === 'color-replace') {
+          setColorReplaceSettings((prev) => ({ ...prev, size: Math.max(1, Math.min(2000, prev.size + delta)) }));
+        } else if (activeTool === 'stamp') {
+          setStampSettings((prev) => ({ ...prev, size: Math.max(1, Math.min(2000, prev.size + delta)) }));
+        } else if (activeTool === 'deform') {
+          setDeformSettings((prev) => ({ ...prev, size: Math.max(1, Math.min(2000, prev.size + delta)) }));
+        }
       } else if (e.key === 'Delete') {
         const mask = engine.selectionManager.hasActiveSelection ? engine.selectionManager.maskCanvas : null;
         engine.getActiveLayer()?.clear(mask);
@@ -536,7 +642,7 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [engine, primaryColor, secondaryColor, bumpEngineRevision, handleCut, handleCopy, handlePaste]);
+  }, [engine, primaryColor, secondaryColor, activeTool, bumpEngineRevision, handleCut, handleCopy, handlePaste]);
 
   const menuHandlers: MenuActionHandlers = {
     onNew: () => setIsNewDocModalOpen(true),
@@ -671,6 +777,16 @@ export default function App() {
       <ToolOptionsBar
         brushSettings={brushSettings}
         onChangeSettings={handleUpdateBrushSettings}
+        correctionBrushSettings={correctionBrushSettings}
+        onChangeCorrectionBrushSettings={handleUpdateCorrectionBrushSettings}
+        colorReplaceSettings={colorReplaceSettings}
+        onChangeColorReplaceSettings={handleUpdateColorReplaceSettings}
+        stampSettings={stampSettings}
+        onChangeStampSettings={handleUpdateStampSettings}
+        stampBasePoint={stampBasePoint}
+        onResetStampBasePoint={() => setStampBasePoint(null)}
+        deformSettings={deformSettings}
+        onChangeDeformSettings={handleUpdateDeformSettings}
         selectionSettings={selectionSettings}
         onChangeSelectionSettings={handleUpdateSelectionSettings}
         pipetteSettings={pipetteSettings}
@@ -683,6 +799,7 @@ export default function App() {
         onChangeLineAndCurveSettings={handleUpdateLineAndCurveSettings}
         primaryColor={primaryColor}
         secondaryColor={secondaryColor}
+        onChangePrimaryColorAlpha={(a) => setPrimaryColor((prev) => ({ ...prev, a }))}
         activeTool={activeTool}
         onFlipHorizontal={() => {
           engine.selectionManager.flipHorizontal();
@@ -699,6 +816,14 @@ export default function App() {
 
       {/* 4. Główny obszar roboczy */}
       <div className="flex flex-1 min-h-0 overflow-hidden relative">
+        {/* Pływające powiadomienie Toast dla zablokowanej warstwy */}
+        {toastMessage && (
+          <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-[#2d1b10] border border-amber-500/80 text-amber-200 px-4 py-2 rounded-md shadow-2xl text-xs font-semibold flex items-center gap-2 z-50 backdrop-blur-md pointer-events-none animate-bounce">
+            <Lock size={15} className="text-amber-400 shrink-0" />
+            <span>{toastMessage}</span>
+          </div>
+        )}
+
         <Toolbox
           activeTool={activeTool}
           onSelectTool={setActiveTool}
@@ -710,6 +835,12 @@ export default function App() {
           engine={engine}
           engineRevision={engineRevision}
           brushSettings={brushSettings}
+          correctionBrushSettings={correctionBrushSettings}
+          colorReplaceSettings={colorReplaceSettings}
+          stampSettings={stampSettings}
+          stampBasePoint={stampBasePoint}
+          onSetStampBasePoint={setStampBasePoint}
+          deformSettings={deformSettings}
           selectionSettings={selectionSettings}
           onChangeSelectionSettings={handleUpdateSelectionSettings}
           pipetteSettings={pipetteSettings}
@@ -734,10 +865,11 @@ export default function App() {
           onLiveVectorSessionChange={setIsLiveVectorSessionActive}
           liveVectorCommitTrigger={liveVectorCommitTrigger}
           liveVectorCancelTrigger={liveVectorCancelTrigger}
+          onShowToast={showToast}
         />
 
         {/* Prawy panel boczny: Kolor + Warstwy */}
-        <div className="w-[280px] bg-[#252526] border-l border-[#1a1a1a] p-1.5 flex flex-col gap-2 overflow-y-auto z-10 select-none flex-shrink-0">
+        <div className="w-[224px] bg-[#1e1e1e] border-l border-[#2c2c2d] p-2 flex flex-col gap-3 overflow-y-auto z-10 select-none flex-shrink-0">
           <ColorPanel
             primaryColor={primaryColor}
             secondaryColor={secondaryColor}
@@ -763,6 +895,10 @@ export default function App() {
               bumpEngineRevision();
             }}
             onRemoveLayer={() => {
+              if (engine.getActiveLayer()?.locked) {
+                showToast('Nie można usunąć zablokowanej warstwy');
+                return;
+              }
               engine.removeActiveLayer();
               bumpEngineRevision();
             }}
@@ -771,6 +907,12 @@ export default function App() {
               bumpEngineRevision();
             }}
             onMergeDown={() => {
+              const activeL = engine.getActiveLayer();
+              const bottomL = engine.layers[engine.activeLayerIndex - 1];
+              if (activeL?.locked || bottomL?.locked) {
+                showToast('Warstwa jest zablokowana');
+                return;
+              }
               engine.mergeLayerDown();
               bumpEngineRevision();
             }}
@@ -788,6 +930,10 @@ export default function App() {
             }}
             onToggleVisibility={(idx) => {
               engine.toggleLayerVisibility(idx);
+              bumpEngineRevision();
+            }}
+            onToggleLock={(idx) => {
+              engine.toggleLayerLock(idx);
               bumpEngineRevision();
             }}
             onChangeOpacity={(idx, opacity, recordOldValue) => {

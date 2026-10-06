@@ -1,6 +1,6 @@
 {
-  "name": "Figura",
-  "description": "Odkryj program Figura – darmowy i zaawansowany edytor grafiki rastrowej online. Twórz projekty, korzystaj z warstw, trybów mieszania, filtrów i obróbki nieniszczącej w przeglądarce.",
+  "name": "Remix Figura",
+  "description": "High-performance web-based image editor featuring real-time layering, blending modes, and SkiaSharp-ready architecture for seamless future WPF migration.",
   "requestFramePermissions": [],
   "majorCapabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
