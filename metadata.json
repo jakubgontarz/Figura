@@ -1,6 +1,6 @@
 {
   "name": "Figura",
-  "description": "High-performance web-based image editor.",
+  "description": "Odkryj program Figura – darmowy i zaawansowany edytor grafiki rastrowej online. Twórz projekty, korzystaj z warstw, trybów mieszania, filtrów i obróbki nieniszczącej w przeglądarce.",
   "requestFramePermissions": [],
   "majorCapabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
