@@ -24,6 +24,8 @@ import {
   Minus,
   Spline,
   Hand,
+  ZoomIn,
+  Type,
 } from 'lucide-react';
 import { ShapeKind, ToolType } from '../core/skia/types.ts';
 
@@ -155,10 +157,22 @@ export const Toolbox: React.FC<ToolboxProps> = ({
       icon: <Spline size={16} strokeWidth={2.2} />,
     },
     {
+      id: 'text',
+      name: 'Tekst',
+      shortcut: 'Y',
+      icon: <Type size={16} strokeWidth={2.2} />,
+    },
+    {
       id: 'pan',
       name: 'Nawigacja',
       shortcut: 'H',
       icon: <Hand size={16} strokeWidth={2.2} />,
+    },
+    {
+      id: 'zoom',
+      name: 'Lupa',
+      shortcut: 'Z',
+      icon: <ZoomIn size={16} strokeWidth={2.2} />,
     },
   ];
 

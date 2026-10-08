@@ -5,7 +5,7 @@
 
 import { Layer } from './Layer.ts';
 import { BrushEngine } from './BrushEngine.ts';
-import { SelectionManager } from './SelectionManager.ts';
+import { SelectionManager, SelectionSnapshot } from './SelectionManager.ts';
 import { DEFAULT_TILE_SIZE } from './TileGrid.ts';
 import {
   BrushSettings,
@@ -21,6 +21,8 @@ import {
   StampSampleSource,
   StampSettings,
   VectorShapeSettings,
+  TextCharStyle,
+  TextToolSettings,
   WandSampleSource,
   getCanvasCompositeOperation,
 } from './types.ts';
@@ -29,13 +31,14 @@ import {
   renderVectorLine,
   renderVectorShape,
 } from './VectorRenderer.ts';
+import { RichText, renderVectorText } from './TextEngine.ts';
 
 export interface TransformContentSession {
   sourceContentCanvas: HTMLCanvasElement;
   sourceBounds: SKRectI;
   sourceLayerIndex: number;
   initialTilesSnapshot: { tx: number; ty: number; imgData: ImageData; hasContent: boolean }[];
-  initialSelectionSnapshot: { imgData: ImageData | null; seedPoint: SKPoint | null };
+  initialSelectionSnapshot: SelectionSnapshot;
   interpolation: InterpolationMode;
 }
 
@@ -64,8 +67,8 @@ export type HistoryAction =
   | {
       type: 'selection';
       description: string;
-      before: { imgData: ImageData | null; seedPoint: SKPoint | null };
-      after: { imgData: ImageData | null; seedPoint: SKPoint | null };
+      before: SelectionSnapshot;
+      after: SelectionSnapshot;
     }
   | {
       type: 'transformContent';
@@ -73,8 +76,8 @@ export type HistoryAction =
       layerIndex: number;
       tilesBefore: { tx: number; ty: number; imgData: ImageData; hasContent: boolean }[];
       tilesAfter: { tx: number; ty: number; imgData: ImageData; hasContent: boolean }[];
-      selectionBefore: { imgData: ImageData | null; seedPoint: SKPoint | null };
-      selectionAfter: { imgData: ImageData | null; seedPoint: SKPoint | null };
+      selectionBefore: SelectionSnapshot;
+      selectionAfter: SelectionSnapshot;
     };
 
 /**
@@ -102,12 +105,14 @@ export class GraphicEngine {
   public bucketSeedPoint: SKPoint | null = null;
   public bucketInitialTilesSnapshot: { tx: number; ty: number; imgData: ImageData; hasContent: boolean }[] | null = null;
   public bucketInitialLayerIndex: number = -1;
+  public bucketColorSource: 'primary' | 'secondary' = 'primary';
 
   // Stan interaktywnego narzędzia Wypełnienie gradientowe (Gradient Fill)
   public gradientStartPoint: SKPoint | null = null;
   public gradientEndPoint: SKPoint | null = null;
   public gradientInitialTilesSnapshot: { tx: number; ty: number; imgData: ImageData; hasContent: boolean }[] | null = null;
   public gradientInitialLayerIndex: number = -1;
+  public gradientColorSource: 'primary' | 'secondary' = 'primary';
 
   // Wewnętrzny schowek aplikacji FIGURA
   public clipboardCanvas: HTMLCanvasElement | null = null;
@@ -271,6 +276,12 @@ export class GraphicEngine {
   }
 
   public undo(): boolean {
+    if (this.bucketSeedPoint) {
+      this.commitPaintBucketSession();
+    }
+    if (this.gradientStartPoint) {
+      this.commitGradientSession();
+    }
     if (this.undoStack.length === 0) return false;
 
     if (this.transformContentSession) {
@@ -343,6 +354,12 @@ export class GraphicEngine {
   }
 
   public redo(): boolean {
+    if (this.bucketSeedPoint) {
+      this.commitPaintBucketSession();
+    }
+    if (this.gradientStartPoint) {
+      this.commitGradientSession();
+    }
     if (this.redoStack.length === 0) return false;
 
     if (this.transformContentSession) {
@@ -441,7 +458,7 @@ export class GraphicEngine {
       const maskImgData = cleanCtx.getImageData(0, 0, this.width, this.height);
       const mData = maskImgData.data;
       for (let i = 3; i < mData.length; i += 4) {
-        mData[i] = mData[i] > 10 ? 255 : 0;
+        mData[i] = mData[i] > 0 ? 255 : 0;
       }
       cleanCtx.putImageData(maskImgData, 0, 0);
 
@@ -491,7 +508,7 @@ export class GraphicEngine {
       const maskImgData = cctx.getImageData(0, 0, this.width, this.height);
       const mData = maskImgData.data;
       for (let i = 3; i < mData.length; i += 4) {
-        mData[i] = mData[i] > 10 ? 255 : 0;
+        mData[i] = mData[i] > 0 ? 255 : 0;
       }
       cctx.putImageData(maskImgData, 0, 0);
 
@@ -537,7 +554,7 @@ export class GraphicEngine {
       let minX = pastedCanvas.width, minY = pastedCanvas.height, maxX = -1, maxY = -1;
       for (let y = 0; y < pastedCanvas.height; y++) {
         for (let x = 0; x < pastedCanvas.width; x++) {
-          if (pData[(y * pastedCanvas.width + x) * 4 + 3] > 10) {
+          if (pData[(y * pastedCanvas.width + x) * 4 + 3] > 0) {
             if (x < minX) minX = x;
             if (x > maxX) maxX = x;
             if (y < minY) minY = y;
@@ -824,10 +841,12 @@ export class GraphicEngine {
   public applySelectionShape(
     shapeType: 'rect' | 'ellipse' | 'lasso',
     points: SKPoint[],
-    settings: SelectionSettings
+    settings: SelectionSettings,
+    isShiftPressed: boolean = false,
+    hasMoved: boolean = true
   ): void {
     const before = this.selectionManager.getMaskSnapshot();
-    this.selectionManager.applyGeometricSelection(shapeType, points, settings);
+    this.selectionManager.applyGeometricSelection(shapeType, points, settings, isShiftPressed, hasMoved);
     const after = this.selectionManager.getMaskSnapshot();
     this.pushSelectionAction(before, after, `Zaznaczenie (${shapeType})`);
     this.markAllLayersDirty();
@@ -890,7 +909,8 @@ export class GraphicEngine {
     seedPoint: SKPoint,
     selectionSettings: SelectionSettings,
     brushSettings: BrushSettings,
-    isNewClick: boolean = true
+    isNewClick: boolean = true,
+    colorSource?: 'primary' | 'secondary'
   ): boolean {
     const layer = this.getActiveLayer();
     if (!layer || !layer.visible) return false;
@@ -900,6 +920,9 @@ export class GraphicEngine {
       this.bucketInitialLayerIndex = this.activeLayerIndex;
       this.bucketInitialTilesSnapshot = layer.tileGrid.getTilesSnapshot();
       this.bucketSeedPoint = { ...seedPoint };
+      if (colorSource) {
+        this.bucketColorSource = colorSource;
+      }
     } else {
       // Przy modyfikacji parametrów na żywo lub przesuwaniu uchwytu:
       // Zawsze najpierw przywróć czysty, pierwotny stan warstwy przed próbkowaniem!
@@ -1092,6 +1115,7 @@ export class GraphicEngine {
     this.bucketInitialTilesSnapshot = null;
     this.bucketInitialLayerIndex = -1;
     this.bucketSeedPoint = null;
+    this.bucketColorSource = 'primary';
   }
 
   // --- INTERAKTYWNE WYPEŁNIENIE GRADIENTOWE (GRADIENT FILL) ---
@@ -1124,18 +1148,25 @@ export class GraphicEngine {
     primaryColor: SKColor,
     secondaryColor: SKColor,
     blendMode: SKBlendMode = 'SrcOver',
-    isNewDrag: boolean = true
+    isNewDrag: boolean = true,
+    colorSource?: 'primary' | 'secondary'
   ): boolean {
     const layer = this.getActiveLayer();
     if (!layer || !layer.visible) return false;
 
     if (isNewDrag) {
       this.commitGradientSession();
+      if (colorSource) {
+        this.gradientColorSource = colorSource;
+      }
       this.gradientInitialLayerIndex = this.activeLayerIndex;
       this.gradientInitialTilesSnapshot = layer.tileGrid.getTilesSnapshot();
       this.gradientStartPoint = { ...p0 };
       this.gradientEndPoint = { ...p1 };
     } else {
+      if (colorSource) {
+        this.gradientColorSource = colorSource;
+      }
       this.restoreGradientInitialTiles();
       this.gradientStartPoint = { ...p0 };
       this.gradientEndPoint = { ...p1 };
@@ -1180,9 +1211,13 @@ export class GraphicEngine {
     const vx = -uy;
     const vy = ux;
 
-    // Kolory początkowy i końcowy (z uwzględnieniem odwrócenia)
-    const c0 = settings.reverse ? secondaryColor : primaryColor;
-    const c1 = settings.reverse ? primaryColor : secondaryColor;
+    // Kolory początkowy i końcowy (z uwzględnieniem prawego przycisku myszy / koloru dodatkowego i odwrócenia)
+    const isSecondary = this.gradientColorSource === 'secondary';
+    const effectivePrimary = isSecondary ? secondaryColor : primaryColor;
+    const effectiveSecondary = isSecondary ? primaryColor : secondaryColor;
+
+    const c0 = settings.reverse ? effectiveSecondary : effectivePrimary;
+    const c1 = settings.reverse ? effectivePrimary : effectiveSecondary;
 
     // Tablica LUT dla 1024 próbek koloru (dla maksymalnej płynności)
     const lutR = new Uint8Array(1024);
@@ -1345,6 +1380,7 @@ export class GraphicEngine {
     this.gradientInitialLayerIndex = -1;
     this.gradientStartPoint = null;
     this.gradientEndPoint = null;
+    this.gradientColorSource = 'primary';
   }
 
   // --- MODYFIKACJA ZAWARTOŚCI ZAZNACZENIA (TRANSFORM CONTENT) ---
@@ -1381,7 +1417,7 @@ export class GraphicEngine {
     const maskImgData = cctx.getImageData(0, 0, this.width, this.height);
     const mData = maskImgData.data;
     for (let i = 3; i < mData.length; i += 4) {
-      mData[i] = mData[i] > 10 ? 255 : 0;
+      mData[i] = mData[i] > 0 ? 255 : 0;
     }
     cctx.putImageData(maskImgData, 0, 0);
 
@@ -1469,6 +1505,13 @@ export class GraphicEngine {
         -st.initialBounds.width / 2,
         -st.initialBounds.height / 2
       );
+      tctx.restore();
+
+      // Przycina przekształconą zawartość dokładnie do aktualnej maski zaznaczenia,
+      // co uniemożliwia wyciekanie rozmytych pikseli poza krawędzie zaznaczenia.
+      tctx.save();
+      tctx.globalCompositeOperation = 'destination-in';
+      tctx.drawImage(this.selectionManager.maskCanvas, 0, 0);
       tctx.restore();
 
       // Wklej wyrenderowany fragment do kafelków warstwy
@@ -1924,6 +1967,53 @@ export class GraphicEngine {
     };
 
     this.bakeCanvasToLayer(layer, tempCanvas, dirtyRect, 'Figura', settings.blendMode);
+  }
+
+  public commitVectorText(
+    center: SKPoint,
+    width: number,
+    height: number,
+    angle: number,
+    rt: RichText,
+    settings: TextToolSettings,
+    fallbackStyle?: TextCharStyle
+  ): void {
+    const layer = this.getActiveLayer();
+    if (!layer || !layer.visible) return;
+    if (rt.length === 0) return;
+
+    const tempCanvas = document.createElement('canvas');
+    tempCanvas.width = this.width;
+    tempCanvas.height = this.height;
+    const tctx = tempCanvas.getContext('2d');
+    if (!tctx) return;
+
+    const res = renderVectorText(tctx, center, width, height, angle, rt, settings, undefined, fallbackStyle);
+
+    if (this.selectionManager.hasActiveSelection) {
+      tctx.save();
+      tctx.globalCompositeOperation = 'destination-in';
+      tctx.drawImage(this.selectionManager.maskCanvas, 0, 0);
+      tctx.restore();
+    }
+
+    const diag = Math.hypot(Math.max(width, res.extentWidth), Math.max(height, res.extentHeight)) / 2;
+    const pad = Math.max(10, settings.strokeWidth * 2 + 10);
+    const minX = Math.max(0, Math.floor(center.x - diag - pad));
+    const minY = Math.max(0, Math.floor(center.y - diag - pad));
+    const maxX = Math.min(this.width, Math.ceil(center.x + diag + pad));
+    const maxY = Math.min(this.height, Math.ceil(center.y + diag + pad));
+
+    const dirtyRect: SKRectI = {
+      left: minX,
+      top: minY,
+      right: maxX,
+      bottom: maxY,
+      width: Math.max(0, maxX - minX),
+      height: Math.max(0, maxY - minY),
+    };
+
+    this.bakeCanvasToLayer(layer, tempCanvas, dirtyRect, 'Tekst', settings.blendMode);
   }
 
   private bakeCanvasToLayer(

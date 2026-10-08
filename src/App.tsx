@@ -21,6 +21,7 @@ import {
   StampSettings,
   ToolType,
   VectorShapeSettings,
+  TextToolSettings,
 } from './core/skia/types.ts';
 import { TitleBar } from './components/TitleBar.tsx';
 import { MenuBar, MenuActionHandlers } from './components/MenuBar.tsx';
@@ -209,6 +210,37 @@ export default function App() {
     setVectorShapeSettings((prev) => ({ ...prev, ...newSettings }));
   };
 
+  // Ustawienia narzędzia tekstu
+  const [textSettings, setTextSettings] = useState<TextToolSettings>({
+    fontFamily: 'Arial',
+    fontSize: 32,
+    bold: false,
+    italic: false,
+    underline: false,
+    script: 'normal',
+    align: 'left',
+    lineSpacing: 100,
+    letterSpacing: 0,
+    padding: 0,
+    antiAliasing: true,
+    fillMode: 'primary',
+    strokeWidth: 0,
+    strokeColor: { r: 255, g: 0, b: 0, a: 255 },
+    fillColor: { r: 255, g: 255, b: 255, a: 255 },
+    blendMode: 'SrcOver',
+  });
+  // Zmiana ustawień przez użytkownika (pasek opcji) – edytor tekstu stosuje ją do zaznaczenia / całego tekstu
+  const [textFormatRequest, setTextFormatRequest] = useState<{ id: number; patch: Partial<TextToolSettings> } | null>(null);
+  const handleUpdateTextSettings = (patch: Partial<TextToolSettings>) => {
+    setTextSettings((prev) => ({ ...prev, ...patch }));
+    setTextFormatRequest((prev) => ({ id: (prev?.id ?? 0) + 1, patch }));
+  };
+  // Synchronizacja paska opcji ze stylem w miejscu kursora (bez ponownego stosowania do tekstu)
+  const handleSyncTextSettings = useCallback((patch: Partial<TextToolSettings>) => {
+    setTextSettings((prev) => ({ ...prev, ...patch }));
+  }, []);
+  const [textFocusTrigger, setTextFocusTrigger] = useState(0);
+
   // Ustawienia linii i krzywych Beziera
   const [lineAndCurveSettings, setLineAndCurveSettings] = useState<LineAndCurveSettings>({
     strokeWidth: 4,
@@ -236,6 +268,11 @@ export default function App() {
     setLineAndCurveSettings((prev) => ({
       ...prev,
       strokeColor: primaryColor,
+    }));
+    setTextSettings((prev) => ({
+      ...prev,
+      strokeColor: primaryColor,
+      fillColor: secondaryColor,
     }));
   }, [primaryColor, secondaryColor]);
 
@@ -517,6 +554,8 @@ export default function App() {
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const activeEl = document.activeElement as HTMLElement | null;
+      // Edytor tekstu na płótnie sam obsługuje wszystkie skróty (Ctrl+Z, Ctrl+A, Ctrl+C/V/X...)
+      if (activeEl?.dataset?.figuraTextEditor === '1') return;
       const isTextEditing =
         activeEl?.tagName === 'TEXTAREA' ||
         (activeEl?.tagName === 'INPUT' &&
@@ -616,7 +655,9 @@ export default function App() {
       else if (key === 'g') setActiveTool('gradient');
       else if (key === 'o') setActiveTool('shapes');
       else if (key === 'u') setActiveTool('line');
+      else if (key === 'y') setActiveTool('text');
       else if (key === 'h') setActiveTool('pan');
+      else if (key === 'z') setActiveTool('zoom');
       else if (key === 'x') {
         setPrimaryColor(secondaryColor);
         setSecondaryColor(primaryColor);
@@ -797,6 +838,9 @@ export default function App() {
         onChangeVectorShapeSettings={handleUpdateVectorShapeSettings}
         lineAndCurveSettings={lineAndCurveSettings}
         onChangeLineAndCurveSettings={handleUpdateLineAndCurveSettings}
+        textSettings={textSettings}
+        onChangeTextSettings={handleUpdateTextSettings}
+        onRequestTextFocus={() => setTextFocusTrigger((c) => c + 1)}
         primaryColor={primaryColor}
         secondaryColor={secondaryColor}
         onChangePrimaryColorAlpha={(a) => setPrimaryColor((prev) => ({ ...prev, a }))}
@@ -849,6 +893,10 @@ export default function App() {
           onChangeVectorShapeSettings={handleUpdateVectorShapeSettings}
           lineAndCurveSettings={lineAndCurveSettings}
           onChangeLineAndCurveSettings={handleUpdateLineAndCurveSettings}
+          textSettings={textSettings}
+          textFormatRequest={textFormatRequest}
+          onSyncTextSettings={handleSyncTextSettings}
+          textFocusTrigger={textFocusTrigger}
           primaryColor={primaryColor}
           secondaryColor={secondaryColor}
           activeTool={activeTool}
@@ -857,9 +905,14 @@ export default function App() {
           panOffset={panOffset}
           onUpdateZoom={setZoom}
           onUpdatePan={setPanOffset}
-          onPipettePick={(color) => {
-            setPrimaryColor(color);
-            setBrushSettings((prev) => ({ ...prev, color }));
+          onPipettePick={(color, isSecondary) => {
+            if (isSecondary) {
+              setSecondaryColor(color);
+            } else {
+              setPrimaryColor(color);
+              setBrushSettings((prev) => ({ ...prev, color }));
+            }
+            bumpEngineRevision();
           }}
           onCanvasModified={bumpEngineRevision}
           onLiveVectorSessionChange={setIsLiveVectorSessionActive}
@@ -887,14 +940,20 @@ export default function App() {
             layers={engine.layers}
             activeLayerIndex={engine.activeLayerIndex}
             onSelectLayer={(idx) => {
+              if (engine.bucketSeedPoint) engine.commitPaintBucketSession();
+              if (engine.gradientStartPoint) engine.commitGradientSession();
               engine.activeLayerIndex = idx;
               bumpEngineRevision();
             }}
             onAddLayer={() => {
+              if (engine.bucketSeedPoint) engine.commitPaintBucketSession();
+              if (engine.gradientStartPoint) engine.commitGradientSession();
               engine.addLayer();
               bumpEngineRevision();
             }}
             onRemoveLayer={() => {
+              if (engine.bucketSeedPoint) engine.commitPaintBucketSession();
+              if (engine.gradientStartPoint) engine.commitGradientSession();
               if (engine.getActiveLayer()?.locked) {
                 showToast('Nie można usunąć zablokowanej warstwy');
                 return;
@@ -903,6 +962,8 @@ export default function App() {
               bumpEngineRevision();
             }}
             onDuplicateLayer={() => {
+              if (engine.bucketSeedPoint) engine.commitPaintBucketSession();
+              if (engine.gradientStartPoint) engine.commitGradientSession();
               engine.duplicateActiveLayer();
               bumpEngineRevision();
             }}

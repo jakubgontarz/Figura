@@ -214,6 +214,32 @@ export interface VectorShapeSettings {
   arrowShaftThickness: number;  // 0.1..0.8
 }
 
+export type TextAlign = 'left' | 'center' | 'right' | 'justify';
+export type TextScript = 'normal' | 'sub' | 'super';
+
+/** Formatowanie pojedynczego znaku / fragmentu tekstu. */
+export interface TextCharStyle {
+  fontFamily: string;
+  fontSize: number;   // px dokumentu
+  bold: boolean;
+  italic: boolean;
+  underline: boolean;
+  script: TextScript; // indeks dolny / górny
+}
+
+export interface TextToolSettings extends TextCharStyle {
+  align: TextAlign;
+  lineSpacing: number;    // odstęp pionowy (interlinia) w %: 50..300
+  letterSpacing: number;  // odstęp poziomy między znakami w px: -10..50
+  padding?: number;       // margines (zawsze 0)
+  antiAliasing: boolean;
+  fillMode: ShapeFillMode; // 'none' (tylko obrys liter) | 'primary' (kolor główny) | 'stroke-and-fill' (kolor dodatkowy)
+  strokeWidth: number;     // grubość obramowania liter w px (0 = brak obrysu)
+  strokeColor: SKColor;    // kolor główny (np. wypełnienie lub obrys zależnie od fillMode)
+  fillColor: SKColor;      // kolor dodatkowy (np. obrys lub wypełnienie zależnie od fillMode)
+  blendMode: SKBlendMode;
+}
+
 export interface LineAndCurveSettings {
   strokeWidth: number;
   strokeColor: SKColor;
@@ -314,7 +340,8 @@ export type ToolType =
   | 'line'
   | 'bezier'
   | 'text'
-  | 'pan';
+  | 'pan'
+  | 'zoom';
 
 export interface FiguraProjectFile {
   format: 'FIGURA_PROJECT';

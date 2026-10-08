@@ -110,8 +110,10 @@ export const ColorPanel: React.FC<ColorPanelProps> = ({
 
   const svBoxRef = useRef<HTMLDivElement>(null);
   const hueStripRef = useRef<HTMLDivElement>(null);
+  const alphaTrackRef = useRef<HTMLDivElement>(null);
   const [isDraggingSv, setIsDraggingSv] = useState(false);
   const [isDraggingHue, setIsDraggingHue] = useState(false);
+  const [isDraggingAlpha, setIsDraggingAlpha] = useState(false);
 
   // Obsługa przeciągania w kwadracie S-V
   const handleSvPointer = useCallback((e: MouseEvent | React.MouseEvent) => {
@@ -150,17 +152,37 @@ export const ColorPanel: React.FC<ColorPanelProps> = ({
     });
   }, [currentColor, updateCurrentColor]);
 
+  // Obsługa paska Przezroczystości (Alpha)
+  const handleAlphaPointer = useCallback(
+    (e: MouseEvent | React.MouseEvent) => {
+      if (!alphaTrackRef.current) return;
+      const rect = alphaTrackRef.current.getBoundingClientRect();
+      if (rect.width <= 0) return;
+      const x = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
+      const newAlpha = Math.round((x / rect.width) * 255);
+      if (newAlpha !== currentColor.a) {
+        updateCurrentColor({
+          ...currentColor,
+          a: newAlpha,
+        });
+      }
+    },
+    [currentColor, updateCurrentColor]
+  );
+
   useEffect(() => {
     const onMouseMove = (e: MouseEvent) => {
       if (isDraggingSv) handleSvPointer(e);
       if (isDraggingHue) handleHuePointer(e);
+      if (isDraggingAlpha) handleAlphaPointer(e);
     };
     const onMouseUp = () => {
       setIsDraggingSv(false);
       setIsDraggingHue(false);
+      setIsDraggingAlpha(false);
     };
 
-    if (isDraggingSv || isDraggingHue) {
+    if (isDraggingSv || isDraggingHue || isDraggingAlpha) {
       window.addEventListener('mousemove', onMouseMove);
       window.addEventListener('mouseup', onMouseUp);
     }
@@ -168,7 +190,7 @@ export const ColorPanel: React.FC<ColorPanelProps> = ({
       window.removeEventListener('mousemove', onMouseMove);
       window.removeEventListener('mouseup', onMouseUp);
     };
-  }, [isDraggingSv, isDraggingHue, handleSvPointer, handleHuePointer]);
+  }, [isDraggingSv, isDraggingHue, isDraggingAlpha, handleSvPointer, handleHuePointer, handleAlphaPointer]);
 
   // Zamiana koloru głównego z dodatkowym
   const swapColors = () => {
@@ -344,7 +366,12 @@ export const ColorPanel: React.FC<ColorPanelProps> = ({
           <span className="font-mono text-[#ccc]">{Math.round((currentColor.a / 255) * 100)}%</span>
         </div>
         <div
-          className="relative h-3.5 rounded-xs border border-[#333] overflow-hidden"
+          ref={alphaTrackRef}
+          onMouseDown={(e) => {
+            setIsDraggingAlpha(true);
+            handleAlphaPointer(e);
+          }}
+          className="relative h-3.5 rounded-xs border border-[#333] overflow-hidden cursor-pointer touch-none"
           style={{
             backgroundImage: `repeating-conic-gradient(#e4e4e4 0% 25%, #ffffff 0% 50%)`,
             backgroundSize: '8px 8px',
@@ -361,14 +388,6 @@ export const ColorPanel: React.FC<ColorPanelProps> = ({
           <div
             className="absolute top-0 bottom-0 w-1 -translate-x-1/2 border border-black bg-white shadow-sm pointer-events-none z-10"
             style={{ left: `${(currentColor.a / 255) * 100}%` }}
-          />
-          <input
-            type="range"
-            min="0"
-            max="255"
-            value={currentColor.a}
-            onChange={(e) => updateCurrentColor({ ...currentColor, a: parseInt(e.target.value) })}
-            className="absolute inset-0 opacity-0 cursor-pointer w-full h-full z-20"
           />
         </div>
       </div>
@@ -402,9 +421,13 @@ export const ColorPanel: React.FC<ColorPanelProps> = ({
             <div
               key={`swatch-${i}`}
               onClick={() => updateCurrentColor(hexToSkColor(c, currentColor.a))}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                onChangeSecondaryColor(hexToSkColor(c, secondaryColor.a));
+              }}
               className="w-full aspect-[2/1] rounded-xs border border-[#222] cursor-pointer hover:scale-110 hover:border-white transition-transform"
               style={{ backgroundColor: c }}
-              title={c}
+              title={`${c} (LPM: kolor aktywny, PPM: kolor dodatkowy)`}
             />
           ))}
         </div>

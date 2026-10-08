@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import polygonClipping, { MultiPolygon, Polygon, Pair } from 'polygon-clipping';
 import { SKPoint, SKRectI, SelectionCombineMode, SelectionSettings } from './types.ts';
 
 export interface TransformSelectionState {
@@ -20,11 +21,17 @@ export interface TransformSelectionState {
   flipY?: boolean;     // Odbicie w pionie (Lustrzane w pionie)
 }
 
+export interface SelectionSnapshot {
+  imgData: ImageData | null;
+  seedPoint: SKPoint | null;
+  activeMultiPoly?: MultiPolygon;
+}
+
 /**
- * Zaawansowany menedżer zaznaczeń z Sub-Pixel Marching Squares oraz narzędziem Modyfikacji Zaznaczenia:
- * 1. Zapewnia idealne łączenie figur wektorowych (np. dwie nachodzące elipsy dają jeden gładki obrys z dwóch łuków).
- * 2. Wszystkie narzędzia (Elipsa, Lasso, Prostokąt, Magiczna Różdżka) tworzą jedną wspólną, gładką ścieżkę wektorową (Path2D).
- * 3. Narzędzie modyfikacji zaznaczenia (ramka, 8 niezależnych uchwytów ze stałym punktem przeciwległym, obrót wokół środka ciężkości).
+ * Zaawansowany menedżer zaznaczeń z Wektorowym Silnikiem Geometrii i Sub-Pixel Marching Squares:
+ * 1. Prawdziwa wektorowa ścieżka mrówek zbudowana z figur wektorowych (Prostokąty, Elipsy, Lasso).
+ * 2. Przecinanie i łączenie figur wektorowych daje czystą ścieżkę z długimi prostokątnymi odcinkami i gładkimi łukami elips.
+ * 3. Narzędzie modyfikacji zaznaczenia (ramka, 8 niezależnych uchwytów ze stałym punktem przeciwległym, obrót).
  */
 export class SelectionManager {
   public width: number;
@@ -36,6 +43,10 @@ export class SelectionManager {
 
   public wandBaseMaskCanvas: HTMLCanvasElement;
   public wandBaseMaskCtx: CanvasRenderingContext2D;
+
+  // Główna struktura wektorowa przechowywana dla zaznaczenia
+  public activeMultiPoly: MultiPolygon = [];
+  public initialMultiPoly: MultiPolygon = [];
 
   // Jednolita ścieżka wektorowa i punkty dla maszerujących mrówek
   public contourPath: Path2D = new Path2D();
@@ -82,6 +93,8 @@ export class SelectionManager {
     this.wandBaseMaskCtx.clearRect(0, 0, this.width, this.height);
     this.hasActiveSelection = false;
     this.wandSeedPoint = null;
+    this.activeMultiPoly = [];
+    this.initialMultiPoly = [];
     this.contourPath = new Path2D();
     this.contourPolygons = [];
     this.initialContourPolygons = [];
@@ -98,7 +111,7 @@ export class SelectionManager {
     let minX = w, minY = h, maxX = -1, maxY = -1;
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
-        if (data[(y * w + x) * 4 + 3] > 10) {
+        if (data[(y * w + x) * 4 + 3] > 0) {
           if (x < minX) minX = x;
           if (x > maxX) maxX = x;
           if (y < minY) minY = y;
@@ -128,11 +141,11 @@ export class SelectionManager {
     const ictx = initCanvas.getContext('2d')!;
     ictx.drawImage(this.maskCanvas, 0, 0);
 
-    // Oczyszczanie maski do postaci binarnej (usuwa rozmyte krawędzie brzegowe, eliminując powstawanie resztkowych ramek)
+    // Oczyszczanie maski do postaci binarnej
     const mImgData = ictx.getImageData(0, 0, this.width, this.height);
     const mData = mImgData.data;
     for (let i = 3; i < mData.length; i += 4) {
-      mData[i] = mData[i] > 10 ? 255 : 0;
+      mData[i] = mData[i] > 0 ? 255 : 0;
     }
     ictx.putImageData(mImgData, 0, 0);
 
@@ -140,6 +153,7 @@ export class SelectionManager {
     const cy = bounds.top + bounds.height / 2;
 
     this.initialContourPolygons = this.contourPolygons;
+    this.initialMultiPoly = JSON.parse(JSON.stringify(this.activeMultiPoly));
 
     this.transformState = {
       initialMaskCanvas: initCanvas,
@@ -162,55 +176,45 @@ export class SelectionManager {
     Object.assign(this.transformState, params);
 
     const st = this.transformState;
-    const ctx = this.maskCtx;
-    ctx.clearRect(0, 0, this.width, this.height);
+    const cos = Math.cos(st.angle);
+    const sin = Math.sin(st.angle);
 
-    ctx.save();
-    // 1. Przesuń do bieżącego środka ramki
-    ctx.translate(st.pos.x, st.pos.y);
-    // 2. Obróć o kąt ramki
-    ctx.rotate(st.angle);
-    // 3. Skaluj z uwzględnieniem odbicia lustrzanego
     const scaleXMult = st.flipX ? -1 : 1;
     const scaleYMult = st.flipY ? -1 : 1;
 
     const sx = (st.width / Math.max(1, st.initialBounds.width)) * scaleXMult;
     const sy = (st.height / Math.max(1, st.initialBounds.height)) * scaleYMult;
-    ctx.scale(sx, sy);
-    // 4. Cofnij o początkowy środek
-    ctx.translate(-st.initialCenter.x, -st.initialCenter.y);
 
-    ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(st.initialMaskCanvas, 0, 0);
-    ctx.restore();
+    if (this.initialMultiPoly && this.initialMultiPoly.length > 0) {
+      const transformed: MultiPolygon = this.initialMultiPoly.map((poly) =>
+        poly.map((ring) =>
+          ring.map(([x, y]) => {
+            const lx = x - st.initialCenter.x;
+            const ly = y - st.initialCenter.y;
+            const rx = (lx * sx) * cos - (ly * sy) * sin;
+            const ry = (lx * sx) * sin + (ly * sy) * cos;
+            return [st.pos.x + rx, st.pos.y + ry];
+          })
+        )
+      );
+      this.activeMultiPoly = transformed;
+      this.rebuildFromActiveMultiPoly();
+    } else {
+      const ctx = this.maskCtx;
+      ctx.clearRect(0, 0, this.width, this.height);
 
-    // 5. Matematyczna, błyskawiczna transformacja punktów konturu mrówek!
-    const cos = Math.cos(st.angle);
-    const sin = Math.sin(st.angle);
-    const newPath = new Path2D();
+      ctx.save();
+      ctx.translate(st.pos.x, st.pos.y);
+      ctx.rotate(st.angle);
+      ctx.scale(sx, sy);
+      ctx.translate(-st.initialCenter.x, -st.initialCenter.y);
 
-    for (const loop of this.initialContourPolygons) {
-      if (loop.length < 3) continue;
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(st.initialMaskCanvas, 0, 0);
+      ctx.restore();
 
-      const txPoints: SKPoint[] = loop.map((pt) => {
-        const lx = pt.x - st.initialCenter.x;
-        const ly = pt.y - st.initialCenter.y;
-        const rx = (lx * sx) * cos - (ly * sy) * sin;
-        const ry = (lx * sx) * sin + (ly * sy) * cos;
-        return {
-          x: st.pos.x + rx,
-          y: st.pos.y + ry,
-        };
-      });
-
-      newPath.moveTo(txPoints[0].x, txPoints[0].y);
-      for (let k = 1; k < txPoints.length; k++) {
-        newPath.lineTo(txPoints[k].x, txPoints[k].y);
-      }
-      newPath.closePath();
+      this.rebuildContoursFromMask();
     }
-
-    this.contourPath = newPath;
   }
 
   public flipHorizontal(): void {
@@ -218,7 +222,6 @@ export class SelectionManager {
     const st = this.transformState;
     st.flipX = !st.flipX;
 
-    // Oblicz nową pozycję punktu obrotu (pivot) po odbiciu w poziomie w lokalnym układzie ramki
     const dx = st.pivot.x - st.pos.x;
     const dy = st.pivot.y - st.pos.y;
     const cos = Math.cos(st.angle);
@@ -226,7 +229,6 @@ export class SelectionManager {
 
     const lx = dx * cos + dy * sin;
     const ly = -dx * sin + dy * cos;
-
     const newLx = -lx;
 
     st.pivot = {
@@ -242,7 +244,6 @@ export class SelectionManager {
     const st = this.transformState;
     st.flipY = !st.flipY;
 
-    // Oblicz nową pozycję punktu obrotu (pivot) po odbiciu w pionie w lokalnym układzie ramki
     const dx = st.pivot.x - st.pos.x;
     const dy = st.pivot.y - st.pos.y;
     const cos = Math.cos(st.angle);
@@ -250,7 +251,6 @@ export class SelectionManager {
 
     const lx = dx * cos + dy * sin;
     const ly = -dx * sin + dy * cos;
-
     const newLy = -ly;
 
     st.pivot = {
@@ -263,139 +263,317 @@ export class SelectionManager {
 
   public commitTransformSelection(): void {
     if (this.transformState) {
-      this.rebuildContoursFromMask();
       this.transformState = null;
+      this.initialMultiPoly = [];
+      if (this.activeMultiPoly.length > 0) {
+        this.rebuildFromActiveMultiPoly();
+      } else {
+        this.rebuildContoursFromMask();
+      }
     }
   }
 
   public cancelTransformSelection(): void {
     if (!this.transformState) return;
+    if (this.initialMultiPoly && this.initialMultiPoly.length > 0) {
+      this.activeMultiPoly = JSON.parse(JSON.stringify(this.initialMultiPoly));
+    }
     this.maskCtx.clearRect(0, 0, this.width, this.height);
     this.maskCtx.drawImage(this.transformState.initialMaskCanvas, 0, 0);
     this.transformState = null;
-    this.rebuildContoursFromMask();
+    this.initialMultiPoly = [];
+    if (this.activeMultiPoly.length > 0) {
+      this.rebuildFromActiveMultiPoly();
+    } else {
+      this.rebuildContoursFromMask();
+    }
   }
 
-  public getMaskSnapshot(): { imgData: ImageData | null; seedPoint: SKPoint | null } {
+  public getMaskSnapshot(): SelectionSnapshot {
     if (!this.hasActiveSelection) {
-      return { imgData: null, seedPoint: null };
+      return { imgData: null, seedPoint: null, activeMultiPoly: [] };
     }
     const imgData = this.maskCtx.getImageData(0, 0, this.width, this.height);
     return {
       imgData,
       seedPoint: this.wandSeedPoint ? { ...this.wandSeedPoint } : null,
+      activeMultiPoly: JSON.parse(JSON.stringify(this.activeMultiPoly)),
     };
   }
 
-  public restoreMaskSnapshot(snapshot: { imgData: ImageData | null; seedPoint: SKPoint | null }): void {
-    if (!snapshot.imgData) {
+  public restoreMaskSnapshot(snapshot: SelectionSnapshot): void {
+    if (!snapshot.imgData && (!snapshot.activeMultiPoly || snapshot.activeMultiPoly.length === 0)) {
       this.clear();
       return;
     }
-    this.maskCtx.putImageData(snapshot.imgData, 0, 0);
-    this.hasActiveSelection = true;
-    this.wandSeedPoint = snapshot.seedPoint ? { ...snapshot.seedPoint } : null;
-    this.rebuildContoursFromMask();
+    if (snapshot.activeMultiPoly && snapshot.activeMultiPoly.length > 0) {
+      this.activeMultiPoly = JSON.parse(JSON.stringify(snapshot.activeMultiPoly));
+      this.wandSeedPoint = snapshot.seedPoint ? { ...snapshot.seedPoint } : null;
+      this.rebuildFromActiveMultiPoly();
+    } else if (snapshot.imgData) {
+      this.maskCtx.putImageData(snapshot.imgData, 0, 0);
+      this.hasActiveSelection = true;
+      this.wandSeedPoint = snapshot.seedPoint ? { ...snapshot.seedPoint } : null;
+      this.rebuildContoursFromMask();
+    }
   }
 
   public selectAll(): void {
-    this.maskCtx.fillStyle = '#ffffff';
-    this.maskCtx.fillRect(0, 0, this.width, this.height);
-    this.hasActiveSelection = true;
     this.wandSeedPoint = null;
-
-    const path = new Path2D();
-    path.rect(0, 0, this.width, this.height);
-    this.contourPath = path;
-
-    this.contourPolygons = [
-      [
-        { x: 0, y: 0 },
-        { x: this.width, y: 0 },
-        { x: this.width, y: this.height },
-        { x: 0, y: this.height },
-      ],
+    const ring: Pair[] = [
+      [0, 0],
+      [this.width, 0],
+      [this.width, this.height],
+      [0, this.height],
+      [0, 0],
     ];
-    this.initialContourPolygons = this.contourPolygons;
+    this.activeMultiPoly = [[ring]];
+    this.rebuildFromActiveMultiPoly();
   }
 
   public invert(): void {
-    const imgData = this.maskCtx.getImageData(0, 0, this.width, this.height);
-    const data = imgData.data;
-    let anySelected = false;
-
-    for (let i = 0; i < data.length; i += 4) {
-      const inv = 255 - data[i + 3];
-      data[i] = 255;
-      data[i + 1] = 255;
-      data[i + 2] = 255;
-      data[i + 3] = inv;
-      if (inv > 10) anySelected = true;
-    }
-
-    this.maskCtx.putImageData(imgData, 0, 0);
-    this.hasActiveSelection = anySelected;
     this.wandSeedPoint = null;
-    this.rebuildContoursFromMask();
+    const docRing: Pair[] = [
+      [0, 0],
+      [this.width, 0],
+      [this.width, this.height],
+      [0, this.height],
+      [0, 0],
+    ];
+    const docMultiPoly: MultiPolygon = [[docRing]];
+
+    if (!this.hasActiveSelection || this.activeMultiPoly.length === 0) {
+      this.activeMultiPoly = docMultiPoly;
+    } else {
+      try {
+        this.activeMultiPoly = polygonClipping.difference(docMultiPoly, this.activeMultiPoly);
+      } catch (e) {
+        console.warn('Invert vector error:', e);
+        const imgData = this.maskCtx.getImageData(0, 0, this.width, this.height);
+        const data = imgData.data;
+        let anySelected = false;
+        for (let i = 0; i < data.length; i += 4) {
+          const inv = 255 - data[i + 3];
+          data[i] = 255;
+          data[i + 1] = 255;
+          data[i + 2] = 255;
+          data[i + 3] = inv;
+          if (inv > 10) anySelected = true;
+        }
+        this.maskCtx.putImageData(imgData, 0, 0);
+        this.hasActiveSelection = anySelected;
+        this.rebuildContoursFromMask();
+        return;
+      }
+    }
+    this.rebuildFromActiveMultiPoly();
   }
 
   /**
    * Zastosowanie zaznaczenia geometrycznego (Prostokąt, Elipsa, Lasso)
-   * Renderuje gładką figurę z anti-aliasingiem do maski i natychmiast wyznacza scalony kontur
+   * Tworzy czyste figury wektorowe i wykonuje boolowskie łączenie/przecinanie z istniejącą ścieżką!
    */
   public applyGeometricSelection(
     shapeType: 'rect' | 'ellipse' | 'lasso',
     points: SKPoint[],
-    settings: SelectionSettings
+    settings: SelectionSettings,
+    isShiftPressed: boolean = false,
+    hasMoved: boolean = true
   ): void {
     this.wandSeedPoint = null;
 
-    const tempCanvas = document.createElement('canvas');
-    tempCanvas.width = this.width;
-    tempCanvas.height = this.height;
-    const tctx = tempCanvas.getContext('2d')!;
-    tctx.fillStyle = '#ffffff';
+    if (settings.feather > 0) {
+      const tempCanvas = document.createElement('canvas');
+      tempCanvas.width = this.width;
+      tempCanvas.height = this.height;
+      const tctx = tempCanvas.getContext('2d')!;
+      tctx.fillStyle = '#ffffff';
+
+      if (shapeType === 'rect') {
+        const p0 = points[0];
+        const p1 = points[1] || points[0];
+        const rect = this.calculateConstrainedRect(p0, p1, settings, isShiftPressed, hasMoved);
+        if (rect.width > 0 && rect.height > 0) {
+          tctx.fillRect(rect.left, rect.top, rect.width, rect.height);
+        }
+      } else if (shapeType === 'ellipse') {
+        const p0 = points[0];
+        const p1 = points[1] || points[0];
+        const rect = this.calculateConstrainedRect(p0, p1, settings, isShiftPressed, hasMoved);
+        if (rect.width > 0 && rect.height > 0) {
+          const cx = rect.left + rect.width / 2;
+          const cy = rect.top + rect.height / 2;
+          const rx = rect.width / 2;
+          const ry = rect.height / 2;
+          tctx.beginPath();
+          tctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+          tctx.fill();
+        }
+      } else {
+        if (points.length >= 2 && hasMoved) {
+          tctx.beginPath();
+          tctx.moveTo(points[0].x, points[0].y);
+          for (let i = 1; i < points.length; i++) {
+            tctx.lineTo(points[i].x, points[i].y);
+          }
+          tctx.closePath();
+          tctx.fill();
+        }
+      }
+
+      this.applyFeatherToCanvas(tempCanvas, settings.feather);
+      this.combineTempMask(tempCanvas, settings.mode);
+      return;
+    }
+
+    // Czysta gałąź wektorowa (feather == 0)
+    let newPoly: Polygon | null = null;
 
     if (shapeType === 'rect') {
       const p0 = points[0];
       const p1 = points[1] || points[0];
-      const rect = this.calculateConstrainedRect(p0, p1, settings);
-      tctx.fillRect(rect.left, rect.top, rect.width, rect.height);
+      const rect = this.calculateConstrainedRect(p0, p1, settings, isShiftPressed, hasMoved);
+      if (rect.width > 0 && rect.height > 0) {
+        const ring: Pair[] = [
+          [rect.left, rect.top],
+          [rect.right, rect.top],
+          [rect.right, rect.bottom],
+          [rect.left, rect.bottom],
+          [rect.left, rect.top],
+        ];
+        newPoly = [ring];
+      }
     } else if (shapeType === 'ellipse') {
       const p0 = points[0];
       const p1 = points[1] || points[0];
-      const rect = this.calculateConstrainedRect(p0, p1, settings);
-      const cx = rect.left + rect.width / 2;
-      const cy = rect.top + rect.height / 2;
-      const rx = Math.max(0.5, rect.width / 2);
-      const ry = Math.max(0.5, rect.height / 2);
+      const rect = this.calculateConstrainedRect(p0, p1, settings, isShiftPressed, hasMoved);
+      if (rect.width > 0 && rect.height > 0) {
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        const rx = rect.width / 2;
+        const ry = rect.height / 2;
 
-      tctx.beginPath();
-      tctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
-      tctx.fill();
-    } else {
-      if (points.length < 2) return;
-      tctx.beginPath();
-      tctx.moveTo(points[0].x, points[0].y);
-      for (let i = 1; i < points.length; i++) {
-        tctx.lineTo(points[i].x, points[i].y);
+        const segs = Math.max(32, Math.min(256, Math.ceil(Math.max(rx, ry) * 1.5)));
+        const ring: Pair[] = [];
+        for (let i = 0; i < segs; i++) {
+          const a = (i * 2 * Math.PI) / segs;
+          ring.push([cx + rx * Math.cos(a), cy + ry * Math.sin(a)]);
+        }
+        ring.push([ring[0][0], ring[0][1]]);
+        newPoly = [ring];
       }
-      tctx.closePath();
-      tctx.fill();
+    } else if (shapeType === 'lasso') {
+      if (points.length >= 3 && hasMoved) {
+        const ring: Pair[] = points.map((pt) => [pt.x, pt.y]);
+        if (
+          ring[ring.length - 1][0] !== ring[0][0] ||
+          ring[ring.length - 1][1] !== ring[0][1]
+        ) {
+          ring.push([ring[0][0], ring[0][1]]);
+        }
+        newPoly = [ring];
+      }
     }
 
-    if (settings.feather > 0) {
-      this.applyFeatherToCanvas(tempCanvas, settings.feather);
+    if (newPoly) {
+      this.combineVectorGeometry(newPoly, settings.mode);
     }
-
-    this.combineTempMask(tempCanvas, settings.mode);
   }
 
-  public calculateConstrainedRect(p0: SKPoint, p1: SKPoint, settings: SelectionSettings): SKRectI {
+  /**
+   * Łączy/przecina nową figurę wektorową z obecną strukturą activeMultiPoly
+   */
+  private combineVectorGeometry(newGeom: Polygon | MultiPolygon, mode: SelectionCombineMode): void {
+    const geomAsMulti: MultiPolygon = Array.isArray(newGeom[0]?.[0]?.[0])
+      ? (newGeom as MultiPolygon)
+      : ([newGeom] as MultiPolygon);
+
+    if (mode === 'replace') {
+      this.activeMultiPoly = geomAsMulti;
+    } else if (!this.activeMultiPoly || this.activeMultiPoly.length === 0) {
+      if (mode === 'add' || mode === 'invert') {
+        this.activeMultiPoly = geomAsMulti;
+      } else {
+        this.activeMultiPoly = [];
+      }
+    } else {
+      try {
+        if (mode === 'add') {
+          this.activeMultiPoly = polygonClipping.union(this.activeMultiPoly, geomAsMulti);
+        } else if (mode === 'subtract') {
+          this.activeMultiPoly = polygonClipping.difference(this.activeMultiPoly, geomAsMulti);
+        } else if (mode === 'intersect') {
+          this.activeMultiPoly = polygonClipping.intersection(this.activeMultiPoly, geomAsMulti);
+        } else if (mode === 'invert') {
+          this.activeMultiPoly = polygonClipping.xor(this.activeMultiPoly, geomAsMulti);
+        }
+      } catch (e) {
+        console.warn('Vector clipping fallback:', e);
+      }
+    }
+
+    this.rebuildFromActiveMultiPoly();
+  }
+
+  /**
+   * Odtwarza maskę bitową oraz ścieżkę mrówek na podstawie struktury wektorowej activeMultiPoly
+   */
+  private rebuildFromActiveMultiPoly(): void {
+    this.maskCtx.clearRect(0, 0, this.width, this.height);
+
+    if (!this.activeMultiPoly || this.activeMultiPoly.length === 0) {
+      this.hasActiveSelection = false;
+      this.contourPath = new Path2D();
+      this.contourPolygons = [];
+      return;
+    }
+
+    // 1. Wypełnienie rasterowe maskCtx (dla operacji obcinania/kopiowania)
+    this.maskCtx.fillStyle = '#ffffff';
+    this.maskCtx.beginPath();
+    for (const poly of this.activeMultiPoly) {
+      for (const ring of poly) {
+        if (ring.length < 3) continue;
+        this.maskCtx.moveTo(ring[0][0], ring[0][1]);
+        for (let i = 1; i < ring.length; i++) {
+          this.maskCtx.lineTo(ring[i][0], ring[i][1]);
+        }
+      }
+    }
+    this.maskCtx.fill('evenodd');
+
+    // 2. Budowanie wektorowego Path2D dla maszerujących mrówek
+    this.contourPath = new Path2D();
+    this.contourPolygons = [];
+
+    for (const poly of this.activeMultiPoly) {
+      for (const ring of poly) {
+        if (ring.length < 3) continue;
+
+        const loop: SKPoint[] = ring.map(([x, y]) => ({ x, y }));
+        this.contourPolygons.push(loop);
+
+        this.contourPath.moveTo(ring[0][0], ring[0][1]);
+        for (let i = 1; i < ring.length; i++) {
+          this.contourPath.lineTo(ring[i][0], ring[i][1]);
+        }
+        this.contourPath.closePath();
+      }
+    }
+
+    this.hasActiveSelection = this.contourPolygons.length > 0;
+  }
+
+  public calculateConstrainedRect(
+    p0: SKPoint,
+    p1: SKPoint,
+    settings: SelectionSettings,
+    isShiftPressed: boolean = false,
+    hasMoved: boolean = true
+  ): SKRectI {
     if (settings.constraint === 'fixed-size') {
       const w = Math.max(1, settings.fixedW || 100);
       const h = Math.max(1, settings.fixedH || 100);
-      // Ruch myszą wybiera lewy górny narożnik zaznaczenia
       const anchor = p1 || p0;
       const left = anchor.x;
       const top = anchor.y;
@@ -409,12 +587,27 @@ export class SelectionManager {
       };
     }
 
+    if (!hasMoved) {
+      return {
+        left: Math.round(p0.x),
+        top: Math.round(p0.y),
+        right: Math.round(p0.x),
+        bottom: Math.round(p0.y),
+        width: 0,
+        height: 0,
+      };
+    }
+
     let w = Math.abs(p1.x - p0.x);
     let h = Math.abs(p1.y - p0.y);
     const signX = p1.x >= p0.x ? 1 : -1;
     const signY = p1.y >= p0.y ? 1 : -1;
 
-    if (settings.constraint === 'fixed-ratio') {
+    if (isShiftPressed) {
+      const side = Math.max(w, h);
+      w = side;
+      h = side;
+    } else if (settings.constraint === 'fixed-ratio') {
       const rw = Math.max(0.001, settings.ratioW || 1);
       const rh = Math.max(0.001, settings.ratioH || 1);
       const ratio = rw / rh;
@@ -547,14 +740,66 @@ export class SelectionManager {
 
     if (settings.feather > 0) {
       this.applyFeatherToCanvas(tempCanvas, settings.feather);
+      this.maskCtx.clearRect(0, 0, this.width, this.height);
+      if (settings.mode !== 'replace') {
+        this.maskCtx.drawImage(this.wandBaseMaskCanvas, 0, 0);
+      }
+      this.combineTempMask(tempCanvas, settings.mode);
+      return;
     }
 
-    this.maskCtx.clearRect(0, 0, this.width, this.height);
-    if (settings.mode !== 'replace') {
-      this.maskCtx.drawImage(this.wandBaseMaskCanvas, 0, 0);
+    // Wyodrębnij kontury z tempCanvas i przekształć na wektory z uproszczeniem prostokątnym
+    this.rebuildContoursFromCanvas(tempCanvas);
+    if (this.contourPolygons.length > 0) {
+      const wandMultiPoly: MultiPolygon = [];
+      for (const loop of this.contourPolygons) {
+        if (loop.length < 3) continue;
+        const rawRing: Pair[] = loop.map((pt) => [pt.x, pt.y]);
+        const simpleRing = this.simplifyCollinearLoop(rawRing, 0.15);
+        if (simpleRing.length >= 3) {
+          wandMultiPoly.push([simpleRing]);
+        }
+      }
+      if (wandMultiPoly.length > 0) {
+        this.combineVectorGeometry(wandMultiPoly, settings.mode);
+      }
+    }
+  }
+
+  private simplifyCollinearLoop(points: Pair[], eps: number = 0.15): Pair[] {
+    if (points.length < 3) return points;
+    const closed =
+      points[0][0] === points[points.length - 1][0] &&
+      points[0][1] === points[points.length - 1][1];
+    const pts = closed ? points.slice(0, points.length - 1) : points;
+
+    if (pts.length < 3) return points;
+
+    const res: Pair[] = [];
+    const n = pts.length;
+
+    for (let i = 0; i < n; i++) {
+      const prev = pts[(i - 1 + n) % n];
+      const curr = pts[i];
+      const next = pts[(i + 1) % n];
+
+      const dx = next[0] - prev[0];
+      const dy = next[1] - prev[1];
+      const lenSq = dx * dx + dy * dy;
+
+      if (lenSq < 0.00001) continue;
+
+      const cross = Math.abs((curr[1] - prev[1]) * dx - (curr[0] - prev[0]) * dy);
+      const dist = cross / Math.sqrt(lenSq);
+
+      if (dist > eps) {
+        res.push(curr);
+      }
     }
 
-    this.combineTempMask(tempCanvas, settings.mode);
+    if (res.length < 3) return points;
+    res.push([res[0][0], res[0][1]]);
+    return res;
   }
 
   private applyFeatherToCanvas(canvas: HTMLCanvasElement, featherRadius: number): void {
@@ -611,17 +856,26 @@ export class SelectionManager {
     this.rebuildContoursFromMask();
   }
 
-  /**
-   * SUB-PIXEL MARCHING SQUARES CONTOUR TRACER
-   * Zapewnia:
-   * 1. Prawdziwe scalanie łuków (np. 2 elipsy dają 2 gładkie łuki połączone w punktach przecięcia).
-   * 2. Zero pikselizacji, gładkie krzywe dla elips i lassa.
-   * 3. Idealną integrację z magiczną różdżką.
-   */
+  public rebuildContoursFromCanvas(srcCanvas: HTMLCanvasElement): void {
+    const ctx = srcCanvas.getContext('2d');
+    if (!ctx) return;
+    const imgData = ctx.getImageData(0, 0, this.width, this.height);
+    this.extractMarchingSquares(imgData);
+  }
+
   public rebuildContoursFromMask(searchBounds?: SKRectI | null): void {
+    if (!this.hasActiveSelection) {
+      this.contourPath = new Path2D();
+      this.contourPolygons = [];
+      return;
+    }
+    const imgData = this.maskCtx.getImageData(0, 0, this.width, this.height);
+    this.extractMarchingSquares(imgData, searchBounds);
+  }
+
+  private extractMarchingSquares(imgData: ImageData, searchBounds?: SKRectI | null): void {
     this.contourPath = new Path2D();
     this.contourPolygons = [];
-    if (!this.hasActiveSelection) return;
 
     const w = this.width;
     const h = this.height;
@@ -636,38 +890,13 @@ export class SelectionManager {
       minY = Math.max(-1, Math.floor(searchBounds.top) - 4);
       maxX = Math.min(w, Math.ceil(searchBounds.right) + 4);
       maxY = Math.min(h, Math.ceil(searchBounds.bottom) + 4);
-    } else {
-      const b = this.getSelectionBounds();
-      if (b) {
-        minX = Math.max(-1, b.left - 4);
-        minY = Math.max(-1, b.top - 4);
-        maxX = Math.min(w, b.right + 4);
-        maxY = Math.min(h, b.bottom + 4);
-      }
     }
 
-    const scanW = maxX - minX + 1;
-    const scanH = maxY - minY + 1;
-    if (scanW <= 0 || scanH <= 0) return;
-
-    const imgData = this.maskCtx.getImageData(
-      Math.max(0, minX),
-      Math.max(0, minY),
-      Math.min(w, scanW),
-      Math.min(h, scanH)
-    );
     const data = imgData.data;
-    const offsetX = Math.max(0, minX);
-    const offsetY = Math.max(0, minY);
-    const imgW = imgData.width;
-    const imgH = imgData.height;
 
-    // Próbkowanie alfa z interpolacją brzegową
     const getAlpha = (x: number, y: number): number => {
-      const lx = x - offsetX;
-      const ly = y - offsetY;
-      if (lx < 0 || lx >= imgW || ly < 0 || ly >= imgH) return 0;
-      return data[(ly * imgW + lx) * 4 + 3];
+      if (x < 0 || x >= w || y < 0 || y >= h) return 0;
+      return data[(y * w + x) * 4 + 3];
     };
 
     const T = 127.5;
@@ -679,7 +908,6 @@ export class SelectionManager {
 
     const segments: DirectedSegment[] = [];
 
-    // Przeszukiwanie komórek Marching Squares ograniczonych do obszaru bounds (1000x szybciej!)
     for (let y = minY; y <= maxY; y++) {
       for (let x = minX; x <= maxX; x++) {
         const v0 = getAlpha(x, y);         // TL
@@ -695,7 +923,6 @@ export class SelectionManager {
 
         if (caseIdx === 0 || caseIdx === 15) continue;
 
-        // Wyznacz punkty przecięcia z dokładnością sub-pikselową
         const topT = Math.max(0.01, Math.min(0.99, (T - v0) / (v1 - v0 || 0.0001)));
         const rightT = Math.max(0.01, Math.min(0.99, (T - v1) / (v2 - v1 || 0.0001)));
         const bottomT = Math.max(0.01, Math.min(0.99, (T - v3) / (v2 - v3 || 0.0001)));
@@ -707,57 +934,32 @@ export class SelectionManager {
         const pLeft: SKPoint = { x: x + 0.5, y: y + 0.5 + leftT };
 
         switch (caseIdx) {
-          case 1:  // TL
-            segments.push({ p1: pLeft, p2: pTop });
-            break;
-          case 2:  // TR
-            segments.push({ p1: pTop, p2: pRight });
-            break;
-          case 3:  // TL + TR
-            segments.push({ p1: pLeft, p2: pRight });
-            break;
-          case 4:  // BR
-            segments.push({ p1: pRight, p2: pBottom });
-            break;
-          case 5:  // TL + BR
+          case 1:  segments.push({ p1: pLeft, p2: pTop }); break;
+          case 2:  segments.push({ p1: pTop, p2: pRight }); break;
+          case 3:  segments.push({ p1: pLeft, p2: pRight }); break;
+          case 4:  segments.push({ p1: pRight, p2: pBottom }); break;
+          case 5:
             segments.push({ p1: pLeft, p2: pTop });
             segments.push({ p1: pRight, p2: pBottom });
             break;
-          case 6:  // TR + BR
-            segments.push({ p1: pTop, p2: pBottom });
-            break;
-          case 7:  // TL + TR + BR
-            segments.push({ p1: pLeft, p2: pBottom });
-            break;
-          case 8:  // BL
-            segments.push({ p1: pBottom, p2: pLeft });
-            break;
-          case 9:  // TL + BL
-            segments.push({ p1: pBottom, p2: pTop });
-            break;
-          case 10: // TR + BL
+          case 6:  segments.push({ p1: pTop, p2: pBottom }); break;
+          case 7:  segments.push({ p1: pLeft, p2: pBottom }); break;
+          case 8:  segments.push({ p1: pBottom, p2: pLeft }); break;
+          case 9:  segments.push({ p1: pBottom, p2: pTop }); break;
+          case 10:
             segments.push({ p1: pTop, p2: pRight });
             segments.push({ p1: pBottom, p2: pLeft });
             break;
-          case 11: // TL + TR + BL
-            segments.push({ p1: pBottom, p2: pRight });
-            break;
-          case 12: // BR + BL
-            segments.push({ p1: pRight, p2: pLeft });
-            break;
-          case 13: // TL + BR + BL
-            segments.push({ p1: pRight, p2: pTop });
-            break;
-          case 14: // TR + BR + BL
-            segments.push({ p1: pTop, p2: pLeft });
-            break;
+          case 11: segments.push({ p1: pBottom, p2: pRight }); break;
+          case 12: segments.push({ p1: pRight, p2: pLeft }); break;
+          case 13: segments.push({ p1: pRight, p2: pTop }); break;
+          case 14: segments.push({ p1: pTop, p2: pLeft }); break;
         }
       }
     }
 
     if (segments.length === 0) return;
 
-    // Łączenie sub-pikselowych segmentów w ciągłe pętle
     const used = new Uint8Array(segments.length);
     const EPS = 0.05;
 
@@ -789,7 +991,6 @@ export class SelectionManager {
           loop.push(segments[nearestIdx].p2);
           curr = segments[nearestIdx].p2;
 
-          // Sprawdź czy wróciliśmy do początku
           if (Math.hypot(curr.x - loop[0].x, curr.y - loop[0].y) < 0.8) {
             break;
           }
@@ -800,12 +1001,9 @@ export class SelectionManager {
 
       if (loop.length >= 3) {
         this.contourPolygons.push(loop);
-        // Dodaj gładką krzywą wieloboczną do Path2D
         this.contourPath.moveTo(loop[0].x, loop[0].y);
-        for (let k = 1; k < loop.length - 1; k++) {
-          const midX = (loop[k].x + loop[k + 1].x) / 2;
-          const midY = (loop[k].y + loop[k + 1].y) / 2;
-          this.contourPath.quadraticCurveTo(loop[k].x, loop[k].y, midX, midY);
+        for (let k = 1; k < loop.length; k++) {
+          this.contourPath.lineTo(loop[k].x, loop[k].y);
         }
         this.contourPath.closePath();
       }

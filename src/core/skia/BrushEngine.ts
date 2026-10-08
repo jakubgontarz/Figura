@@ -2018,57 +2018,60 @@ export class BrushEngine {
     sCtx.imageSmoothingEnabled = settings.antiAliasing;
     engine.drawCroppedComposite(sCtx, srcLeft, srcTop, size, size, settings.sampleSource);
 
-    sCtx.save();
-    sCtx.globalCompositeOperation = 'destination-in';
+    // Utwórz maskę obcięcia krawędzi stempla
+    const maskCanvas = document.createElement('canvas');
+    maskCanvas.width = size;
+    maskCanvas.height = size;
+    const mctx = maskCanvas.getContext('2d')!;
+
+    const center = size / 2;
 
     if (!settings.antiAliasing) {
-      sCtx.imageSmoothingEnabled = false;
-      sCtx.fillStyle = '#000000';
-      sCtx.beginPath();
-      sCtx.arc(size / 2, size / 2, radius, 0, Math.PI * 2);
-      sCtx.fill();
-    } else {
-      sCtx.imageSmoothingEnabled = true;
-      const h = Math.max(0, Math.min(100, settings.hardness)) / 100;
-      const center = size / 2;
+      mctx.fillStyle = '#000000';
+      mctx.beginPath();
+      mctx.arc(center, center, radius, 0, Math.PI * 2);
+      mctx.fill();
 
+      // Binarne progowanie alfy dla maski: 1-bitowa ostra krawędź okręgu bez wygładzania
+      const mImgData = mctx.getImageData(0, 0, size, size);
+      const mData = mImgData.data;
+      for (let i = 3; i < mData.length; i += 4) {
+        mData[i] = mData[i] >= 128 ? 255 : 0;
+      }
+      mctx.putImageData(mImgData, 0, 0);
+    } else {
+      const h = Math.max(0, Math.min(100, settings.hardness)) / 100;
       if (h >= 0.99) {
-        sCtx.fillStyle = '#000000';
-        sCtx.beginPath();
-        sCtx.arc(center, center, radius, 0, Math.PI * 2);
-        sCtx.fill();
-      } else if (h <= 0.5) {
-        const exponent = 2.8 - (h / 0.5) * 1.8;
-        const grad = sCtx.createRadialGradient(center, center, 0, center, center, radius);
-        const numStops = 12;
-        for (let i = 0; i <= numStops; i++) {
-          const u = i / numStops;
-          const alpha = Math.pow(Math.max(0, 1 - u), exponent);
-          grad.addColorStop(u, `rgba(0, 0, 0, ${alpha.toFixed(3)})`);
-        }
-        sCtx.fillStyle = grad;
-        sCtx.beginPath();
-        sCtx.arc(center, center, radius, 0, Math.PI * 2);
-        sCtx.fill();
+        mctx.fillStyle = '#000000';
+        mctx.beginPath();
+        mctx.arc(center, center, radius, 0, Math.PI * 2);
+        mctx.fill();
       } else {
-        const coreRatio = (h - 0.5) / 0.5;
-        const grad = sCtx.createRadialGradient(center, center, 0, center, center, radius);
+        const coreRatio = h <= 0.5 ? 0 : (h - 0.5) / 0.5;
+        const exponent = h <= 0.5 ? (2.8 - (h / 0.5) * 1.8) : 1.3;
+        const grad = mctx.createRadialGradient(center, center, 0, center, center, radius);
+
         const numStops = 12;
         for (let i = 0; i <= numStops; i++) {
           const u = i / numStops;
           let alpha = 1.0;
           if (u > coreRatio) {
-            const t = (u - coreRatio) / (1 - coreRatio);
-            alpha = 0.5 * (1 + Math.cos(t * Math.PI));
+            const t = (u - coreRatio) / Math.max(0.001, 1 - coreRatio);
+            alpha = Math.pow(Math.max(0, 1 - t), exponent);
           }
           grad.addColorStop(u, `rgba(0, 0, 0, ${alpha.toFixed(3)})`);
         }
-        sCtx.fillStyle = grad;
-        sCtx.beginPath();
-        sCtx.arc(center, center, radius, 0, Math.PI * 2);
-        sCtx.fill();
+        mctx.fillStyle = grad;
+        mctx.beginPath();
+        mctx.arc(center, center, radius, 0, Math.PI * 2);
+        mctx.fill();
       }
     }
+
+    // Przycina pobraną próbkę obrazu dokładnie do maski stempla
+    sCtx.save();
+    sCtx.globalCompositeOperation = 'destination-in';
+    sCtx.drawImage(maskCanvas, 0, 0);
     sCtx.restore();
 
     this.strokeCtx.save();
@@ -2154,6 +2157,7 @@ export class BrushEngine {
 
     for (const tile of affectedTiles) {
       tile.ctx.save();
+      tile.ctx.imageSmoothingEnabled = settings.antiAliasing;
       tile.ctx.globalAlpha = alpha;
       tile.ctx.globalCompositeOperation = compositeOp;
 

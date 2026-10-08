@@ -1,5 +1,5 @@
 {
-  "name": "Remix Figura",
+  "name": "Figura",
   "description": "High-performance web-based image editor featuring real-time layering, blending modes, and SkiaSharp-ready architecture for seamless future WPF migration.",
   "requestFramePermissions": [],
   "majorCapabilities": [

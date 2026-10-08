@@ -34,7 +34,9 @@ import {
   StrokeCornerJoin,
   StrokeDashStyle,
   VectorShapeSettings,
+  TextToolSettings,
 } from '../core/skia/types.ts';
+import { TextOptions } from './TextOptions.tsx';
 
 interface ToolOptionsBarProps {
   brushSettings: BrushSettings;
@@ -65,6 +67,9 @@ interface ToolOptionsBarProps {
   activeTool: string;
   onFlipHorizontal?: () => void;
   onFlipVertical?: () => void;
+  textSettings?: TextToolSettings;
+  onChangeTextSettings?: (newSettings: Partial<TextToolSettings>) => void;
+  onRequestTextFocus?: () => void;
   isLiveVectorSessionActive?: boolean;
   onCommitLiveVectorSession?: () => void;
   onCancelLiveVectorSession?: () => void;
@@ -152,6 +157,9 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
   activeTool,
   onFlipHorizontal,
   onFlipVertical,
+  textSettings,
+  onChangeTextSettings,
+  onRequestTextFocus,
   isLiveVectorSessionActive = false,
   onCommitLiveVectorSession,
   onCancelLiveVectorSession,
@@ -524,6 +532,16 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
             </select>
           </div>
         </div>
+      ) : activeTool === 'text' && textSettings && onChangeTextSettings ? (
+        /* OPCJE NARZĘDZIA TEKSTU */
+        <TextOptions
+          settings={textSettings}
+          onChange={onChangeTextSettings}
+          onRequestFocus={onRequestTextFocus}
+          isSessionActive={isLiveVectorSessionActive}
+          onCommit={onCommitLiveVectorSession}
+          onCancel={onCancelLiveVectorSession}
+        />
       ) : activeTool === 'pipette' ? (
         /* 3. PASEK OPCJI PIPETY */
         <div className="flex items-center gap-3.5 flex-1 flex-shrink-0">
@@ -651,9 +669,9 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
               className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
             >
               <option value="replace">Zastąp zaznaczenie</option>
-              <option value="add">Dodaj do zaznaczenia (Shift)</option>
+              <option value="add">Dodaj do zaznaczenia (Ctrl)</option>
               <option value="subtract">Odejmij od zaznaczenia (Alt)</option>
-              <option value="intersect">Część wspólna (Shift+Alt)</option>
+              <option value="intersect">Część wspólna (Ctrl+Alt)</option>
               <option value="invert">Odwróć zaznaczenie</option>
             </select>
           </div>
@@ -1558,8 +1576,8 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
             />
           </div>
         </div>
-      ) : activeTool === 'pan' ? (
-        /* W narzędziu rączka nic nie ma być w opcjach */
+      ) : activeTool === 'pan' || activeTool === 'zoom' ? (
+        /* W narzędziu rączka i lupa nic nie ma być w opcjach */
         <div className="flex-1"></div>
       ) : (
         /* 8. PASEK OPCJI PĘDZLA I GUMKI */
