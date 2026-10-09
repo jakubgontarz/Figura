@@ -104,14 +104,16 @@ export class SelectionManager {
   public getSelectionBounds(): SKRectI | null {
     if (!this.hasActiveSelection) return null;
     const imgData = this.maskCtx.getImageData(0, 0, this.width, this.height);
-    const data = imgData.data;
+    // Przeszukiwanie jako słowa 32-bit (little-endian: alfa to najstarszy bajt) - kilka razy szybciej
+    const px = new Uint32Array(imgData.data.buffer);
     const w = this.width;
     const h = this.height;
 
     let minX = w, minY = h, maxX = -1, maxY = -1;
     for (let y = 0; y < h; y++) {
+      const row = y * w;
       for (let x = 0; x < w; x++) {
-        if (data[(y * w + x) * 4 + 3] > 0) {
+        if (px[row + x] >>> 24 !== 0) {
           if (x < minX) minX = x;
           if (x > maxX) maxX = x;
           if (y < minY) minY = y;
@@ -131,23 +133,28 @@ export class SelectionManager {
     };
   }
 
-  public beginTransformSelection(): TransformSelectionState | null {
-    const bounds = this.getSelectionBounds();
+  public beginTransformSelection(knownBounds?: SKRectI | null): TransformSelectionState | null {
+    const bounds = knownBounds ?? this.getSelectionBounds();
     if (!bounds) return null;
 
     const initCanvas = document.createElement('canvas');
     initCanvas.width = this.width;
     initCanvas.height = this.height;
-    const ictx = initCanvas.getContext('2d')!;
-    ictx.drawImage(this.maskCanvas, 0, 0);
+    const ictx = initCanvas.getContext('2d', { willReadFrequently: true })!;
+    // Maska jest niezerowa tylko w `bounds` - kopiujemy i binaryzujemy wyłącznie ten fragment
+    ictx.drawImage(
+      this.maskCanvas,
+      bounds.left, bounds.top, bounds.width, bounds.height,
+      bounds.left, bounds.top, bounds.width, bounds.height
+    );
 
     // Oczyszczanie maski do postaci binarnej
-    const mImgData = ictx.getImageData(0, 0, this.width, this.height);
+    const mImgData = ictx.getImageData(bounds.left, bounds.top, bounds.width, bounds.height);
     const mData = mImgData.data;
     for (let i = 3; i < mData.length; i += 4) {
       mData[i] = mData[i] > 0 ? 255 : 0;
     }
-    ictx.putImageData(mImgData, 0, 0);
+    ictx.putImageData(mImgData, bounds.left, bounds.top);
 
     const cx = bounds.left + bounds.width / 2;
     const cy = bounds.top + bounds.height / 2;

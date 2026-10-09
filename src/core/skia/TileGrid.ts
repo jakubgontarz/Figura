@@ -242,6 +242,16 @@ export class TileGrid {
     return canvas;
   }
 
+  /** Migawka (ImageData) tylko kafelków przecinających prostokąt - tanie undo dla operacji lokalnych. */
+  public getTilesSnapshotForRect(rect: SKRectI): { tx: number; ty: number; imgData: ImageData; hasContent: boolean }[] {
+    return this.getTilesIntersectingRect(rect).map((tile) => ({
+      tx: tile.tileX,
+      ty: tile.tileY,
+      imgData: tile.ctx.getImageData(0, 0, tile.width, tile.height),
+      hasContent: tile.hasContent,
+    }));
+  }
+
   /**
    * Zwraca pełną migawkę stanu wszystkich kafelków siatki (do operacji Undo/Redo)
    */

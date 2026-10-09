@@ -20,6 +20,8 @@ import { Layer } from '../core/skia/Layer.ts';
 import { BLEND_MODES, SKBlendMode } from '../core/skia/types.ts';
 
 interface LayersPanelProps {
+  /** Zmiana wymusza przerysowanie miniatur (odświeżane z opóźnieniem). */
+  thumbRevision?: number;
   layers: Layer[];
   activeLayerIndex: number;
   onSelectLayer: (index: number) => void;
@@ -270,7 +272,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                 }}
               >
                 <img
-                  src={layer.thumbnailCanvas.toDataURL()}
+                  src={layer.getThumbnailDataUrl()}
                   alt=""
                   className="w-full h-full object-contain"
                 />

@@ -8,12 +8,60 @@ import {
   MarkerType,
   SKColor,
   SKPoint,
+  SKRectI,
   StrokeCornerJoin,
   StrokeDashStyle,
   VectorShapeSettings,
   getCanvasCompositeOperation,
   skColorToRgbaString,
 } from './types.ts';
+
+
+/** Maksymalna liczba pikseli bufora pośredniego, powyżej której okno jest przycinane do widocznego obszaru. */
+const MAX_ISO_PIXELS = 48_000_000;
+
+/**
+ * Okno renderowania (x,y,w,h) w pikselach dokumentu dla bufora pośredniego figury/linii.
+ *
+ * Okno to ciasna obwiednia geometrii (z zapasem), a NIE jej przycięcie do płótna: rasteryzator
+ * Skia daje nieco inne pokrycie AA na krawędziach, gdy ścieżka jest ucinana przez brzeg bufora,
+ * więc dopóki geometria mieści się w buforze, wynik jest bit-w-bit taki sam jak w pełnym buforze.
+ * Zwraca null, gdy okno nie dotyka widocznego obszaru (płótno ∩ clip) - wtedy nie ma czego rysować.
+ * Tylko dla gigantycznych okien (> MAX_ISO_PIXELS) przycina się do widocznego obszaru.
+ */
+export function computeIsoWindow(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  clip?: SKRectI | null
+): { x: number; y: number; w: number; h: number } | null {
+  let vl = 0;
+  let vt = 0;
+  let vr = ctx.canvas.width;
+  let vb = ctx.canvas.height;
+  if (clip) {
+    vl = Math.max(vl, clip.left);
+    vt = Math.max(vt, clip.top);
+    vr = Math.min(vr, clip.right);
+    vb = Math.min(vb, clip.bottom);
+  }
+  if (x >= vr || y >= vb || x + w <= vl || y + h <= vt || vr <= vl || vb <= vt) return null;
+  if (w * h > MAX_ISO_PIXELS || w > 16000 || h > 16000) {
+    const l = Math.max(x, vl);
+    const t = Math.max(y, vt);
+    const r = Math.min(x + w, vr);
+    const b = Math.min(y + h, vb);
+    return { x: l, y: t, w: r - l, h: b - t };
+  }
+  return { x, y, w, h };
+}
+
+/** Kontekst 2D bufora pośredniego, z którego odczytujemy piksele (CPU - bez kosztownego readbacku z GPU). */
+function getReadbackContext(canvas: HTMLCanvasElement): CanvasRenderingContext2D | null {
+  return canvas.getContext('2d', { willReadFrequently: true });
+}
 
 export function applyCrispThreshold(
   ctx: CanvasRenderingContext2D,
@@ -231,11 +279,81 @@ function getMarkerShortenDistance(markerType: MarkerType, baseSize: number, stro
 /**
  * Rysuje linię prostą z opcjami stylu, kreskowania, wygładzania i markerów
  */
+
+/** Geometria bufora figury: stary bufor kwadratowy (squareX/Y, diag) i okno renderowania (left..bottom). */
+function getShapeGeometry(
+  center: SKPoint,
+  width: number,
+  height: number,
+  angle: number,
+  sw: number
+): { squareX: number; squareY: number; diag: number; left: number; top: number; right: number; bottom: number } {
+  const pad = Math.max(30, sw * 3 + 30);
+  const diag = Math.ceil(Math.hypot(width, height) + pad * 2);
+
+  // PRECYZYJNE WYRÓWNANIE DO SIATKI PIKSELI: początek bufora musi być liczbą całkowitą,
+  // aby ctx.drawImage nie powodowało rozmycia subpikselowego.
+  const squareX = Math.floor(center.x - diag / 2);
+  const squareY = Math.floor(center.y - diag / 2);
+
+  // Ciasne okno: obwiednia obróconego prostokąta + zapas na obrys (narożniki miter sięgają do
+  // 10 x grubość), przecięta ze starym kwadratowym buforem. Poza oknem nic nie mogło być narysowane.
+  const cosA = Math.abs(Math.cos(angle));
+  const sinA = Math.abs(Math.sin(angle));
+  const margin = Math.max(pad, Math.ceil(sw * 10) + 6);
+  const hx = (width * cosA + height * sinA) / 2 + margin;
+  const hy = (width * sinA + height * cosA) / 2 + margin;
+  let left = Math.max(squareX, Math.floor(center.x - hx));
+  let top = Math.max(squareY, Math.floor(center.y - hy));
+  let right = Math.min(squareX + diag, Math.ceil(center.x + hx));
+  let bottom = Math.min(squareY + diag, Math.ceil(center.y + hy));
+  // Rasteryzator Skia potrafi dać minimalnie inne pokrycie AA dla bufora o innym rozmiarze/pozycji,
+  // więc ciasne okno stosujemy tylko tam, gdzie realnie oszczędza dużo (figury wydłużone/obrócone).
+  // W pozostałych przypadkach zostaje dotychczasowy bufor - wynik bit-w-bit ten sam.
+  if ((right - left) * (bottom - top) > 0.25 * diag * diag) {
+    left = squareX;
+    top = squareY;
+    right = squareX + diag;
+    bottom = squareY + diag;
+  }
+  return { squareX, squareY, diag, left, top, right, bottom };
+}
+
+/** Obszar (piksele dokumentu), w którym renderVectorShape może coś narysować. */
+export function getShapeRenderBounds(
+  center: SKPoint,
+  width: number,
+  height: number,
+  angle: number,
+  strokeWidth: number
+): SKRectI {
+  const g = getShapeGeometry(center, width, height, angle, Math.max(0, strokeWidth));
+  return { left: g.left, top: g.top, right: g.right, bottom: g.bottom, width: g.right - g.left, height: g.bottom - g.top };
+}
+
+function lineLikePad(settings: LineAndCurveSettings): number {
+  const sw = Math.max(1, Math.round(settings.strokeWidth));
+  return Math.max(30, sw * (settings.markerSize || 1.0) * 4 + 30);
+}
+
+/** Obszar, w którym renderVectorLine/renderVectorBezier może coś narysować (obwiednia punktów + zapas). */
+export function getLineRenderBounds(points: SKPoint[], settings: LineAndCurveSettings): SKRectI {
+  const pad = lineLikePad(settings);
+  const minX = Math.floor(Math.min(...points.map((p) => p.x)) - pad);
+  const minY = Math.floor(Math.min(...points.map((p) => p.y)) - pad);
+  const maxX = Math.ceil(Math.max(...points.map((p) => p.x)) + pad);
+  const maxY = Math.ceil(Math.max(...points.map((p) => p.y)) + pad);
+  const w = Math.max(1, maxX - minX);
+  const h = Math.max(1, maxY - minY);
+  return { left: minX, top: minY, right: minX + w, bottom: minY + h, width: w, height: h };
+}
+
 export function renderVectorLine(
   ctx: CanvasRenderingContext2D,
   p0: SKPoint,
   p1: SKPoint,
-  settings: LineAndCurveSettings
+  settings: LineAndCurveSettings,
+  clip?: SKRectI | null
 ): void {
   const dx = p1.x - p0.x;
   const dy = p1.y - p0.y;
@@ -252,18 +370,22 @@ export function renderVectorLine(
   const minY = Math.floor(Math.min(p0.y, p1.y) - pad);
   const maxX = Math.ceil(Math.max(p0.x, p1.x) + pad);
   const maxY = Math.ceil(Math.max(p0.y, p1.y) + pad);
-  const w = Math.max(1, maxX - minX);
-  const h = Math.max(1, maxY - minY);
+  const win = computeIsoWindow(ctx, minX, minY, Math.max(1, maxX - minX), Math.max(1, maxY - minY), clip);
+  if (!win) return;
+  const w = win.w;
+  const h = win.h;
+  const isoX = win.x;
+  const isoY = win.y;
 
   const isoCanvas = document.createElement('canvas');
   isoCanvas.width = w;
   isoCanvas.height = h;
-  const isoCtx = isoCanvas.getContext('2d');
+  const isoCtx = getReadbackContext(isoCanvas);
   if (!isoCtx) return;
 
   isoCtx.save();
   isoCtx.imageSmoothingEnabled = settings.antiAliasing;
-  isoCtx.translate(-minX + pixelOffset, -minY + pixelOffset);
+  isoCtx.translate(-isoX + pixelOffset, -isoY + pixelOffset);
 
   const strokeColor = skColorToRgbaString(
     settings.antiAliasing ? settings.strokeColor : { r: 255, g: 255, b: 255, a: 255 }
@@ -371,7 +493,7 @@ export function renderVectorLine(
   ctx.save();
   ctx.globalCompositeOperation = getCanvasCompositeOperation(settings.blendMode);
   ctx.imageSmoothingEnabled = settings.antiAliasing;
-  ctx.drawImage(isoCanvas, minX, minY);
+  ctx.drawImage(isoCanvas, isoX, isoY);
   ctx.restore();
 }
 
@@ -384,7 +506,8 @@ export function renderVectorBezier(
   p1: SKPoint,
   p2: SKPoint,
   p3: SKPoint,
-  settings: LineAndCurveSettings
+  settings: LineAndCurveSettings,
+  clip?: SKRectI | null
 ): void {
   const sw = Math.max(1, Math.round(settings.strokeWidth));
   const isOdd = sw % 2 === 1;
@@ -395,18 +518,22 @@ export function renderVectorBezier(
   const minY = Math.floor(Math.min(p0.y, p1.y, p2.y, p3.y) - pad);
   const maxX = Math.ceil(Math.max(p0.x, p1.x, p2.x, p3.x) + pad);
   const maxY = Math.ceil(Math.max(p0.y, p1.y, p2.y, p3.y) + pad);
-  const w = Math.max(1, maxX - minX);
-  const h = Math.max(1, maxY - minY);
+  const win = computeIsoWindow(ctx, minX, minY, Math.max(1, maxX - minX), Math.max(1, maxY - minY), clip);
+  if (!win) return;
+  const w = win.w;
+  const h = win.h;
+  const isoX = win.x;
+  const isoY = win.y;
 
   const isoCanvas = document.createElement('canvas');
   isoCanvas.width = w;
   isoCanvas.height = h;
-  const isoCtx = isoCanvas.getContext('2d');
+  const isoCtx = getReadbackContext(isoCanvas);
   if (!isoCtx) return;
 
   isoCtx.save();
   isoCtx.imageSmoothingEnabled = settings.antiAliasing;
-  isoCtx.translate(-minX + pixelOffset, -minY + pixelOffset);
+  isoCtx.translate(-isoX + pixelOffset, -isoY + pixelOffset);
 
   const strokeColor = skColorToRgbaString(
     settings.antiAliasing ? settings.strokeColor : { r: 255, g: 255, b: 255, a: 255 }
@@ -536,7 +663,7 @@ export function renderVectorBezier(
   ctx.save();
   ctx.globalCompositeOperation = getCanvasCompositeOperation(settings.blendMode);
   ctx.imageSmoothingEnabled = settings.antiAliasing;
-  ctx.drawImage(isoCanvas, minX, minY);
+  ctx.drawImage(isoCanvas, isoX, isoY);
   ctx.restore();
 }
 
@@ -684,19 +811,24 @@ export function renderVectorShape(
   angle: number,
   settings: VectorShapeSettings,
   flipX: boolean = false,
-  flipY: boolean = false
+  flipY: boolean = false,
+  clip?: SKRectI | null
 ): void {
   if (width <= 0 || height <= 0) return;
 
   const sw = Math.max(0, settings.strokeWidth);
-  const pad = Math.max(30, sw * 3 + 30);
-  const diag = Math.ceil(Math.hypot(width, height) + pad * 2);
-
-  // PRECYZYJNE WYRÓWNANIE DO SIATKI PIKSELI:
-  // originX i originY MUSZĄ być liczbami całkowitymi, aby ctx.drawImage
-  // nie powodowało rozmycia subpikselowego (subpixel blur/resampling).
-  const originX = Math.floor(center.x - diag / 2);
-  const originY = Math.floor(center.y - diag / 2);
+  const geo = getShapeGeometry(center, width, height, angle, sw);
+  const { squareX, squareY, diag } = geo;
+  const tightL = geo.left;
+  const tightT = geo.top;
+  const tightR = geo.right;
+  const tightB = geo.bottom;
+  const win = computeIsoWindow(ctx, tightL, tightT, tightR - tightL, tightB - tightT, clip);
+  if (!win) return;
+  const originX = win.x;
+  const originY = win.y;
+  const isoW = win.w;
+  const isoH = win.h;
   const centerXOnIso = center.x - originX;
   const centerYOnIso = center.y - originY;
 
@@ -716,9 +848,9 @@ export function renderVectorShape(
   const lineCap: CanvasLineCap = lineJoin === 'round' ? 'round' : 'butt';
 
   const isoCanvas = document.createElement('canvas');
-  isoCanvas.width = diag;
-  isoCanvas.height = diag;
-  const isoCtx = isoCanvas.getContext('2d');
+  isoCanvas.width = isoW;
+  isoCanvas.height = isoH;
+  const isoCtx = getReadbackContext(isoCanvas);
   if (!isoCtx) return;
 
   if (settings.antiAliasing) {
@@ -785,9 +917,9 @@ export function renderVectorShape(
       const activeFillColor = settings.fillMode === 'primary' ? strokeColor : fillColor;
 
       const tCanvas = document.createElement('canvas');
-      tCanvas.width = diag;
-      tCanvas.height = diag;
-      const tCtx = tCanvas.getContext('2d')!;
+      tCanvas.width = isoW;
+      tCanvas.height = isoH;
+      const tCtx = getReadbackContext(tCanvas)!;
       tCtx.imageSmoothingEnabled = true;
       tCtx.translate(centerXOnIso + centerPixelOffset, centerYOnIso + centerPixelOffset);
       tCtx.rotate(angle);
@@ -799,9 +931,9 @@ export function renderVectorShape(
       tCtx.miterLimit = 10;
 
       const sCanvas = document.createElement('canvas');
-      sCanvas.width = diag;
-      sCanvas.height = diag;
-      const sCtx = sCanvas.getContext('2d')!;
+      sCanvas.width = isoW;
+      sCanvas.height = isoH;
+      const sCtx = getReadbackContext(sCanvas)!;
       sCtx.imageSmoothingEnabled = true;
       sCtx.translate(centerXOnIso + centerPixelOffset, centerYOnIso + centerPixelOffset);
       sCtx.rotate(angle);
@@ -836,10 +968,10 @@ export function renderVectorShape(
         sCtx.stroke(path);
       }
 
-      const tData = tCtx.getImageData(0, 0, diag, diag).data;
-      const sData = sCtx.getImageData(0, 0, diag, diag).data;
-      const outImg = isoCtx.createImageData(diag, diag);
-      const outData = outImg.data;
+      const tData = new Uint32Array(tCtx.getImageData(0, 0, isoW, isoH).data.buffer);
+      const sData = new Uint32Array(sCtx.getImageData(0, 0, isoW, isoH).data.buffer);
+      const outImg = isoCtx.createImageData(isoW, isoH);
+      const out32 = new Uint32Array(outImg.data.buffer);
 
       const aNormS = strokeColor.a / 255;
       const aNormF = activeFillColor.a / 255;
@@ -851,38 +983,39 @@ export function renderVectorShape(
       const bF = activeFillColor.b;
       const isOutside = settings.strokeAlignment === 'outside';
 
-      for (let i = 0; i < outData.length; i += 4) {
-        const tVal = tData[i + 3];
-        if (tVal === 0) continue;
-
+      // Wynik zależy wyłącznie od pary (pokrycie całości, pokrycie obrysu/wypełnienia) - obie to
+      // wartości 0..255, więc cała funkcja trafia do tablicy 64k wpisów liczonej tym samym wzorem co
+      // wcześniej per piksel (wynik bit-w-bit ten sam, pętla po pikselach to już tylko odczyt tablicy).
+      const table = new Uint32Array(256 * 256);
+      for (let tVal = 1; tVal < 256; tVal++) {
         const covT = tVal / 255;
-        let covS = 0;
-        let covF = 0;
-
-        if (isOutside) {
-          const fVal = sData[i + 3];
-          covF = Math.min(covT, fVal / 255);
-          covS = Math.max(0, covT - covF);
-        } else {
-          const sVal = sData[i + 3];
-          covS = Math.min(covT, sVal / 255);
-          covF = Math.max(0, covT - covS);
+        for (let sv = 0; sv < 256; sv++) {
+          let covS = 0;
+          let covF = 0;
+          if (isOutside) {
+            covF = Math.min(covT, sv / 255);
+            covS = Math.max(0, covT - covF);
+          } else {
+            covS = Math.min(covT, sv / 255);
+            covF = Math.max(0, covT - covS);
+          }
+          const aF = covF * aNormF;
+          const aS = covS * aNormS;
+          const aTotal = aF + aS;
+          if (aTotal > 0.0001) {
+            const rr = Math.round((aF * rF + aS * rS) / aTotal);
+            const gg = Math.round((aF * gF + aS * gS) / aTotal);
+            const bb = Math.round((aF * bF + aS * bS) / aTotal);
+            const aa = Math.round(aTotal * 255);
+            table[(tVal << 8) | sv] = ((aa << 24) | (bb << 16) | (gg << 8) | rr) >>> 0;
+          }
         }
+      }
 
-        const aF = covF * aNormF;
-        const aS = covS * aNormS;
-        const aTotal = aF + aS;
-
-        if (aTotal > 0.0001) {
-          const rPremul = aF * rF + aS * rS;
-          const gPremul = aF * gF + aS * gS;
-          const bPremul = aF * bF + aS * bS;
-
-          outData[i] = Math.round(rPremul / aTotal);
-          outData[i + 1] = Math.round(gPremul / aTotal);
-          outData[i + 2] = Math.round(bPremul / aTotal);
-          outData[i + 3] = Math.round(aTotal * 255);
-        }
+      for (let i = 0; i < out32.length; i++) {
+        const tVal = tData[i] >>> 24;
+        if (tVal === 0) continue;
+        out32[i] = table[(tVal << 8) | (sData[i] >>> 24)];
       }
 
       isoCtx.putImageData(outImg, 0, 0);
@@ -893,9 +1026,9 @@ export function renderVectorShape(
     // i dokładnym wycięciem obszaru obrysu (destination-out z tym samym lineJoin), a następnie dokonujemy
     // 1-bitowej binaryzacji bez nakładania się przezroczystości i bez żadnych szczelin.
     const fillCanvas = document.createElement('canvas');
-    fillCanvas.width = diag;
-    fillCanvas.height = diag;
-    const fCtx = fillCanvas.getContext('2d')!;
+    fillCanvas.width = isoW;
+    fillCanvas.height = isoH;
+    const fCtx = getReadbackContext(fillCanvas)!;
     fCtx.imageSmoothingEnabled = true;
     fCtx.translate(centerXOnIso + centerPixelOffset, centerYOnIso + centerPixelOffset);
     fCtx.rotate(angle);
@@ -931,9 +1064,9 @@ export function renderVectorShape(
     }
 
     const strokeCanvas = document.createElement('canvas');
-    strokeCanvas.width = diag;
-    strokeCanvas.height = diag;
-    const sCtx = strokeCanvas.getContext('2d')!;
+    strokeCanvas.width = isoW;
+    strokeCanvas.height = isoH;
+    const sCtx = getReadbackContext(strokeCanvas)!;
     sCtx.imageSmoothingEnabled = true;
     sCtx.translate(centerXOnIso + centerPixelOffset, centerYOnIso + centerPixelOffset);
     sCtx.rotate(angle);
@@ -968,9 +1101,9 @@ export function renderVectorShape(
       }
     }
 
-    const fMaskData = fCtx.getImageData(0, 0, diag, diag).data;
-    const sMaskData = sCtx.getImageData(0, 0, diag, diag).data;
-    const outImg = isoCtx.createImageData(diag, diag);
+    const fMaskData = fCtx.getImageData(0, 0, isoW, isoH).data;
+    const sMaskData = sCtx.getImageData(0, 0, isoW, isoH).data;
+    const outImg = isoCtx.createImageData(isoW, isoH);
     const outData = outImg.data;
 
     const rS = strokeColor.r, gS = strokeColor.g, bS = strokeColor.b, aS = strokeColor.a;

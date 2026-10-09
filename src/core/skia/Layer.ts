@@ -4,7 +4,7 @@
  */
 
 import { TileGrid } from './TileGrid.ts';
-import { SKBlendMode, SKColor } from './types.ts';
+import { SKBlendMode, SKColor, SKRectI } from './types.ts';
 
 /**
  * Odpowiednik warstwy (Layer) w Paint.NET / SkiaSharp WPF.
@@ -40,12 +40,35 @@ export class Layer {
     this.thumbnailCtx = this.thumbnailCanvas.getContext('2d');
   }
 
+  /** Współdzielony bufor roboczy do miniatur (unika alokacji płótna w×h przy każdej aktualizacji). */
+  private static thumbScratch: HTMLCanvasElement | null = null;
+  /** Wywoływane po faktycznym odświeżeniu miniatury (UI może wtedy przerysować panel warstw). */
+  public static onThumbnailRefreshed: (() => void) | null = null;
+
+  public thumbnailVersion: number = 0;
+  private thumbDirty: boolean = false;
+  private thumbTimer: ReturnType<typeof setTimeout> | null = null;
+  private thumbUrl: string | null = null;
+  private thumbUrlVersion: number = -1;
+
   /**
-   * Aktualizuje miniaturę warstwy do wyświetlenia w panelu warstw
+   * Zgłasza potrzebę odświeżenia miniatury. Faktyczne (kosztowne: scalanie całej warstwy)
+   * renderowanie jest odroczone i zbijane (debounce), więc operacje wykonywane przy każdym
+   * ruchu myszy nie płacą O(rozmiar dokumentu) za każdą klatkę.
    */
   public updateThumbnail(): void {
-    if (!this.thumbnailCtx) return;
+    this.thumbDirty = true;
+    if (this.thumbTimer !== null) return;
+    this.thumbTimer = setTimeout(() => {
+      this.thumbTimer = null;
+      if (this.flushThumbnail()) Layer.onThumbnailRefreshed?.();
+    }, 160);
+  }
 
+  /** Natychmiast renderuje miniaturę, jeśli jest nieaktualna. Zwraca true gdy coś odświeżono. */
+  public flushThumbnail(): boolean {
+    if (!this.thumbDirty || !this.thumbnailCtx) return false;
+    this.thumbDirty = false;
     const ctx = this.thumbnailCtx;
     ctx.clearRect(0, 0, 44, 30);
 
@@ -57,8 +80,29 @@ export class Layer {
       }
     }
 
-    const flat = this.tileGrid.compositeToFlatCanvas();
-    ctx.drawImage(flat, 0, 0, 44, 30);
+    const g = this.tileGrid;
+    if (!Layer.thumbScratch) Layer.thumbScratch = document.createElement('canvas');
+    const scratch = Layer.thumbScratch;
+    if (scratch.width !== g.width || scratch.height !== g.height) {
+      scratch.width = g.width;
+      scratch.height = g.height;
+    } else {
+      scratch.getContext('2d')!.clearRect(0, 0, g.width, g.height);
+    }
+    const sctx = scratch.getContext('2d')!;
+    g.drawToFlatContext(sctx);
+    ctx.drawImage(scratch, 0, 0, 44, 30);
+    this.thumbnailVersion++;
+    return true;
+  }
+
+  /** Data-URL miniatury z cache (toDataURL wołane tylko po realnej zmianie miniatury). */
+  public getThumbnailDataUrl(): string {
+    if (this.thumbUrl === null || this.thumbUrlVersion !== this.thumbnailVersion) {
+      this.thumbUrl = this.thumbnailCanvas.toDataURL();
+      this.thumbUrlVersion = this.thumbnailVersion;
+    }
+    return this.thumbUrl;
   }
 
   public clone(newId?: string, newName?: string): Layer {
@@ -120,24 +164,23 @@ export class Layer {
   /**
    * Czyści warstwę (z opcjonalnym maskowaniem zaznaczenia)
    */
-  public clear(selectionMask?: HTMLCanvasElement | null): void {
+  public clear(selectionMask?: HTMLCanvasElement | null, bounds?: SKRectI | null): void {
     if (!selectionMask) {
       this.tileGrid.clear();
     } else {
-      for (let ty = 0; ty < this.tileGrid.rows; ty++) {
-        for (let tx = 0; tx < this.tileGrid.cols; tx++) {
-          const tile = this.tileGrid.tiles[ty][tx];
-          if (!tile.hasContent) continue;
-          tile.ctx.save();
-          tile.ctx.globalCompositeOperation = 'destination-out';
-          tile.ctx.drawImage(
-            selectionMask,
-            tile.pixelX, tile.pixelY, tile.width, tile.height,
-            0, 0, tile.width, tile.height
-          );
-          tile.ctx.restore();
-          tile.isDirty = true;
-        }
+      // Maska zaznaczenia jest niezerowa tylko w `bounds` - nie trzeba odwiedzać reszty kafelków
+      const tiles = bounds ? this.tileGrid.getTilesIntersectingRect(bounds) : this.tileGrid.tiles.flat();
+      for (const tile of tiles) {
+        if (!tile.hasContent) continue;
+        tile.ctx.save();
+        tile.ctx.globalCompositeOperation = 'destination-out';
+        tile.ctx.drawImage(
+          selectionMask,
+          tile.pixelX, tile.pixelY, tile.width, tile.height,
+          0, 0, tile.width, tile.height
+        );
+        tile.ctx.restore();
+        tile.isDirty = true;
       }
     }
     this.updateThumbnail();

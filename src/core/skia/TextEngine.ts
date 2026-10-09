@@ -6,6 +6,7 @@
 import {
   SKColor,
   SKPoint,
+  SKRectI,
   TextAlign,
   TextCharStyle,
   TextToolSettings,
@@ -818,7 +819,7 @@ function renderTextRaster(
   const tCanvas = document.createElement('canvas');
   tCanvas.width = bufW;
   tCanvas.height = bufH;
-  const tCtx = tCanvas.getContext('2d')!;
+  const tCtx = tCanvas.getContext('2d', { willReadFrequently: true })!;
   tCtx.imageSmoothingEnabled = true;
   tCtx.translate(pad, pad);
   drawTextMask(tCtx, layout, hasStroke && hasFill ? 'both' : hasStroke ? 'stroke' : 'fill', strokeW);
@@ -829,7 +830,7 @@ function renderTextRaster(
     fCanvas = document.createElement('canvas');
     fCanvas.width = bufW;
     fCanvas.height = bufH;
-    const fCtx = fCanvas.getContext('2d')!;
+    const fCtx = fCanvas.getContext('2d', { willReadFrequently: true })!;
     fCtx.imageSmoothingEnabled = true;
     fCtx.translate(pad, pad);
     drawTextMask(fCtx, layout, 'fill', 0);
@@ -941,6 +942,99 @@ export interface RenderTextResult {
  * Renderuje litery (wypełnienie i/lub obrys samych liter) do `ctx` w pikselach płótna dokumentu.
  * Tekst nie posiada żadnego tła ani obramowania ramki.
  */
+interface TextPlacement {
+  originX: number;
+  originY: number;
+  tx: number;
+  ty: number;
+  pivotX: number;
+  pivotY: number;
+  /** Okno (piksele dokumentu), w którym tekst może zostać narysowany. */
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+  bufW: number;
+  bufH: number;
+  pad: number;
+  extentH: number;
+  innerW: number;
+  inset: number;
+  lay: TextLayout;
+}
+
+function computeTextPlacement(
+  center: SKPoint,
+  width: number,
+  height: number,
+  angle: number,
+  rt: RichText,
+  settings: TextToolSettings,
+  layout?: TextLayout,
+  fallbackStyle?: TextCharStyle
+): TextPlacement {
+  const inset = getTextInset(settings);
+  const innerW = getTextInnerWidth(width, settings);
+  const fb = fallbackStyle ?? pickCharStyle(settings);
+  const lay = layout ?? layoutText(rt, innerW, getTextLayoutOptions(settings, fb));
+  const extentH = Math.max(height, lay.height + 2 * inset);
+
+  // Margines bezpieczeństwa w buforze pikseli dla grubych obrysów liter
+  const sw = Math.max(0, settings.strokeWidth);
+  const pad = Math.ceil(sw * 2) + 8;
+  const bufW = Math.max(1, Math.ceil(innerW + 2 * pad));
+  const bufH = Math.max(1, Math.ceil(lay.height + 2 * pad));
+
+  // Umieszczenie i ewentualny obrót w dokumencie
+  const diag = Math.ceil(Math.hypot(Math.max(width, bufW + 2 * inset), Math.max(extentH, height))) + 8;
+  const originX = Math.floor(center.x - diag / 2);
+  const originY = Math.floor(center.y - diag / 2);
+  const cx = center.x - originX;
+  const cy = center.y - originY;
+
+  const isAxisAligned = Math.abs(angle) < 0.001;
+  let tx = -width / 2 + inset - pad;
+  let ty = -height / 2 + inset - pad;
+  if (isAxisAligned) {
+    tx = Math.round(tx);
+    ty = Math.round(ty);
+  }
+  const pivotX = isAxisAligned ? Math.round(cx) : cx;
+  const pivotY = isAxisAligned ? Math.round(cy) : cy;
+
+  // Przy obrocie próbkowanie obrazu (jakość 'high') zależy od rozmiaru bufora docelowego, więc dla
+  // tekstu obróconego zachowujemy pełny, kwadratowy bufor sprzed zmian (wynik bit-w-bit ten sam).
+  // Ciasną obwiednię bufora tekstu stosujemy tylko dla tekstu nieobróconego (tam wynik jest identyczny).
+  let left = originX;
+  let top = originY;
+  let right = originX + diag;
+  let bottom = originY + diag;
+  if (isAxisAligned) {
+    left = Math.max(left, originX + pivotX + tx - 3);
+    top = Math.max(top, originY + pivotY + ty - 3);
+    right = Math.min(right, Math.ceil(originX + pivotX + tx + bufW) + 3);
+    bottom = Math.min(bottom, Math.ceil(originY + pivotY + ty + bufH) + 3);
+    left = Math.floor(left);
+    top = Math.floor(top);
+  }
+  return { originX, originY, tx, ty, pivotX, pivotY, left, top, right, bottom, bufW, bufH, pad, extentH, innerW, inset, lay };
+}
+
+/** Obszar (piksele dokumentu), w którym renderVectorText może coś narysować. */
+export function getTextRenderBounds(
+  center: SKPoint,
+  width: number,
+  height: number,
+  angle: number,
+  rt: RichText,
+  settings: TextToolSettings,
+  layout?: TextLayout,
+  fallbackStyle?: TextCharStyle
+): SKRectI {
+  const pl = computeTextPlacement(center, width, height, angle, rt, settings, layout, fallbackStyle);
+  return { left: pl.left, top: pl.top, right: pl.right, bottom: pl.bottom, width: pl.right - pl.left, height: pl.bottom - pl.top };
+}
+
 export function renderVectorText(
   ctx: CanvasRenderingContext2D,
   center: SKPoint,
@@ -950,59 +1044,55 @@ export function renderVectorText(
   rt: RichText,
   settings: TextToolSettings,
   layout?: TextLayout,
-  fallbackStyle?: TextCharStyle
+  fallbackStyle?: TextCharStyle,
+  clip?: SKRectI | null
 ): RenderTextResult {
-  const inset = getTextInset(settings);
-  const innerW = getTextInnerWidth(width, settings);
-  const fb = fallbackStyle ?? pickCharStyle(settings);
-  const lay = layout ?? layoutText(rt, innerW, getTextLayoutOptions(settings, fb));
-  const extentH = Math.max(height, lay.height + 2 * inset);
+  const pl = computeTextPlacement(center, width, height, angle, rt, settings, layout, fallbackStyle);
+  const { bufW, bufH, pad, lay, extentH, inset } = pl;
 
   if (rt.length === 0) return { extentHeight: extentH, extentWidth: width };
 
-  // Margines bezpieczeństwa w buforze pikseli dla grubych obrysów liter
-  const sw = Math.max(0, settings.strokeWidth);
-  const pad = Math.ceil(sw * 2) + 8;
-  const bufW = Math.max(1, Math.ceil(innerW + 2 * pad));
-  const bufH = Math.max(1, Math.ceil(lay.height + 2 * pad));
+  const result: RenderTextResult = { extentHeight: extentH, extentWidth: Math.max(width, bufW + 2 * inset) };
+
+  let cl = pl.left;
+  let ct = pl.top;
+  let cr = pl.right;
+  let cb = pl.bottom;
+  // Widoczny obszar: płótno ∩ clip. Okno dotykające go nie jest przycinane (patrz computeIsoWindow).
+  const vl = clip ? Math.max(0, clip.left) : 0;
+  const vt = clip ? Math.max(0, clip.top) : 0;
+  const vr = clip ? Math.min(ctx.canvas.width, clip.right) : ctx.canvas.width;
+  const vb = clip ? Math.min(ctx.canvas.height, clip.bottom) : ctx.canvas.height;
+  if (cr <= cl || cb <= ct || cl >= vr || ct >= vb || cr <= vl || cb <= vt) return result;
+  if ((cr - cl) * (cb - ct) > 48_000_000 || cr - cl > 16000 || cb - ct > 16000) {
+    cl = Math.max(cl, vl);
+    ct = Math.max(ct, vt);
+    cr = Math.min(cr, vr);
+    cb = Math.min(cb, vb);
+  }
+
   const textCanvas = document.createElement('canvas');
   textCanvas.width = bufW;
   textCanvas.height = bufH;
   const tctx = textCanvas.getContext('2d')!;
-
   renderTextRaster(tctx, lay, settings, pad, bufW, bufH);
 
-  // Umieszczenie i ewentualny obrót w dokumencie
-  const diag = Math.ceil(Math.hypot(Math.max(width, bufW + 2 * inset), Math.max(extentH, height))) + 8;
-  const originX = Math.floor(center.x - diag / 2);
-  const originY = Math.floor(center.y - diag / 2);
-  const cx = center.x - originX;
-  const cy = center.y - originY;
-
   const iso = document.createElement('canvas');
-  iso.width = diag;
-  iso.height = diag;
+  iso.width = cr - cl;
+  iso.height = cb - ct;
   const ictx = iso.getContext('2d')!;
   ictx.imageSmoothingEnabled = settings.antiAliasing;
   ictx.imageSmoothingQuality = 'high';
 
-  const isAxisAligned = Math.abs(angle) < 0.001;
-  ictx.translate(isAxisAligned ? Math.round(cx) : cx, isAxisAligned ? Math.round(cy) : cy);
+  ictx.translate(pl.pivotX + pl.originX - cl, pl.pivotY + pl.originY - ct);
   ictx.rotate(angle);
-
-  let tx = -width / 2 + inset - pad;
-  let ty = -height / 2 + inset - pad;
-  if (isAxisAligned) {
-    tx = Math.round(tx);
-    ty = Math.round(ty);
-  }
-  ictx.drawImage(textCanvas, tx, ty);
+  ictx.drawImage(textCanvas, pl.tx, pl.ty);
 
   ctx.save();
   ctx.globalCompositeOperation = getCanvasCompositeOperation(settings.blendMode);
   ctx.imageSmoothingEnabled = settings.antiAliasing;
-  ctx.drawImage(iso, originX, originY);
+  ctx.drawImage(iso, cl, ct);
   ctx.restore();
 
-  return { extentHeight: extentH, extentWidth: Math.max(width, bufW + 2 * inset) };
+  return result;
 }

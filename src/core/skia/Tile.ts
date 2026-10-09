@@ -20,8 +20,21 @@ export class Tile {
 
   public canvas: HTMLCanvasElement;
   public ctx: CanvasRenderingContext2D;
-  public isDirty: boolean = false;
+  /**
+   * Globalny licznik modyfikacji kafelków. Każde ustawienie isDirty = true podbija licznik,
+   * dzięki czemu kompozytor tanio wykrywa, że zawartość warstw zmieniła się poza kontrolowanym podglądem.
+   */
+  public static contentVersion: number = 0;
+  private _isDirty: boolean = false;
   public hasContent: boolean = false;
+
+  public get isDirty(): boolean {
+    return this._isDirty;
+  }
+  public set isDirty(v: boolean) {
+    if (v) Tile.contentVersion++;
+    this._isDirty = v;
+  }
 
   constructor(tileX: number, tileY: number, tileSize: number, docWidth: number, docHeight: number) {
     this.tileX = tileX;
