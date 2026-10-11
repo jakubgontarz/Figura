@@ -4,7 +4,14 @@
  */
 
 import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react';
-import { GraphicEngine, PreviewOptions, PreviewRenderer, makeRectI } from '../core/skia/GraphicEngine.ts';
+import { GraphicEngine } from '../core/skia/GraphicEngine.ts';
+import { renderGradientPreview } from '../core/skia/GradientRenderer.ts';
+import {
+  ViewportTileRenderer,
+  boundsForPoints,
+  boundsForRotatedBox,
+  boundsForShape,
+} from '../core/skia/ViewportTileRenderer.ts';
 import {
   BrushSettings,
   ColorReplaceSettings,
@@ -44,13 +51,10 @@ import {
   nextWordIndex,
   pickCharStyle,
   prevWordIndex,
-  getTextRenderBounds,
   renderVectorText,
   wordBoundsAt,
 } from '../core/skia/TextEngine.ts';
 import {
-  getLineRenderBounds,
-  getShapeRenderBounds,
   renderVectorBezier,
   renderVectorLine,
   renderVectorShape,
@@ -296,6 +300,11 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
+  // Płótno kafelków podglądu edycji (leży nad płótnem dokumentu) i jego renderer
+  const tileCanvasRef = useRef<HTMLCanvasElement>(null);
+  const tileRendererRef = useRef<ViewportTileRenderer | null>(null);
+  const tileRendererEngineRef = useRef<GraphicEngine | null>(null);
+  const baseSigRef = useRef<string | null>(null);
 
   const baseSelectionModeRef = useRef<SelectionSettings['mode'] | null>(null);
 
@@ -1129,45 +1138,18 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
 
 
 
-  // Aktualne zoom/pan w refach - widoczny fragment dokumentu liczymy bez przebudowy callbacka redraw
-  const viewStateRef = useRef({ zoom, panX: panOffset.x, panY: panOffset.y });
-  viewStateRef.current = { zoom, panX: panOffset.x, panY: panOffset.y };
-
-  /** Widoczny prostokąt dokumentu (z zapasem), używany do ograniczenia kosztu podglądu gradientu. */
-  const computeVisibleDocRect = useCallback(() => {
-    const container = containerRef.current;
-    if (!container) return null;
-    const cW = container.clientWidth;
-    const cH = container.clientHeight;
-    const { zoom: z, panX, panY } = viewStateRef.current;
-    if (cW <= 0 || cH <= 0 || z <= 0) return null;
-    const cx = cW / 2 + panX;
-    const cy = cH / 2 + panY;
-    const left = (0 - cx) / z + engine.width / 2;
-    const top = (0 - cy) / z + engine.height / 2;
-    const right = (cW - cx) / z + engine.width / 2;
-    const bottom = (cH - cy) / z + engine.height / 2;
-    // zapas ~50% szerokości/wysokości z każdej strony, by drobne przesunięcia nie wymagały przeliczania
-    const mx = (right - left) * 0.5;
-    const my = (bottom - top) * 0.5;
-    return makeRectI(
-      Math.floor(left - mx), Math.floor(top - my), Math.ceil(right + mx), Math.ceil(bottom + my)
-    );
-  }, [engine]);
-
   // REDRAW & COMPOSITE TO VIEWPORT
   const redraw = useCallback(() => {
     if (!canvasRef.current) return;
 
     // Przekaż niestandardowy preview renderer dla aktywnej sesji wektorowej
-    const customPreview: PreviewRenderer = (ctx, clip) => {
+    const customPreview = (ctx: CanvasRenderingContext2D) => {
       if (activeVectorLineSession) {
         renderVectorLine(
           ctx,
           activeVectorLineSession.p0,
           activeVectorLineSession.p1,
-          { ...lineAndCurveSettings, blendMode: 'SrcOver' },
-          clip
+          { ...lineAndCurveSettings, blendMode: 'SrcOver' }
         );
       } else if (activeVectorBezierSession) {
         renderVectorBezier(
@@ -1176,8 +1158,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
           activeVectorBezierSession.p1,
           activeVectorBezierSession.p2,
           activeVectorBezierSession.p3,
-          { ...lineAndCurveSettings, blendMode: 'SrcOver' },
-          clip
+          { ...lineAndCurveSettings, blendMode: 'SrcOver' }
         );
       } else if (activeVectorShapeSession) {
         renderVectorShape(
@@ -1188,8 +1169,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
           activeVectorShapeSession.angle,
           { ...vectorShapeSettings, blendMode: 'SrcOver' },
           activeVectorShapeSession.flipX,
-          activeVectorShapeSession.flipY,
-          clip
+          activeVectorShapeSession.flipY
         );
       } else if (activeTextSession) {
         renderVectorText(
@@ -1201,39 +1181,10 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
           textRtRef.current,
           { ...textSettings, blendMode: 'SrcOver' },
           textLayout ?? undefined,
-          textPendingStyleRef.current,
-          clip
+          textPendingStyleRef.current
         );
       }
     };
-
-    // Granice obszaru, w którym podgląd może coś narysować - dzięki nim kompozytor przerysowuje
-    // tylko sumę poprzedniego i bieżącego obszaru zamiast całego dokumentu.
-    let previewOptions: PreviewOptions | null = null;
-    if (activeVectorLineSession) {
-      previewOptions = {
-        bounds: getLineRenderBounds([activeVectorLineSession.p0, activeVectorLineSession.p1], lineAndCurveSettings),
-      };
-    } else if (activeVectorBezierSession) {
-      const s = activeVectorBezierSession;
-      previewOptions = { bounds: getLineRenderBounds([s.p0, s.p1, s.p2, s.p3], lineAndCurveSettings) };
-    } else if (activeVectorShapeSession) {
-      const s = activeVectorShapeSession;
-      previewOptions = {
-        bounds: getShapeRenderBounds(s.center, s.width, s.height, s.angle, vectorShapeSettings.strokeWidth),
-      };
-    } else if (activeTextSession) {
-      const s = activeTextSession;
-      previewOptions = {
-        bounds: getTextRenderBounds(
-          s.center, s.width, s.height, s.angle,
-          textRtRef.current,
-          { ...textSettings, blendMode: 'SrcOver' },
-          textLayout ?? undefined,
-          textPendingStyleRef.current
-        ),
-      };
-    }
 
     const currentBlendMode = activeTextSession
       ? textSettings.blendMode
@@ -1241,19 +1192,75 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       ? vectorShapeSettings.blendMode
       : lineAndCurveSettings.blendMode;
 
-    // Gradient: podgląd z bufora gradientu (bez zapisu do kafelków przy każdym ruchu myszy)
-    let gradientPreview: ReturnType<GraphicEngine['getGradientPreview']> = null;
-    if (!isAnyVectorSessionActive && engine.gradientStartPoint) {
-      engine.gradientVisibleHint = computeVisibleDocRect();
-      engine.refreshGradientPreviewForViewport();
-      gradientPreview = engine.getGradientPreview();
-    }
+    const tileCanvas = tileCanvasRef.current;
 
-    if (gradientPreview) {
-      engine.compositeToViewport(
-        canvasRef.current, null, null, null, null, null,
-        gradientPreview.renderer, gradientPreview.blendMode, gradientPreview.options
-      );
+    const gradientPreview = engine.gradientPreview;
+    if ((isAnyVectorSessionActive || !!gradientPreview) && tileCanvas) {
+      // SZYBKI PODGLĄD EDYCJI: kafelki ekranu renderowane promieniowo od kursora, przerywane przy każdym ruchu.
+      if (tileRendererEngineRef.current !== engine) {
+        tileRendererRef.current?.dispose();
+        tileRendererRef.current = new ViewportTileRenderer(tileCanvas, engine);
+        tileRendererEngineRef.current = engine;
+      }
+      const tr = tileRendererRef.current!;
+
+      // Jeśli podkład zmienił się w trakcie sesji (np. cofnięcie), odśwież płótno dokumentu bez podglądu
+      const sig = engine.getBaseSignature();
+      if (baseSigRef.current !== null && baseSigRef.current !== sig) {
+        engine.compositeToViewport(canvasRef.current, null, null, null, null, null, null, null);
+      }
+      baseSigRef.current = sig;
+
+      const cW = containerSize.width || containerRef.current?.clientWidth || 0;
+      const cH = containerSize.height || containerRef.current?.clientHeight || 0;
+      const left = Math.round(cW / 2 + panOffset.x - (engine.width * zoom) / 2);
+      const top = Math.round(cH / 2 + panOffset.y - (engine.height * zoom) / 2);
+
+      let bounds;
+      let centerDoc: SKPoint;
+      let previewRender: (ctx: CanvasRenderingContext2D) => void = customPreview;
+      let previewBlend = currentBlendMode;
+      if (!isAnyVectorSessionActive && gradientPreview) {
+        // Gradient: cały dokument (przycięty do widoku i zaznaczenia przez renderer), warstwa nietknięta do zatwierdzenia
+        previewRender = (ctx) => renderGradientPreview(ctx, gradientPreview, engine.width, engine.height);
+        previewBlend = gradientPreview.blendMode;
+        bounds = { left: 0, top: 0, right: engine.width, bottom: engine.height, width: engine.width, height: engine.height };
+        centerDoc = { x: (gradientPreview.p0.x + gradientPreview.p1.x) / 2, y: (gradientPreview.p0.y + gradientPreview.p1.y) / 2 };
+      } else if (activeVectorLineSession) {
+        const { p0, p1 } = activeVectorLineSession;
+        bounds = boundsForPoints([p0, p1], lineAndCurveSettings.strokeWidth, lineAndCurveSettings.markerSize);
+        centerDoc = { x: (p0.x + p1.x) / 2, y: (p0.y + p1.y) / 2 };
+      } else if (activeVectorBezierSession) {
+        const { p0, p1, p2, p3 } = activeVectorBezierSession;
+        bounds = boundsForPoints([p0, p1, p2, p3], lineAndCurveSettings.strokeWidth, lineAndCurveSettings.markerSize);
+        centerDoc = { x: (p0.x + p3.x) / 2, y: (p0.y + p3.y) / 2 };
+      } else if (activeVectorShapeSession) {
+        const sh = activeVectorShapeSession;
+        bounds = boundsForShape(sh.center, sh.width, sh.height, sh.angle, vectorShapeSettings.strokeWidth);
+        centerDoc = sh.center;
+      } else {
+        const tx = activeTextSession!;
+        const extH = Math.max(tx.height, (textLayout?.height ?? 0) + 2 * getTextInset(textSettings));
+        bounds = boundsForRotatedBox(
+          tx.center,
+          tx.width,
+          extH,
+          tx.angle,
+          Math.max(0, textSettings.strokeWidth) * 2 + 24
+        );
+        centerDoc = tx.center;
+      }
+
+      const dragging = (!!activeVectorHandleRef.current || !!gradientPreview) && !!cursorPosRef.current;
+      const focus = dragging
+        ? { x: cursorPosRef.current!.x, y: cursorPosRef.current!.y }
+        : { x: left + centerDoc.x * zoom, y: top + centerDoc.y * zoom };
+
+      tr.request({
+        view: { zoom, left, top, width: cW, height: cH },
+        preview: { render: previewRender, blendMode: previewBlend, bounds },
+        focus,
+      });
       return;
     }
 
@@ -1264,10 +1271,11 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       null,
       null,
       null,
-      isAnyVectorSessionActive ? customPreview : null,
-      isAnyVectorSessionActive ? currentBlendMode : null,
-      isAnyVectorSessionActive ? previewOptions : null
+      null,
+      null
     );
+    baseSigRef.current = engine.getBaseSignature();
+    tileRendererRef.current?.clear();
   }, [
     engine,
     activeVectorLineSession,
@@ -1280,31 +1288,24 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     lineAndCurveSettings,
     vectorShapeSettings,
     isAnyVectorSessionActive,
-    computeVisibleDocRect,
+    zoom,
+    panOffset.x,
+    panOffset.y,
+    containerSize.width,
+    containerSize.height,
   ]);
 
-  // Przesunięcie/zoom podczas sesji gradientu: dolicz brakujący (nowo widoczny) fragment podglądu
   useEffect(() => {
-    if (activeTool !== 'gradient') return;
-    engine.gradientVisibleHint = computeVisibleDocRect();
-    if (engine.gradientStartPoint && engine.refreshGradientPreviewForViewport()) {
-      redraw();
-    }
-  }, [activeTool, engine, zoom, panOffset, containerSize, computeVisibleDocRect, redraw]);
+    redraw();
+  }, [redraw, engineRevision, engine.width, engine.height, engine.activeLayerIndex]);
 
   useEffect(() => {
-    // Podczas interaktywnego podglądu (sesja wektorowa/gradient/przekształcanie) zmiana stanu i podbicie
-    // wersji silnika potrafią wywołać ten efekt kilka razy w jednej klatce - kosztowny render robimy
-    // raz na klatkę (poprzedni, jeszcze niewykonany, jest anulowany w cleanup).
-    const interactive =
-      isAnyVectorSessionActive || !!engine.gradientStartPoint || !!engine.transformContentSession;
-    if (!interactive) {
-      redraw();
-      return;
-    }
-    const id = requestAnimationFrame(() => redraw());
-    return () => cancelAnimationFrame(id);
-  }, [redraw, engineRevision, engine.width, engine.height, engine.activeLayerIndex, isAnyVectorSessionActive, engine]);
+    return () => {
+      tileRendererRef.current?.dispose();
+      tileRendererRef.current = null;
+      tileRendererEngineRef.current = null;
+    };
+  }, []);
 
   // PRZELICZANIE WSPÓŁRZĘDNYCH DOKUMENTU
   const getDocPoint = useCallback(
@@ -4490,7 +4491,12 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
           const dist = Math.hypot(pt.x - dragStartPoint.x, pt.y - dragStartPoint.y);
           if (dist < 3) {
             if (engine.gradientStartPoint) {
-              engine.cancelGradientSession();
+              engine.restoreGradientInitialTiles();
+              engine.gradientStartPoint = null;
+              engine.gradientEndPoint = null;
+              engine.gradientInitialTilesSnapshot = null;
+              engine.gradientInitialLayerIndex = -1;
+              engine.gradientColorSource = 'primary';
             }
           } else {
             const isFirstApply = !engine.gradientStartPoint;
@@ -4887,6 +4893,12 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
           }}
         />
       </div>
+
+      <canvas
+        ref={tileCanvasRef}
+        className="absolute inset-0 pointer-events-none"
+        style={{ zIndex: 3, width: '100%', height: '100%' }}
+      />
 
       <canvas
         ref={overlayCanvasRef}

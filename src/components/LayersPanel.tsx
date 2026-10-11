@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   Plus,
   Minus,
@@ -16,12 +16,10 @@ import {
   Lock,
   Unlock,
 } from 'lucide-react';
-import { Layer } from '../core/skia/Layer.ts';
+import { Layer, subscribeThumbnails } from '../core/skia/Layer.ts';
 import { BLEND_MODES, SKBlendMode } from '../core/skia/types.ts';
 
 interface LayersPanelProps {
-  /** Zmiana wymusza przerysowanie miniatur (odświeżane z opóźnieniem). */
-  thumbRevision?: number;
   layers: Layer[];
   activeLayerIndex: number;
   onSelectLayer: (index: number) => void;
@@ -62,6 +60,10 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
 
   const startOpacityRef = useRef<number | null>(null);
+
+  // Miniatury odświeżają się z opóźnieniem (po zakończeniu edycji), więc panel musi zostać o tym powiadomiony
+  const [, setThumbTick] = useState(0);
+  useEffect(() => subscribeThumbnails(() => setThumbTick((t) => t + 1)), []);
 
   const activeLayer = layers[activeLayerIndex] || layers[0];
 
