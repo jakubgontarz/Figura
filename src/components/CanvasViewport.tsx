@@ -4273,7 +4273,12 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
 
     if (activeTool === 'select-lasso') {
       setCurrentDragPoint(pt);
-      setLassoPoints((prev) => [...prev, pt]);
+      // Punkty bliższe niż pół piksela ekranu nie zmieniają kształtu, a niepotrzebnie wydłużają lasso (podgląd, wypełnianie, łączenie wielokątów)
+      setLassoPoints((prev) => {
+        const last = prev[prev.length - 1];
+        if (last && Math.hypot(pt.x - last.x, pt.y - last.y) * zoom < 0.5) return prev;
+        return [...prev, pt];
+      });
       return;
     }
 
