@@ -8,6 +8,91 @@ import { SKBlendMode, SKColor, SKRectI } from './types.ts';
 
 export const DEFAULT_TILE_SIZE = 64;
 
+/** Migawka jednego kafelka (Undo/Redo). */
+export interface TileSnapshot {
+  tx: number;
+  ty: number;
+  imgData: ImageData;
+  hasContent: boolean;
+}
+
+/**
+ * Puste kafelki (hasContent === false) nie mają pikseli do zapamiętania, więc wszystkie migawki
+ * współdzielą jeden, tylko do odczytu, wyzerowany ImageData danego rozmiaru zamiast kopii 16 KB na kafelek.
+ * putImageData z samymi zerami przywraca stan pusty tak samo jak kopia.
+ */
+const emptyImageDataCache = new Map<string, ImageData>();
+const sharedEmptyImageData = new WeakSet<ImageData>();
+
+function getSharedEmptyImageData(w: number, h: number): ImageData {
+  const key = `${w}x${h}`;
+  let img = emptyImageDataCache.get(key);
+  if (!img) {
+    img = new ImageData(w, h);
+    emptyImageDataCache.set(key, img);
+    sharedEmptyImageData.add(img);
+  }
+  return img;
+}
+
+let thumbMidCanvas: HTMLCanvasElement | null = null;
+
+function sameTileSnapshot(a: TileSnapshot, b: TileSnapshot): boolean {
+  if (a.hasContent !== b.hasContent) return false;
+  if (a.imgData === b.imgData) return true;
+  const da = a.imgData.data;
+  const db = b.imgData.data;
+  if (da.length !== db.length) return false;
+  if (sharedEmptyImageData.has(a.imgData) && sharedEmptyImageData.has(b.imgData)) return true;
+  const n = da.length >> 2;
+  const ua = new Uint32Array(da.buffer, da.byteOffset, n);
+  const ub = new Uint32Array(db.buffer, db.byteOffset, n);
+  for (let i = 0; i < n; i++) {
+    if (ua[i] !== ub[i]) return false;
+  }
+  return true;
+}
+
+/**
+ * Z dwóch migawek tych samych kafelków usuwa kafelki, które operacja nie zmieniła.
+ * Dzięki temu historia trzyma tylko faktycznie zmienione kafelki, nawet gdy migawkę zrobiono dla całej warstwy.
+ */
+export function trimUnchangedTiles(
+  before: TileSnapshot[],
+  after: TileSnapshot[]
+): { before: TileSnapshot[]; after: TileSnapshot[] } {
+  const key = (t: TileSnapshot) => t.ty * 65536 + t.tx;
+  const afterMap = new Map<number, TileSnapshot>();
+  for (const a of after) afterMap.set(key(a), a);
+  const unchanged = new Set<number>();
+  const keepBefore: TileSnapshot[] = [];
+  for (const b of before) {
+    const a = afterMap.get(key(b));
+    if (a && sameTileSnapshot(b, a)) {
+      unchanged.add(key(b));
+    } else {
+      keepBefore.push(b);
+    }
+  }
+  const keepAfter = after.filter((a) => !unchanged.has(key(a)));
+  return { before: keepBefore, after: keepAfter };
+}
+
+/** Pamięć zajmowana przez migawki (bez współdzielonych pustych buforów i bez podwójnego liczenia). */
+export function snapshotBytes(...lists: TileSnapshot[][]): number {
+  let bytes = 0;
+  const seen = new Set<ImageData>();
+  for (const list of lists) {
+    for (const t of list) {
+      const img = t.imgData;
+      if (!img || sharedEmptyImageData.has(img) || seen.has(img)) continue;
+      seen.add(img);
+      bytes += img.data.byteLength;
+    }
+  }
+  return bytes;
+}
+
 /**
  * Odpowiednik siatki kafelków (TileGrid) dla warstwy.
  * Dzieli powierzchnię dokumentu na niezależne kwadraty o wymiarach tileSize x tileSize (np. 64x64).
@@ -242,28 +327,60 @@ export class TileGrid {
     return canvas;
   }
 
-  /** Migawka (ImageData) tylko kafelków przecinających prostokąt - tanie undo dla operacji lokalnych. */
-  public getTilesSnapshotForRect(rect: SKRectI): { tx: number; ty: number; imgData: ImageData; hasContent: boolean }[] {
-    return this.getTilesIntersectingRect(rect).map((tile) => ({
-      tx: tile.tileX,
-      ty: tile.tileY,
-      imgData: tile.ctx.getImageData(0, 0, tile.width, tile.height),
-      hasContent: tile.hasContent,
-    }));
+  /**
+   * Rysuje zmniejszoną wersję całej siatki na kontekście miniatury (dw x dh) bez alokowania płaskiego płótna
+   * rozmiaru dokumentu. Dla dużych zmniejszeń najpierw skleja kafelki w pośredni bufor ~1/8, a dopiero
+   * potem zmniejsza go jakością 'high' (dokładniejsze niż jednoetapowe próbkowanie i kilka razy szybsze).
+   */
+  public drawThumbnail(ctx: CanvasRenderingContext2D, dw: number, dh: number): void {
+    const div = Math.max(1, Math.min(8, Math.floor(Math.min(this.width / dw, this.height / dh))));
+    if (div === 1) {
+      ctx.save();
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      ctx.scale(dw / this.width, dh / this.height);
+      this.drawToFlatContext(ctx);
+      ctx.restore();
+      return;
+    }
+    const mw = Math.max(1, Math.ceil(this.width / div));
+    const mh = Math.max(1, Math.ceil(this.height / div));
+    if (!thumbMidCanvas) thumbMidCanvas = document.createElement('canvas');
+    thumbMidCanvas.width = mw;
+    thumbMidCanvas.height = mh;
+    const mx = thumbMidCanvas.getContext('2d');
+    if (!mx) return;
+    mx.imageSmoothingEnabled = true;
+    mx.imageSmoothingQuality = 'low';
+    mx.scale(mw / this.width, mh / this.height);
+    this.drawToFlatContext(mx);
+    ctx.save();
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(thumbMidCanvas, 0, 0, mw, mh, 0, 0, dw, dh);
+    ctx.restore();
   }
 
   /**
-   * Zwraca pełną migawkę stanu wszystkich kafelków siatki (do operacji Undo/Redo)
+   * Zwraca migawkę stanu kafelków siatki (do operacji Undo/Redo), opcjonalnie tylko tych przecinających `rect`.
+   * Puste kafelki nie są kopiowane (współdzielony wyzerowany bufor), więc migawka warstwy
+   * z niewielką ilością treści jest tania zarówno pod względem czasu, jak i pamięci.
    */
-  public getTilesSnapshot(): { tx: number; ty: number; imgData: ImageData; hasContent: boolean }[] {
-    const result: { tx: number; ty: number; imgData: ImageData; hasContent: boolean }[] = [];
-    for (let ty = 0; ty < this.rows; ty++) {
-      for (let tx = 0; tx < this.cols; tx++) {
+  public getTilesSnapshot(rect?: SKRectI): TileSnapshot[] {
+    const result: TileSnapshot[] = [];
+    const minTx = rect ? Math.max(0, Math.floor(rect.left / this.tileSize)) : 0;
+    const maxTx = rect ? Math.min(this.cols - 1, Math.floor((rect.right - 1) / this.tileSize)) : this.cols - 1;
+    const minTy = rect ? Math.max(0, Math.floor(rect.top / this.tileSize)) : 0;
+    const maxTy = rect ? Math.min(this.rows - 1, Math.floor((rect.bottom - 1) / this.tileSize)) : this.rows - 1;
+    for (let ty = minTy; ty <= maxTy; ty++) {
+      for (let tx = minTx; tx <= maxTx; tx++) {
         const tile = this.tiles[ty][tx];
         result.push({
           tx,
           ty,
-          imgData: tile.ctx.getImageData(0, 0, tile.width, tile.height),
+          imgData: tile.hasContent
+            ? tile.ctx.getImageData(0, 0, tile.width, tile.height)
+            : getSharedEmptyImageData(tile.width, tile.height),
           hasContent: tile.hasContent,
         });
       }

@@ -4,7 +4,60 @@
  */
 
 import { TileGrid } from './TileGrid.ts';
-import { SKBlendMode, SKColor, SKRectI } from './types.ts';
+import { SKBlendMode, SKColor } from './types.ts';
+
+
+// --- Odroczone odświeżanie miniatur ---
+// Miniatura nie jest potrzebna w trakcie edycji, więc odświeżanie jest scalane (debounce), wykonywane
+// po jednej warstwie na zadanie i wstrzymywane, gdy czeka zdarzenie wejścia. Panel warstw dostaje powiadomienie.
+const THUMB_DEBOUNCE_MS = 150;
+const THUMB_MAX_WAIT_MS = 900;
+const pendingThumbs = new Set<Layer>();
+const urgentThumbs = new Set<Layer>();
+const thumbListeners = new Set<() => void>();
+let thumbTimer: ReturnType<typeof setTimeout> | null = null;
+let thumbFirstAt = 0;
+
+export function subscribeThumbnails(cb: () => void): () => void {
+  thumbListeners.add(cb);
+  return () => {
+    thumbListeners.delete(cb);
+  };
+}
+
+function armThumbTimer(delay: number): void {
+  if (thumbTimer !== null) clearTimeout(thumbTimer);
+  thumbTimer = setTimeout(pumpThumbs, delay);
+}
+
+function scheduleThumb(layer: Layer, urgent: boolean): void {
+  (urgent ? urgentThumbs : pendingThumbs).add(layer);
+  const now = performance.now();
+  if (!thumbFirstAt) thumbFirstAt = now;
+  armThumbTimer(Math.max(0, Math.min(THUMB_DEBOUNCE_MS, thumbFirstAt + THUMB_MAX_WAIT_MS - now)));
+}
+
+function pumpThumbs(): void {
+  thumbTimer = null;
+  const sched = (navigator as unknown as { scheduling?: { isInputPending?: () => boolean } }).scheduling;
+  if (sched?.isInputPending?.()) {
+    armThumbTimer(40);
+    return;
+  }
+  const src = urgentThumbs.size > 0 ? urgentThumbs : pendingThumbs;
+  const next = src.values().next();
+  if (!next.done) {
+    src.delete(next.value);
+    pendingThumbs.delete(next.value);
+    next.value.refreshThumbnail();
+  }
+  if (urgentThumbs.size > 0 || pendingThumbs.size > 0) {
+    armThumbTimer(2);
+    return;
+  }
+  thumbFirstAt = 0;
+  for (const cb of Array.from(thumbListeners)) cb();
+}
 
 /**
  * Odpowiednik warstwy (Layer) w Paint.NET / SkiaSharp WPF.
@@ -21,6 +74,10 @@ export class Layer {
   public tileGrid: TileGrid;
   public thumbnailCanvas: HTMLCanvasElement;
   public thumbnailCtx: CanvasRenderingContext2D | null;
+  /** Rośnie przy każdym faktycznym przerysowaniu miniatury. */
+  public thumbVersion: number = 0;
+  private thumbDirty: boolean = true;
+  private thumbDataUrl: string | null = null;
 
   constructor(
     id: string,
@@ -40,35 +97,20 @@ export class Layer {
     this.thumbnailCtx = this.thumbnailCanvas.getContext('2d');
   }
 
-  /** Współdzielony bufor roboczy do miniatur (unika alokacji płótna w×h przy każdej aktualizacji). */
-  private static thumbScratch: HTMLCanvasElement | null = null;
-  /** Wywoływane po faktycznym odświeżeniu miniatury (UI może wtedy przerysować panel warstw). */
-  public static onThumbnailRefreshed: (() => void) | null = null;
-
-  public thumbnailVersion: number = 0;
-  private thumbDirty: boolean = false;
-  private thumbTimer: ReturnType<typeof setTimeout> | null = null;
-  private thumbUrl: string | null = null;
-  private thumbUrlVersion: number = -1;
-
   /**
-   * Zgłasza potrzebę odświeżenia miniatury. Faktyczne (kosztowne: scalanie całej warstwy)
-   * renderowanie jest odroczone i zbijane (debounce), więc operacje wykonywane przy każdym
-   * ruchu myszy nie płacą O(rozmiar dokumentu) za każdą klatkę.
+   * Zgłasza, że miniatura jest nieaktualna. Przerysowanie jest odroczone i scalone (patrz harmonogram wyżej);
+   * `urgent` wystawia warstwę na początek kolejki (np. aktywną).
    */
-  public updateThumbnail(): void {
+  public updateThumbnail(urgent: boolean = false): void {
     this.thumbDirty = true;
-    if (this.thumbTimer !== null) return;
-    this.thumbTimer = setTimeout(() => {
-      this.thumbTimer = null;
-      if (this.flushThumbnail()) Layer.onThumbnailRefreshed?.();
-    }, 160);
+    scheduleThumb(this, urgent);
   }
 
-  /** Natychmiast renderuje miniaturę, jeśli jest nieaktualna. Zwraca true gdy coś odświeżono. */
-  public flushThumbnail(): boolean {
-    if (!this.thumbDirty || !this.thumbnailCtx) return false;
+  /** Natychmiastowe przerysowanie miniatury (używane przez harmonogram). */
+  public refreshThumbnail(): void {
+    if (!this.thumbDirty || !this.thumbnailCtx) return;
     this.thumbDirty = false;
+
     const ctx = this.thumbnailCtx;
     ctx.clearRect(0, 0, 44, 30);
 
@@ -80,29 +122,15 @@ export class Layer {
       }
     }
 
-    const g = this.tileGrid;
-    if (!Layer.thumbScratch) Layer.thumbScratch = document.createElement('canvas');
-    const scratch = Layer.thumbScratch;
-    if (scratch.width !== g.width || scratch.height !== g.height) {
-      scratch.width = g.width;
-      scratch.height = g.height;
-    } else {
-      scratch.getContext('2d')!.clearRect(0, 0, g.width, g.height);
-    }
-    const sctx = scratch.getContext('2d')!;
-    g.drawToFlatContext(sctx);
-    ctx.drawImage(scratch, 0, 0, 44, 30);
-    this.thumbnailVersion++;
-    return true;
+    this.tileGrid.drawThumbnail(ctx, 44, 30);
+    this.thumbVersion++;
+    this.thumbDataUrl = null;
   }
 
-  /** Data-URL miniatury z cache (toDataURL wołane tylko po realnej zmianie miniatury). */
+  /** Adres data: miniatury (buforowany do następnego przerysowania). */
   public getThumbnailDataUrl(): string {
-    if (this.thumbUrl === null || this.thumbUrlVersion !== this.thumbnailVersion) {
-      this.thumbUrl = this.thumbnailCanvas.toDataURL();
-      this.thumbUrlVersion = this.thumbnailVersion;
-    }
-    return this.thumbUrl;
+    if (this.thumbDataUrl === null) this.thumbDataUrl = this.thumbnailCanvas.toDataURL();
+    return this.thumbDataUrl;
   }
 
   public clone(newId?: string, newName?: string): Layer {
@@ -118,7 +146,15 @@ export class Layer {
     copy.opacity = this.opacity;
     copy.blendMode = this.blendMode;
     copy.tileGrid = this.tileGrid.clone();
-    copy.updateThumbnail();
+    // Kopia dostaje gotową miniaturę zamiast pełnego przeliczania; jeśli źródło jest nieaktualne, kopia też się odświeży
+    if (this.thumbDirty || !copy.thumbnailCtx) {
+      copy.updateThumbnail();
+    } else {
+      copy.thumbnailCtx.clearRect(0, 0, 44, 30);
+      copy.thumbnailCtx.drawImage(this.thumbnailCanvas, 0, 0);
+      copy.thumbDirty = false;
+      copy.thumbVersion++;
+    }
     return copy;
   }
 
@@ -164,23 +200,24 @@ export class Layer {
   /**
    * Czyści warstwę (z opcjonalnym maskowaniem zaznaczenia)
    */
-  public clear(selectionMask?: HTMLCanvasElement | null, bounds?: SKRectI | null): void {
+  public clear(selectionMask?: HTMLCanvasElement | null): void {
     if (!selectionMask) {
       this.tileGrid.clear();
     } else {
-      // Maska zaznaczenia jest niezerowa tylko w `bounds` - nie trzeba odwiedzać reszty kafelków
-      const tiles = bounds ? this.tileGrid.getTilesIntersectingRect(bounds) : this.tileGrid.tiles.flat();
-      for (const tile of tiles) {
-        if (!tile.hasContent) continue;
-        tile.ctx.save();
-        tile.ctx.globalCompositeOperation = 'destination-out';
-        tile.ctx.drawImage(
-          selectionMask,
-          tile.pixelX, tile.pixelY, tile.width, tile.height,
-          0, 0, tile.width, tile.height
-        );
-        tile.ctx.restore();
-        tile.isDirty = true;
+      for (let ty = 0; ty < this.tileGrid.rows; ty++) {
+        for (let tx = 0; tx < this.tileGrid.cols; tx++) {
+          const tile = this.tileGrid.tiles[ty][tx];
+          if (!tile.hasContent) continue;
+          tile.ctx.save();
+          tile.ctx.globalCompositeOperation = 'destination-out';
+          tile.ctx.drawImage(
+            selectionMask,
+            tile.pixelX, tile.pixelY, tile.width, tile.height,
+            0, 0, tile.width, tile.height
+          );
+          tile.ctx.restore();
+          tile.isDirty = true;
+        }
       }
     }
     this.updateThumbnail();

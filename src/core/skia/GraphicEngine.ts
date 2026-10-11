@@ -4,10 +4,10 @@
  */
 
 import { Layer } from './Layer.ts';
+import { renderGradientPreview } from './GradientRenderer.ts';
 import { BrushEngine } from './BrushEngine.ts';
 import { SelectionManager, SelectionSnapshot } from './SelectionManager.ts';
-import { DEFAULT_TILE_SIZE } from './TileGrid.ts';
-import { Tile } from './Tile.ts';
+import { DEFAULT_TILE_SIZE, TileSnapshot, trimUnchangedTiles, snapshotBytes } from './TileGrid.ts';
 import {
   BrushSettings,
   FiguraProjectFile,
@@ -86,40 +86,14 @@ export type HistoryAction =
  * - Kafelkowanie TileGrid 64x64px i Dirty-Rect.
  * - Bezpieczne maskowanie pędzla podczas rysowania na żywo (bez wymazywania warstwy pod spodem).
  */
-
-/** Opcje podglądu "na żywo" (kształt/linia/krzywa/tekst/gradient) renderowanego bez zapisu do kafelków. */
-export interface PreviewOptions {
-  /** Prostokąt w pikselach dokumentu będący nadzbiorem tego, co podgląd rysuje w tej klatce. */
-  bounds: SKRectI;
-  /** true, gdy maska zaznaczenia jest już wliczona w alfę podglądu (gradient) - nie maskuj ponownie. */
-  selectionBaked?: boolean;
-}
-
-export type PreviewRenderer = (ctx: CanvasRenderingContext2D, clip: SKRectI) => void;
-
-export function makeRectI(left: number, top: number, right: number, bottom: number): SKRectI {
-  return { left, top, right, bottom, width: right - left, height: bottom - top };
-}
-
-function unionRects(rects: (SKRectI | null | undefined)[]): SKRectI | null {
-  let l = Infinity, t = Infinity, r = -Infinity, b = -Infinity;
-  for (const q of rects) {
-    if (!q || q.width <= 0 || q.height <= 0) continue;
-    if (q.left < l) l = q.left;
-    if (q.top < t) t = q.top;
-    if (q.right > r) r = q.right;
-    if (q.bottom > b) b = q.bottom;
-  }
-  return l === Infinity ? null : makeRectI(l, t, r, b);
-}
-
-function clampRectToDoc(q: SKRectI | null, w: number, h: number): SKRectI | null {
-  if (!q) return null;
-  const l = Math.max(0, Math.floor(q.left));
-  const t = Math.max(0, Math.floor(q.top));
-  const r = Math.min(w, Math.ceil(q.right));
-  const b = Math.min(h, Math.ceil(q.bottom));
-  return r > l && b > t ? makeRectI(l, t, r, b) : null;
+export interface GradientPreviewParams {
+  p0: SKPoint;
+  p1: SKPoint;
+  settings: GradientSettings;
+  /** Kolor początkowy / końcowy PRZED uwzględnieniem odwrócenia (settings.reverse) */
+  primary: SKColor;
+  secondary: SKColor;
+  blendMode: SKBlendMode;
 }
 
 export class GraphicEngine {
@@ -147,8 +121,14 @@ export class GraphicEngine {
   // Stan interaktywnego narzędzia Wypełnienie gradientowe (Gradient Fill)
   public gradientStartPoint: SKPoint | null = null;
   public gradientEndPoint: SKPoint | null = null;
+  public gradientInitialTilesSnapshot: { tx: number; ty: number; imgData: ImageData; hasContent: boolean }[] | null = null;
   public gradientInitialLayerIndex: number = -1;
   public gradientColorSource: 'primary' | 'secondary' = 'primary';
+  /**
+   * Parametry gradientu w trakcie edycji. Warstwa NIE jest modyfikowana podczas przeciągania uchwytów:
+   * podgląd liczą kafelki ekranu (ViewportTileRenderer), a piksele zmieniane są raz, przy zatwierdzeniu.
+   */
+  public gradientPreview: GradientPreviewParams | null = null;
 
   // Wewnętrzny schowek aplikacji FIGURA
   public clipboardCanvas: HTMLCanvasElement | null = null;
@@ -157,19 +137,15 @@ export class GraphicEngine {
   private undoStack: HistoryAction[] = [];
   private redoStack: HistoryAction[] = [];
   private maxHistory: number = 30;
+  /** Limit pamięci historii (migawki pikseli); najstarsze akcje są usuwane po jego przekroczeniu. */
+  public maxHistoryBytes: number = 512 * 1024 * 1024;
+  private historyBytesCache = new WeakMap<object, number>();
 
   public lastDirtyRect: SKRectI | null = null;
   private checkerPatternCanvas: HTMLCanvasElement | null = null;
 
   private dirtyScratchCanvas: HTMLCanvasElement | null = null;
   private dirtyScratchCtx: CanvasRenderingContext2D | null = null;
-
-  // Stan ostatniej klatki kompozycji - pozwala przerysować tylko obszar zmienionego podglądu
-  private lastCompSig: string = '';
-  private lastCompTileVersion: number = -1;
-  private lastCompTarget: HTMLCanvasElement | null = null;
-  private lastPreviewBounds: SKRectI | null = null;
-  private lastFloatBounds: SKRectI | null = null;
 
   private vectorPreviewCanvas: HTMLCanvasElement | null = null;
   private vectorPreviewCtx: CanvasRenderingContext2D | null = null;
@@ -264,6 +240,51 @@ export class GraphicEngine {
 
   // --- HISTORIA UNDO / REDO ---
 
+  private actionBytes(a: HistoryAction): number {
+    const cached = this.historyBytesCache.get(a);
+    if (cached !== undefined) return cached;
+    let n = 0;
+    const selBytes = (sn: { imgData: ImageData | null }) => (sn.imgData ? sn.imgData.data.byteLength : 0);
+    switch (a.type) {
+      case 'tiles':
+        n = snapshotBytes(a.before, a.after);
+        break;
+      case 'transformContent':
+        n = snapshotBytes(a.tilesBefore, a.tilesAfter) + selBytes(a.selectionBefore) + selBytes(a.selectionAfter);
+        break;
+      case 'selection':
+        n = selBytes(a.before) + selBytes(a.after);
+        break;
+      case 'layers':
+        for (const l of a.layers) {
+          for (const row of l.tileGrid.tiles) for (const t of row) if (t.hasContent) n += t.width * t.height * 4;
+        }
+        break;
+      default:
+        n = 0;
+    }
+    this.historyBytesCache.set(a, n);
+    return n;
+  }
+
+  /** Szacunkowa pamięć zajmowana przez historię Undo/Redo (bajty). */
+  public getHistoryBytes(): number {
+    let total = 0;
+    for (const a of this.undoStack) total += this.actionBytes(a);
+    for (const a of this.redoStack) total += this.actionBytes(a);
+    return total;
+  }
+
+  private finishHistoryPush(): void {
+    this.redoStack = [];
+    while (this.undoStack.length > this.maxHistory) this.undoStack.shift();
+    let total = this.getHistoryBytes();
+    // Zawsze zostaje ostatnia akcja, nawet jeśli sama przekracza limit
+    while (total > this.maxHistoryBytes && this.undoStack.length > 1) {
+      total -= this.actionBytes(this.undoStack.shift()!);
+    }
+  }
+
   public saveFullSnapshot(description: string): void {
     const snapshotLayers = this.layers.map((l) => l.clone(l.id, l.name));
     this.undoStack.push({
@@ -272,18 +293,20 @@ export class GraphicEngine {
       layers: snapshotLayers,
       activeLayerIndex: this.activeLayerIndex,
     });
-    if (this.undoStack.length > this.maxHistory) {
-      this.undoStack.shift();
-    }
-    this.redoStack = [];
+    this.finishHistoryPush();
   }
 
   public pushTileAction(action: HistoryAction): void {
-    this.undoStack.push(action);
-    if (this.undoStack.length > this.maxHistory) {
-      this.undoStack.shift();
+    // Zapamiętujemy tylko kafelki, które operacja faktycznie zmieniła
+    if (action.type === 'tiles') {
+      const t = trimUnchangedTiles(action.before, action.after);
+      action = { ...action, before: t.before, after: t.after };
+    } else if (action.type === 'transformContent') {
+      const t = trimUnchangedTiles(action.tilesBefore, action.tilesAfter);
+      action = { ...action, tilesBefore: t.before, tilesAfter: t.after };
     }
-    this.redoStack = [];
+    this.undoStack.push(action);
+    this.finishHistoryPush();
   }
 
   public pushPropertyAction(
@@ -301,10 +324,7 @@ export class GraphicEngine {
       oldValue,
       newValue,
     });
-    if (this.undoStack.length > this.maxHistory) {
-      this.undoStack.shift();
-    }
-    this.redoStack = [];
+    this.finishHistoryPush();
   }
 
   public syncTransformState(): void {
@@ -387,7 +407,8 @@ export class GraphicEngine {
       };
       this.redoStack.push(currentSnapshot);
 
-      this.layers = action.layers.map((l) => l.clone(l.id, l.name));
+      // Akcja zostaje zdjęta ze stosu, więc jej warstwy można przejąć bez kosztownego klonowania
+      this.layers = action.layers;
       this.activeLayerIndex = Math.min(action.activeLayerIndex, this.layers.length - 1);
     }
 
@@ -465,7 +486,8 @@ export class GraphicEngine {
       };
       this.undoStack.push(currentSnapshot);
 
-      this.layers = action.layers.map((l) => l.clone(l.id, l.name));
+      // Akcja zostaje zdjęta ze stosu, więc jej warstwy można przejąć bez kosztownego klonowania
+      this.layers = action.layers;
       this.activeLayerIndex = Math.min(action.activeLayerIndex, this.layers.length - 1);
     }
 
@@ -477,7 +499,6 @@ export class GraphicEngine {
   // --- SCHOWEK (CUT, COPY, PASTE) ---
 
   public copy(): boolean {
-    this.commitGradientSession();
     const layer = this.getActiveLayer();
     if (!layer || !layer.visible) return false;
 
@@ -534,7 +555,6 @@ export class GraphicEngine {
   }
 
   public cut(): boolean {
-    this.commitGradientSession();
     const layer = this.getActiveLayer();
     if (!layer || layer.locked) return false;
 
@@ -671,10 +691,21 @@ export class GraphicEngine {
     this.redoStack = [];
   }
 
+  /** Licznik zmian pikseli; rośnie przy każdej modyfikacji warstw (do wykrywania nieaktualnego podkładu). */
+  public pixelVersion: number = 0;
+
+  /** Sygnatura stanu wpływającego na wygląd kompozytu (piksele, widoczność, krycie, tryby, aktywna warstwa). */
+  public getBaseSignature(): string {
+    let sig = `${this.pixelVersion}|${this.width}x${this.height}|${this.activeLayerIndex}`;
+    for (const l of this.layers) sig += `|${l.id}:${l.visible ? 1 : 0}:${l.opacity}:${l.blendMode}`;
+    return sig;
+  }
+
   public markAllLayersDirty(): void {
+    this.pixelVersion++;
     for (const layer of this.layers) {
       layer.tileGrid.markAllDirty();
-      layer.updateThumbnail();
+      layer.updateThumbnail(layer === this.layers[this.activeLayerIndex]);
     }
     this.lastDirtyRect = null;
   }
@@ -720,7 +751,6 @@ export class GraphicEngine {
   }
 
   public mergeLayerDown(): boolean {
-    this.commitGradientSession();
     if (this.activeLayerIndex <= 0) return false;
     const topLayer = this.layers[this.activeLayerIndex];
     const bottomLayer = this.layers[this.activeLayerIndex - 1];
@@ -845,10 +875,7 @@ export class GraphicEngine {
       before,
       after,
     });
-    if (this.undoStack.length > this.maxHistory) {
-      this.undoStack.shift();
-    }
-    this.redoStack = [];
+    this.finishHistoryPush();
   }
 
   public selectAll(): void {
@@ -1166,245 +1193,49 @@ export class GraphicEngine {
 
   // --- INTERAKTYWNE WYPEŁNIENIE GRADIENTOWE (GRADIENT FILL) ---
 
-  // --- GRADIENT: sesja z podglądem (bez zapisu do kafelków przy każdym ruchu myszy) ---
-
-  /** Prostokąt widoczny w oknie widoku (piksele dokumentu) - ustawiany przez widok; ogranicza koszt podglądu. */
-  public gradientVisibleHint: SKRectI | null = null;
-
-  private gradCanvas: HTMLCanvasElement | null = null;
-  private gradCtx: CanvasRenderingContext2D | null = null;
-  /** Obszar dokumentu, który gradient może pokryć (granice zaznaczenia lub cały dokument). */
-  private gradFullRegion: SKRectI | null = null;
-  /** Obszar faktycznie obliczony w gradCanvas (podgląd: tylko widoczna część). */
-  private gradComputedRegion: SKRectI | null = null;
-  /** Alfa maski zaznaczenia w gradFullRegion (wiersz po wierszu) lub null gdy brak zaznaczenia. */
-  private gradMaskAlpha: Uint8Array | null = null;
-  private gradLastArgs: {
-    p0: SKPoint; p1: SKPoint; settings: GradientSettings;
-    primary: SKColor; secondary: SKColor; blendMode: SKBlendMode;
-  } | null = null;
-
-  /** Blok pikseli gradientu odpowiadający prostokątowi `region` (obliczany w typowanej tablicy 32-bit). */
-  private computeGradientRegion(
-    region: SKRectI,
-    p0: SKPoint,
-    p1: SKPoint,
-    settings: GradientSettings,
-    c0: SKColor,
-    c1: SKColor
-  ): void {
-    const full = this.gradFullRegion!;
-    const rw = region.width;
-    const rh = region.height;
-    const imgData = new ImageData(rw, rh);
-    const px32 = new Uint32Array(imgData.data.buffer);
-
-    const sx = p0.x;
-    const sy = p0.y;
-    const dx = p1.x - sx;
-    const dy = p1.y - sy;
-    let L = Math.hypot(dx, dy);
-    if (L < 0.001) L = 0.001;
-    const ux = dx / L;
-    const uy = dy / L;
-    const vx = -uy;
-    const vy = ux;
-
-    // Tablica LUT dla 1024 próbek koloru - te same wartości co dotychczas
-    const lutRGB = new Uint32Array(1024);
-    const lutA = new Uint8Array(1024);
-    for (let k = 0; k < 1024; k++) {
-      const frac = k / 1023;
-      const r = Math.round(c0.r + (c1.r - c0.r) * frac);
-      const g = Math.round(c0.g + (c1.g - c0.g) * frac);
-      const b = Math.round(c0.b + (c1.b - c0.b) * frac);
-      lutA[k] = Math.round(c0.a + (c1.a - c0.a) * frac);
-      lutRGB[k] = ((b << 16) | (g << 8) | r) >>> 0; // little-endian: bajty R,G,B,(A)
-    }
-
-    const mask = this.gradMaskAlpha;
-    const fullW = full.width;
-    const isRepeat = settings.repeat === 'repeat';
-    const twoPi = Math.PI * 2;
-    const shape = settings.type;
-
-    // Składniki zależne tylko od kolumny (x) liczymy raz na kolumnę - dokładnie te same działania
-    // zmiennoprzecinkowe co w obliczeniu per piksel, więc wynik jest bit-w-bit identyczny.
-    const colU = new Float64Array(rw);
-    const colV = new Float64Array(rw);
-    const colSq = new Float64Array(rw);
-    for (let x = 0; x < rw; x++) {
-      const px = region.left + x - sx;
-      colU[x] = px * ux;
-      colV[x] = px * vx;
-      colSq[x] = px * px;
-    }
-    const tRow = new Float64Array(rw);
-
-    for (let y = 0; y < rh; y++) {
-      const gy = region.top + y;
-      const py = gy - sy;
-      const rowU = py * uy;
-      const rowV = py * vy;
-      const rowSq = py * py;
-      const rowOut = y * rw;
-      const rowMask = (gy - full.top) * fullW - full.left + region.left;
-
-      // 1) t dla całego wiersza (ciasne pętle bez przełączników)
-      switch (shape) {
-        case 'linear':
-          for (let x = 0; x < rw; x++) tRow[x] = (colU[x] + rowU) / L;
-          break;
-        case 'reflected':
-          for (let x = 0; x < rw; x++) tRow[x] = Math.abs(colU[x] + rowU) / L;
-          break;
-        case 'diamond':
-          for (let x = 0; x < rw; x++) tRow[x] = (Math.abs(colU[x] + rowU) + Math.abs(colV[x] + rowV)) / L;
-          break;
-        case 'radial':
-          for (let x = 0; x < rw; x++) tRow[x] = Math.sqrt(colSq[x] + rowSq) / L;
-          break;
-        case 'conic':
-          for (let x = 0; x < rw; x++) {
-            let ang = Math.atan2(colV[x] + rowV, colU[x] + rowU);
-            if (ang < 0) ang += twoPi;
-            tRow[x] = ang / twoPi;
+  public restoreGradientInitialTiles(): void {
+    if (
+      this.gradientInitialTilesSnapshot &&
+      this.gradientInitialLayerIndex >= 0 &&
+      this.gradientInitialLayerIndex < this.layers.length
+    ) {
+      const layer = this.layers[this.gradientInitialLayerIndex];
+      if (layer) {
+        for (const t of this.gradientInitialTilesSnapshot) {
+          const tile = layer.tileGrid.getTile(t.tx, t.ty);
+          if (tile) {
+            tile.ctx.putImageData(t.imgData, 0, 0);
+            tile.hasContent = t.hasContent;
+            tile.isDirty = true;
           }
-          break;
-        case 'spiral-left':
-          for (let x = 0; x < rw; x++) {
-            let ang = Math.atan2(colV[x] + rowV, colU[x] + rowU);
-            if (ang < 0) ang += twoPi;
-            tRow[x] = Math.sqrt(colSq[x] + rowSq) / L - ang / twoPi;
-          }
-          break;
-        case 'spiral-right':
-          for (let x = 0; x < rw; x++) {
-            let ang = Math.atan2(colV[x] + rowV, colU[x] + rowU);
-            if (ang < 0) ang += twoPi;
-            tRow[x] = Math.sqrt(colSq[x] + rowSq) / L + ang / twoPi;
-          }
-          break;
-        default:
-          tRow.fill(0);
-      }
-
-      // 2) t -> kolor z LUT (powtarzanie/obcięcie, maska zaznaczenia)
-      if (mask) {
-        for (let x = 0; x < rw; x++) {
-          const m = mask[rowMask + x];
-          if (m === 0) continue; // px32 jest wyzerowane (przezroczysty piksel)
-          let t = tRow[x];
-          if (isRepeat) {
-            t = t - Math.floor(t);
-            if (t < 0) t += 1;
-          } else if (t < 0) t = 0;
-          else if (t > 1) t = 1;
-          const idx = Math.min(1023, Math.max(0, Math.floor(t * 1023)));
-          const a = Math.round(lutA[idx] * (m / 255));
-          px32[rowOut + x] = (lutRGB[idx] | (a << 24)) >>> 0;
         }
-      } else {
-        for (let x = 0; x < rw; x++) {
-          let t = tRow[x];
-          if (isRepeat) {
-            t = t - Math.floor(t);
-            if (t < 0) t += 1;
-          } else if (t < 0) t = 0;
-          else if (t > 1) t = 1;
-          const idx = Math.min(1023, Math.max(0, Math.floor(t * 1023)));
-          px32[rowOut + x] = (lutRGB[idx] | (lutA[idx] << 24)) >>> 0;
-        }
+        layer.updateThumbnail();
       }
     }
-
-    if (!this.gradCanvas) {
-      this.gradCanvas = document.createElement('canvas');
-      this.gradCtx = this.gradCanvas.getContext('2d')!;
-    }
-    if (this.gradCanvas.width !== this.width || this.gradCanvas.height !== this.height) {
-      this.gradCanvas.width = this.width;
-      this.gradCanvas.height = this.height;
-    }
-    const gctx = this.gradCtx!;
-    // Wyczyść poprzednio obliczony obszar (podgląd mógł obejmować inną część dokumentu)
-    const prev = this.gradComputedRegion;
-    if (prev) gctx.clearRect(prev.left, prev.top, prev.width, prev.height);
-    gctx.putImageData(imgData, region.left, region.top);
-    this.gradComputedRegion = region;
   }
 
-  /** Oblicza (lub przelicza) piksele gradientu dla bieżących parametrów sesji. */
-  private recomputeGradient(full: boolean): void {
-    const args = this.gradLastArgs;
-    const fullRegion = this.gradFullRegion;
-    if (!args || !fullRegion) return;
-
-    let region = fullRegion;
-    if (!full && this.gradientVisibleHint) {
-      const h = this.gradientVisibleHint;
-      const l = Math.max(fullRegion.left, Math.floor(h.left));
-      const t = Math.max(fullRegion.top, Math.floor(h.top));
-      const r = Math.min(fullRegion.right, Math.ceil(h.right));
-      const b = Math.min(fullRegion.bottom, Math.ceil(h.bottom));
-      if (r > l && b > t) region = makeRectI(l, t, r, b);
-      else region = makeRectI(fullRegion.left, fullRegion.top, fullRegion.left + 1, fullRegion.top + 1);
+  /** Prostokąt, którego dotyczy gradient: obwiednia zaznaczenia albo cały dokument. */
+  private getGradientAffectedRect(): SKRectI {
+    let left = 0;
+    let top = 0;
+    let right = this.width;
+    let bottom = this.height;
+    if (this.selectionManager.hasActiveSelection) {
+      const bounds = this.selectionManager.getSelectionBounds();
+      if (bounds) {
+        left = Math.max(0, Math.floor(bounds.left));
+        top = Math.max(0, Math.floor(bounds.top));
+        right = Math.min(this.width, Math.ceil(bounds.right));
+        bottom = Math.min(this.height, Math.ceil(bounds.bottom));
+      }
     }
-
-    const isSecondary = this.gradientColorSource === 'secondary';
-    const effPrimary = isSecondary ? args.secondary : args.primary;
-    const effSecondary = isSecondary ? args.primary : args.secondary;
-    const c0 = args.settings.reverse ? effSecondary : effPrimary;
-    const c1 = args.settings.reverse ? effPrimary : effSecondary;
-    this.computeGradientRegion(region, args.p0, args.p1, args.settings, c0, c1);
+    return { left, top, right, bottom, width: Math.max(0, right - left), height: Math.max(0, bottom - top) };
   }
 
   /**
-   * Podgląd gradientu dla kompozytora: nakłada się na aktywną warstwę z trybem mieszania gradientu
-   * (maska zaznaczenia jest już wliczona w alfę). Zwraca null, gdy nie ma aktywnej sesji.
+   * Edycja gradientu na żywo: zapamiętuje parametry i NIE dotyka pikseli warstwy.
+   * Kafelki podglądu rysują gradient na podstawie `gradientPreview`; zatwierdzenie robi commitGradientSession().
    */
-  public getGradientPreview(): { renderer: PreviewRenderer; options: PreviewOptions; blendMode: SKBlendMode } | null {
-    if (
-      !this.gradLastArgs ||
-      !this.gradComputedRegion ||
-      !this.gradCanvas ||
-      this.gradientInitialLayerIndex !== this.activeLayerIndex
-    ) {
-      return null;
-    }
-    const comp = this.gradComputedRegion;
-    const canvas = this.gradCanvas;
-    return {
-      renderer: (ctx, clip) => {
-        const l = Math.max(clip.left, comp.left);
-        const t = Math.max(clip.top, comp.top);
-        const r = Math.min(clip.right, comp.right);
-        const b = Math.min(clip.bottom, comp.bottom);
-        if (r > l && b > t) ctx.drawImage(canvas, l, t, r - l, b - t, l, t, r - l, b - t);
-      },
-      options: { bounds: comp, selectionBaked: true },
-      blendMode: this.gradLastArgs.blendMode,
-    };
-  }
-
-  /** Przelicza podgląd, jeśli po przesunięciu/zoomie widoczny obszar wykracza poza obliczony. Zwraca true, gdy przeliczono. */
-  public refreshGradientPreviewForViewport(): boolean {
-    if (!this.gradLastArgs || !this.gradComputedRegion || !this.gradFullRegion || !this.gradientVisibleHint) return false;
-    const h = this.gradientVisibleHint;
-    const c = this.gradComputedRegion;
-    const f = this.gradFullRegion;
-    const needL = Math.max(f.left, Math.floor(h.left));
-    const needT = Math.max(f.top, Math.floor(h.top));
-    const needR = Math.min(f.right, Math.ceil(h.right));
-    const needB = Math.min(f.bottom, Math.ceil(h.bottom));
-    if (needR <= needL || needB <= needT) return false;
-    if (needL < c.left || needT < c.top || needR > c.right || needB > c.bottom) {
-      this.recomputeGradient(false);
-      return true;
-    }
-    return false;
-  }
-
   public applyGradient(
     p0: SKPoint,
     p1: SKPoint,
@@ -1424,91 +1255,100 @@ export class GraphicEngine {
         this.gradientColorSource = colorSource;
       }
       this.gradientInitialLayerIndex = this.activeLayerIndex;
-      this.gradientStartPoint = { ...p0 };
-      this.gradientEndPoint = { ...p1 };
-
-      // Obszar działania i maska zaznaczenia są stałe w trakcie sesji - liczymy je raz
-      let startX = 0;
-      let startY = 0;
-      let endX = this.width;
-      let endY = this.height;
-      this.gradMaskAlpha = null;
-      if (this.selectionManager.hasActiveSelection) {
-        const bounds = this.selectionManager.getSelectionBounds();
-        if (bounds) {
-          startX = Math.max(0, Math.floor(bounds.left));
-          startY = Math.max(0, Math.floor(bounds.top));
-          endX = Math.min(this.width, Math.ceil(bounds.right));
-          endY = Math.min(this.height, Math.ceil(bounds.bottom));
-        }
-        const mctx = this.selectionManager.maskCanvas.getContext('2d');
-        if (mctx && endX > startX && endY > startY) {
-          const rw = endX - startX;
-          const rh = endY - startY;
-          const md = mctx.getImageData(startX, startY, rw, rh).data;
-          const alpha = new Uint8Array(rw * rh);
-          for (let i = 0, j = 3; i < alpha.length; i++, j += 4) alpha[i] = md[j];
-          this.gradMaskAlpha = alpha;
-        }
-      }
-      if (endX <= startX || endY <= startY) {
-        // Zaznaczenie poza dokumentem - nic do narysowania
-        endX = startX + 1;
-        endY = startY + 1;
-      }
-      this.gradFullRegion = makeRectI(startX, startY, endX, endY);
-      this.gradComputedRegion = null;
-      if (this.gradCanvas) {
-        this.gradCtx!.clearRect(0, 0, this.gradCanvas.width, this.gradCanvas.height);
-      }
     } else {
       if (colorSource) {
         this.gradientColorSource = colorSource;
       }
-      this.gradientStartPoint = { ...p0 };
-      this.gradientEndPoint = { ...p1 };
+      if (this.gradientInitialLayerIndex < 0) this.gradientInitialLayerIndex = this.activeLayerIndex;
     }
+    this.gradientStartPoint = { ...p0 };
+    this.gradientEndPoint = { ...p1 };
 
-    this.gradLastArgs = {
+    // Kolory zależne od przycisku myszy (kolor dodatkowy) rozstrzygane od razu, żeby podgląd i zatwierdzenie były spójne
+    const isSecondary = this.gradientColorSource === 'secondary';
+    this.gradientPreview = {
       p0: { ...p0 },
       p1: { ...p1 },
       settings: { ...settings },
-      primary: { ...primaryColor },
-      secondary: { ...secondaryColor },
+      primary: { ...(isSecondary ? secondaryColor : primaryColor) },
+      secondary: { ...(isSecondary ? primaryColor : secondaryColor) },
       blendMode,
     };
-    this.recomputeGradient(false);
     return true;
   }
 
-  /** Porzuca sesję gradientu bez zapisu (kafelki nie były modyfikowane, więc nie ma czego przywracać). */
+  /** Anuluje edycję gradientu bez zmiany pikseli. */
   public cancelGradientSession(): void {
-    this.gradLastArgs = null;
-    this.gradFullRegion = null;
-    this.gradComputedRegion = null;
-    this.gradMaskAlpha = null;
+    this.gradientPreview = null;
+    this.gradientInitialTilesSnapshot = null;
     this.gradientInitialLayerIndex = -1;
     this.gradientStartPoint = null;
     this.gradientEndPoint = null;
     this.gradientColorSource = 'primary';
   }
 
+  /**
+   * Jednorazowe nałożenie gradientu na piksele warstwy (zatwierdzenie).
+   * Działa kafelek po kafelku tą samą funkcją, której używa podgląd, więc wynik jest identyczny z podglądem,
+   * a koszt zależy od liczby dotkniętych kafelków (obwiednia zaznaczenia), nie od rozmiaru całego płótna.
+   */
+  private bakeGradient(layer: Layer, params: GradientPreviewParams): void {
+    const rect = this.getGradientAffectedRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+
+    const hasSel = this.selectionManager.hasActiveSelection;
+    const mask = this.selectionManager.maskCanvas;
+    const scratch = document.createElement('canvas');
+    const blendOp = getCanvasCompositeOperation(params.blendMode);
+
+    for (const tile of layer.tileGrid.getTilesIntersectingRect(rect)) {
+      if (tile.width <= 0 || tile.height <= 0) continue;
+      if (scratch.width !== tile.width || scratch.height !== tile.height) {
+        scratch.width = tile.width;
+        scratch.height = tile.height;
+      }
+      const g = scratch.getContext('2d')!;
+      g.setTransform(1, 0, 0, 1, 0, 0);
+      g.globalCompositeOperation = 'source-over';
+      g.clearRect(0, 0, tile.width, tile.height);
+      g.setTransform(1, 0, 0, 1, -tile.pixelX, -tile.pixelY);
+      renderGradientPreview(g, params, this.width, this.height);
+      g.setTransform(1, 0, 0, 1, 0, 0);
+      if (hasSel) {
+        g.globalCompositeOperation = 'destination-in';
+        g.drawImage(mask, tile.pixelX, tile.pixelY, tile.width, tile.height, 0, 0, tile.width, tile.height);
+        g.globalCompositeOperation = 'source-over';
+      }
+      tile.ctx.save();
+      tile.ctx.globalCompositeOperation = blendOp;
+      tile.ctx.drawImage(scratch, 0, 0);
+      tile.ctx.restore();
+      tile.hasContent = true;
+      tile.isDirty = true;
+    }
+
+    layer.updateThumbnail();
+    this.markAllLayersDirty();
+  }
+
   public commitGradientSession(): void {
-    if (this.gradLastArgs && this.gradFullRegion && this.gradientInitialLayerIndex >= 0) {
-      const layer = this.layers[this.gradientInitialLayerIndex];
-      if (layer && layer.visible) {
-        // Ostateczny, pełny obszar gradientu (podgląd mógł liczyć tylko widoczny fragment)
-        this.recomputeGradient(true);
-        const prevActive = this.activeLayerIndex;
-        this.activeLayerIndex = this.gradientInitialLayerIndex;
-        this.bakeCanvasToLayer(
-          layer,
-          this.gradCanvas!,
-          this.gradFullRegion,
-          'Wypełnienie gradientowe',
-          this.gradLastArgs.blendMode
-        );
-        this.activeLayerIndex = prevActive;
+    const params = this.gradientPreview;
+    if (params && this.gradientInitialLayerIndex >= 0) {
+      const layerIndex = this.gradientInitialLayerIndex;
+      const layer = this.layers[layerIndex];
+      if (layer) {
+        // Migawka tylko kafelków, których dotyczy gradient (a nie całej warstwy)
+        const rect = this.getGradientAffectedRect();
+        const before = layer.tileGrid.getTilesSnapshot(rect);
+        this.bakeGradient(layer, params);
+        const after = layer.tileGrid.getTilesSnapshot(rect);
+        this.pushTileAction({
+          type: 'tiles',
+          description: 'Wypełnienie gradientowe',
+          layerIndex,
+          before,
+          after,
+        });
       }
     }
     this.cancelGradientSession();
@@ -1535,28 +1375,22 @@ export class GraphicEngine {
     if (!bounds) return false;
 
     // 1. Zapisz oryginalny stan kafelków aktywnej warstwy i maski zaznaczenia
-    // (tylko kafelki objęte zaznaczeniem - tylko one zmieniają się przy wycinaniu źródła)
-    const initialTilesSnapshot = layer.tileGrid.getTilesSnapshotForRect(bounds);
+    const initialTilesSnapshot = layer.tileGrid.getTilesSnapshot();
     const initialSelectionSnapshot = this.selectionManager.getMaskSnapshot();
 
     // Utwórz czystą binarną maskę wycinania (gwarantuje w 100% wyczyszczenie warstwy bez zostawiania obramówek/artefaktów na brzegach)
     const cleanCutMask = document.createElement('canvas');
     cleanCutMask.width = this.width;
     cleanCutMask.height = this.height;
-    const cctx = cleanCutMask.getContext('2d', { willReadFrequently: true })!;
-    // Maska jest niezerowa tylko wewnątrz `bounds` - przetwarzamy wyłącznie ten fragment
-    cctx.drawImage(
-      this.selectionManager.maskCanvas,
-      bounds.left, bounds.top, bounds.width, bounds.height,
-      bounds.left, bounds.top, bounds.width, bounds.height
-    );
+    const cctx = cleanCutMask.getContext('2d')!;
+    cctx.drawImage(this.selectionManager.maskCanvas, 0, 0);
 
-    const maskImgData = cctx.getImageData(bounds.left, bounds.top, bounds.width, bounds.height);
+    const maskImgData = cctx.getImageData(0, 0, this.width, this.height);
     const mData = maskImgData.data;
     for (let i = 3; i < mData.length; i += 4) {
       mData[i] = mData[i] > 0 ? 255 : 0;
     }
-    cctx.putImageData(maskImgData, bounds.left, bounds.top);
+    cctx.putImageData(maskImgData, 0, 0);
 
     // 2. Wyodrębnij SZYBKA WYCIĘTĄ teksturę zaznaczenia (tylko obszar bounds zamiast pełnego płótna 12MP!)
     const sourceContentCanvas = document.createElement('canvas');
@@ -1576,10 +1410,10 @@ export class GraphicEngine {
     sctx.globalCompositeOperation = 'source-over';
 
     // 3. Wyczyść wycięty fragment na aktywnej warstwie (otwór pod pływającą zawartością)
-    layer.clear(cleanCutMask, bounds);
+    layer.clear(cleanCutMask);
 
     // 4. Uruchom ramkę manipulacji
-    this.selectionManager.beginTransformSelection(bounds);
+    this.selectionManager.beginTransformSelection();
 
     this.transformContentSession = {
       sourceContentCanvas,
@@ -1612,9 +1446,6 @@ export class GraphicEngine {
     const layer = this.layers[sess.sourceLayerIndex];
 
     if (layer) {
-      // Obszar, który przekształcona zawartość może pokryć (poza nim tempCanvas jest przezroczysty)
-      const destRect = clampRectToDoc(this.getFloatingBounds(), this.width, this.height);
-
       // Wyrenderuj ostateczny przekształcony fragment z wybranym algorytmem próbkowania
       const tempCanvas = document.createElement('canvas');
       tempCanvas.width = this.width;
@@ -1649,65 +1480,34 @@ export class GraphicEngine {
 
       // Przycina przekształconą zawartość dokładnie do aktualnej maski zaznaczenia,
       // co uniemożliwia wyciekanie rozmytych pikseli poza krawędzie zaznaczenia.
-      if (destRect) {
-        tctx.save();
-        tctx.beginPath();
-        tctx.rect(destRect.left, destRect.top, destRect.width, destRect.height);
-        tctx.clip();
-        tctx.globalCompositeOperation = 'destination-in';
-        tctx.drawImage(
-          this.selectionManager.maskCanvas,
-          destRect.left, destRect.top, destRect.width, destRect.height,
-          destRect.left, destRect.top, destRect.width, destRect.height
-        );
-        tctx.restore();
-      }
-
-      // Kafelki zmieniane przy zatwierdzeniu: źródło (już w migawce z początku sesji) + obszar docelowy
-      const tilesBefore = sess.initialTilesSnapshot.slice();
-      const known = new Set(tilesBefore.map((t) => t.ty * layer.tileGrid.cols + t.tx));
-      const destTiles = destRect ? layer.tileGrid.getTilesIntersectingRect(destRect) : [];
-      for (const tile of destTiles) {
-        const key = tile.tileY * layer.tileGrid.cols + tile.tileX;
-        if (!known.has(key)) {
-          known.add(key);
-          tilesBefore.push({
-            tx: tile.tileX,
-            ty: tile.tileY,
-            imgData: tile.ctx.getImageData(0, 0, tile.width, tile.height),
-            hasContent: tile.hasContent,
-          });
-        }
-      }
+      tctx.save();
+      tctx.globalCompositeOperation = 'destination-in';
+      tctx.drawImage(this.selectionManager.maskCanvas, 0, 0);
+      tctx.restore();
 
       // Wklej wyrenderowany fragment do kafelków warstwy
-      for (const tile of destTiles) {
-        tile.ctx.drawImage(
-          tempCanvas,
-          tile.pixelX, tile.pixelY, tile.width, tile.height,
-          0, 0, tile.width, tile.height
-        );
-        tile.hasContent = true;
-        tile.isDirty = true;
+      for (let ty = 0; ty < layer.tileGrid.rows; ty++) {
+        for (let tx = 0; tx < layer.tileGrid.cols; tx++) {
+          const tile = layer.tileGrid.tiles[ty][tx];
+          tile.ctx.drawImage(
+            tempCanvas,
+            tile.pixelX, tile.pixelY, tile.width, tile.height,
+            0, 0, tile.width, tile.height
+          );
+          tile.hasContent = true;
+          tile.isDirty = true;
+        }
       }
       layer.updateThumbnail();
 
-      const tilesAfter = tilesBefore.map((t) => {
-        const tile = layer.tileGrid.getTile(t.tx, t.ty)!;
-        return {
-          tx: t.tx,
-          ty: t.ty,
-          imgData: tile.ctx.getImageData(0, 0, tile.width, tile.height),
-          hasContent: tile.hasContent,
-        };
-      });
+      const tilesAfter = layer.tileGrid.getTilesSnapshot();
       const selectionAfter = this.selectionManager.getMaskSnapshot();
 
       this.pushTileAction({
         type: 'transformContent',
         description: 'Przekształcenie zawartości',
         layerIndex: sess.sourceLayerIndex,
-        tilesBefore,
+        tilesBefore: sess.initialTilesSnapshot,
         tilesAfter,
         selectionBefore: sess.initialSelectionSnapshot,
         selectionAfter,
@@ -1744,69 +1544,6 @@ export class GraphicEngine {
 
   // --- SZYBKI PIPELINE KOMPOZYCJI Z DIRTY-RECT ---
 
-  private baseSignature(): string {
-    let sig = `${this.width}x${this.height}|${this.activeLayerIndex}|`;
-    for (const l of this.layers) {
-      sig += `${l.id}:${l.visible ? 1 : 0}:${l.opacity}:${l.blendMode};`;
-    }
-    return sig;
-  }
-
-  /** Obwiednia pływającej zawartości z aktywnej sesji przekształcania (z zapasem na wygładzanie). */
-  private getFloatingBounds(): SKRectI | null {
-    const st = this.selectionManager.transformState;
-    if (!this.transformContentSession || !st) return null;
-    const cos = Math.abs(Math.cos(st.angle));
-    const sin = Math.abs(Math.sin(st.angle));
-    const hw = (Math.abs(st.width) * cos + Math.abs(st.height) * sin) / 2 + 3;
-    const hh = (Math.abs(st.width) * sin + Math.abs(st.height) * cos) / 2 + 3;
-    return makeRectI(
-      Math.floor(st.pos.x - hw), Math.floor(st.pos.y - hh),
-      Math.ceil(st.pos.x + hw), Math.ceil(st.pos.y + hh)
-    );
-  }
-
-  /** Rysuje pływającą zawartość sesji przekształcania nad warstwą źródłową (jeśli to ta warstwa). */
-  private drawFloatingContent(ctx: CanvasRenderingContext2D, layerIndex: number): void {
-    if (
-      !(
-        this.transformContentSession &&
-        this.transformContentSession.sourceLayerIndex === layerIndex &&
-        this.selectionManager.transformState
-      )
-    ) {
-      return;
-    }
-    const st = this.selectionManager.transformState;
-    const sess = this.transformContentSession;
-
-    ctx.save();
-    ctx.translate(st.pos.x, st.pos.y);
-    ctx.rotate(st.angle);
-    const scaleXMult = st.flipX ? -1 : 1;
-    const scaleYMult = st.flipY ? -1 : 1;
-    const sx = (st.width / Math.max(1, st.initialBounds.width)) * scaleXMult;
-    const sy = (st.height / Math.max(1, st.initialBounds.height)) * scaleYMult;
-    ctx.scale(sx, sy);
-
-    if (sess.interpolation === 'nearest-neighbor') {
-      ctx.imageSmoothingEnabled = false;
-    } else if (sess.interpolation === 'bilinear') {
-      ctx.imageSmoothingEnabled = true;
-      ctx.imageSmoothingQuality = 'medium';
-    } else {
-      ctx.imageSmoothingEnabled = true;
-      ctx.imageSmoothingQuality = 'high';
-    }
-
-    ctx.drawImage(
-      sess.sourceContentCanvas,
-      -st.initialBounds.width / 2,
-      -st.initialBounds.height / 2
-    );
-    ctx.restore();
-  }
-
   public compositeToViewport(
     targetCanvas: HTMLCanvasElement,
     dirtyRect?: SKRectI | null,
@@ -1814,59 +1551,8 @@ export class GraphicEngine {
     previewPointB?: SKPoint | null,
     previewShapeType?: string | null,
     previewBrushSettings?: BrushSettings | null,
-    customPreviewRenderer?: PreviewRenderer | null,
-    customPreviewBlendMode?: SKBlendMode | null,
-    previewOptions?: PreviewOptions | null
-  ): void {
-    const sig = this.baseSignature();
-    const baseUnchanged =
-      !dirtyRect &&
-      this.lastCompTarget === targetCanvas &&
-      this.lastCompSig === sig &&
-      this.lastCompTileVersion === Tile.contentVersion &&
-      targetCanvas.width === this.width &&
-      targetCanvas.height === this.height &&
-      !this.brushEngine.isDrawing;
-
-    const floatB = this.getFloatingBounds();
-    const curPreview = customPreviewRenderer && previewOptions ? previewOptions.bounds : null;
-
-    let effectiveDirty: SKRectI | null | undefined = dirtyRect;
-    // Podgląd (lub pływająca zawartość) zmienia wyłącznie sumę poprzedniego i bieżącego obszaru -
-    // reszta płótna jest już poprawna, więc nie ma sensu przerysowywać całego dokumentu.
-    if (baseUnchanged && (curPreview || floatB) && (!customPreviewRenderer || previewOptions)) {
-      effectiveDirty = clampRectToDoc(
-        unionRects([this.lastPreviewBounds, curPreview, this.lastFloatBounds, floatB]),
-        this.width, this.height
-      );
-    }
-
-    if (customPreviewRenderer && previewOptions && !effectiveDirty) {
-      effectiveDirty = makeRectI(0, 0, this.width, this.height);
-    }
-
-    this.compositeToViewportImpl(
-      targetCanvas, effectiveDirty, previewPointA, previewPointB, previewShapeType,
-      previewBrushSettings, customPreviewRenderer, customPreviewBlendMode, previewOptions
-    );
-
-    this.lastCompSig = sig;
-    this.lastCompTileVersion = Tile.contentVersion;
-    this.lastCompTarget = targetCanvas;
-    this.lastPreviewBounds = curPreview;
-    this.lastFloatBounds = floatB;
-  }
-
-  private compositeToViewportImpl(
-    targetCanvas: HTMLCanvasElement,
-    dirtyRect?: SKRectI | null,
-    previewPointA?: SKPoint | null,
-    previewPointB?: SKPoint | null,
-    previewShapeType?: string | null,
-    previewBrushSettings?: BrushSettings | null,
-    customPreviewRenderer?: PreviewRenderer | null,
-    customPreviewBlendMode?: SKBlendMode | null,
-    previewOptions?: PreviewOptions | null
+    customPreviewRenderer?: ((ctx: CanvasRenderingContext2D) => void) | null,
+    customPreviewBlendMode?: SKBlendMode | null
   ): void {
     const ctx = targetCanvas.getContext('2d');
     if (!ctx) return;
@@ -1877,8 +1563,7 @@ export class GraphicEngine {
       dirtyRect = null;
     }
 
-    // Bez opisanych granic podgląd wymaga pełnego przerysowania (zachowanie dotychczasowe)
-    if (customPreviewRenderer && !previewOptions) {
+    if (customPreviewRenderer) {
       dirtyRect = null;
     }
 
@@ -1908,44 +1593,7 @@ export class GraphicEngine {
           const affectedTiles = layer.tileGrid.getTilesIntersectingRect(dirtyRect);
           if (affectedTiles.length === 0) continue;
 
-          if (customPreviewRenderer && previewOptions && i === this.activeLayerIndex) {
-            // Aktywna warstwa + podgląd narzędzia - wyłącznie w obrębie brudnego prostokąta
-            const { canvas: scratch, ctx: sctx } = this.getDirtyScratch(clipW, clipH);
-            sctx.clearRect(0, 0, clipW, clipH);
-            for (const tile of affectedTiles) {
-              if (tile.hasContent) {
-                sctx.drawImage(tile.canvas, tile.pixelX - clipLeft, tile.pixelY - clipTop);
-              }
-            }
-
-            const { canvas: vScratch, ctx: vsCtx } = this.getVectorScratch(this.width, this.height);
-            vsCtx.save();
-            vsCtx.beginPath();
-            vsCtx.rect(clipLeft, clipTop, clipW, clipH);
-            vsCtx.clip();
-            vsCtx.clearRect(clipLeft, clipTop, clipW, clipH);
-            customPreviewRenderer(vsCtx, makeRectI(clipLeft, clipTop, clipRight, clipBottom));
-            if (this.selectionManager.hasActiveSelection && !previewOptions.selectionBaked) {
-              vsCtx.globalCompositeOperation = 'destination-in';
-              vsCtx.drawImage(
-                this.selectionManager.maskCanvas,
-                clipLeft, clipTop, clipW, clipH,
-                clipLeft, clipTop, clipW, clipH
-              );
-            }
-            vsCtx.restore();
-
-            sctx.save();
-            sctx.globalCompositeOperation = getCanvasCompositeOperation(customPreviewBlendMode || 'SrcOver');
-            sctx.drawImage(vScratch, clipLeft, clipTop, clipW, clipH, 0, 0, clipW, clipH);
-            sctx.restore();
-
-            ctx.save();
-            ctx.globalAlpha = layer.opacity;
-            ctx.globalCompositeOperation = getCanvasCompositeOperation(layer.blendMode);
-            ctx.drawImage(scratch, 0, 0, clipW, clipH, clipLeft, clipTop, clipW, clipH);
-            ctx.restore();
-          } else if (i !== this.activeLayerIndex || !isDrawingLive) {
+          if (i !== this.activeLayerIndex || !isDrawingLive) {
             ctx.save();
             ctx.globalAlpha = layer.opacity;
             ctx.globalCompositeOperation = getCanvasCompositeOperation(layer.blendMode);
@@ -2018,7 +1666,6 @@ export class GraphicEngine {
             ctx.drawImage(scratch, 0, 0, clipW, clipH, clipLeft, clipTop, clipW, clipH);
             ctx.restore();
           }
-          this.drawFloatingContent(ctx, i);
         }
 
         ctx.restore();
@@ -2093,7 +1740,7 @@ export class GraphicEngine {
         vsCtx.clearRect(0, 0, this.width, this.height);
 
         // 1. Renderujemy kształt wektorowy do odizolowanego bufora podglądu
-        customPreviewRenderer(vsCtx, makeRectI(0, 0, this.width, this.height));
+        customPreviewRenderer(vsCtx);
 
         // 2. Jeśli aktywne jest zaznaczenie, maskujemy kształt przed nałożeniem na warstwę
         if (this.selectionManager.hasActiveSelection) {
@@ -2119,7 +1766,40 @@ export class GraphicEngine {
       }
 
       // Pływająca zawartość podczas aktywnej sesji przekształcania zawartości (SZYBKIE HARDWARE-ACCELERATED RENDEROWANIE CROP TEXTURE)
-      this.drawFloatingContent(ctx, i);
+      if (
+        this.transformContentSession &&
+        this.transformContentSession.sourceLayerIndex === i &&
+        this.selectionManager.transformState
+      ) {
+        const st = this.selectionManager.transformState;
+        const sess = this.transformContentSession;
+
+        ctx.save();
+        ctx.translate(st.pos.x, st.pos.y);
+        ctx.rotate(st.angle);
+        const scaleXMult = st.flipX ? -1 : 1;
+        const scaleYMult = st.flipY ? -1 : 1;
+        const sx = (st.width / Math.max(1, st.initialBounds.width)) * scaleXMult;
+        const sy = (st.height / Math.max(1, st.initialBounds.height)) * scaleYMult;
+        ctx.scale(sx, sy);
+
+        if (sess.interpolation === 'nearest-neighbor') {
+          ctx.imageSmoothingEnabled = false;
+        } else if (sess.interpolation === 'bilinear') {
+          ctx.imageSmoothingEnabled = true;
+          ctx.imageSmoothingQuality = 'medium';
+        } else {
+          ctx.imageSmoothingEnabled = true;
+          ctx.imageSmoothingQuality = 'high';
+        }
+
+        ctx.drawImage(
+          sess.sourceContentCanvas,
+          -st.initialBounds.width / 2,
+          -st.initialBounds.height / 2
+        );
+        ctx.restore();
+      }
     }
 
     if (previewPointA && previewPointB && previewShapeType && previewBrushSettings) {
@@ -2642,7 +2322,7 @@ export class GraphicEngine {
   }
 
   public getCompositeFlatCanvas(): HTMLCanvasElement {
-    this.commitGradientSession();
+    if (this.gradientPreview) this.commitGradientSession();
     const canvas = document.createElement('canvas');
     canvas.width = this.width;
     canvas.height = this.height;
@@ -2664,7 +2344,7 @@ export class GraphicEngine {
   }
 
   public saveToFigFile(): string {
-    this.commitGradientSession();
+    if (this.gradientPreview) this.commitGradientSession();
     const project: FiguraProjectFile = {
       format: 'FIGURA_PROJECT',
       version: '1.0',
@@ -2758,12 +2438,10 @@ export class GraphicEngine {
   }
 
   public exportPng(): string {
-    this.commitGradientSession();
     return this.getCompositeFlatCanvas().toDataURL('image/png');
   }
 
   public exportJpeg(quality: number = 0.92): string {
-    this.commitGradientSession();
     const canvas = document.createElement('canvas');
     canvas.width = this.width;
     canvas.height = this.height;

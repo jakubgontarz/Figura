@@ -22,9 +22,43 @@ export interface TransformSelectionState {
 }
 
 export interface SelectionSnapshot {
+  /** Piksele maski; przy snapshotach z samej rastrowej maski przycięte do prostokąta (x, y). */
   imgData: ImageData | null;
+  /** Lewy górny róg przyciętego imgData w dokumencie (domyślnie 0,0 = pełny rozmiar). */
+  x?: number;
+  y?: number;
   seedPoint: SKPoint | null;
   activeMultiPoly?: MultiPolygon;
+}
+
+/** Przycina ImageData do prostokąta, w którym alfa > 0 (pusta maska => 1x1 przezroczysty piksel). */
+function cropImageDataToAlpha(img: ImageData): { imgData: ImageData; x: number; y: number } {
+  const w = img.width;
+  const h = img.height;
+  const u32 = new Uint32Array(img.data.buffer, img.data.byteOffset, w * h);
+  // Bajt alfa to najstarszy bajt słowa w układzie little-endian (RGBA)
+  const alphaMask = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1 ? 0xff000000 : 0x000000ff;
+  let minX = w, minY = h, maxX = -1, maxY = -1;
+  for (let y = 0; y < h; y++) {
+    const row = y * w;
+    for (let x = 0; x < w; x++) {
+      if ((u32[row + x] & alphaMask) !== 0) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+  if (maxX < minX) return { imgData: new ImageData(1, 1), x: 0, y: 0 };
+  const cw = maxX - minX + 1;
+  const ch = maxY - minY + 1;
+  const out = new ImageData(cw, ch);
+  const o32 = new Uint32Array(out.data.buffer);
+  for (let y = 0; y < ch; y++) {
+    o32.set(u32.subarray((minY + y) * w + minX, (minY + y) * w + minX + cw), y * cw);
+  }
+  return { imgData: out, x: minX, y: minY };
 }
 
 /**
@@ -104,16 +138,14 @@ export class SelectionManager {
   public getSelectionBounds(): SKRectI | null {
     if (!this.hasActiveSelection) return null;
     const imgData = this.maskCtx.getImageData(0, 0, this.width, this.height);
-    // Przeszukiwanie jako słowa 32-bit (little-endian: alfa to najstarszy bajt) - kilka razy szybciej
-    const px = new Uint32Array(imgData.data.buffer);
+    const data = imgData.data;
     const w = this.width;
     const h = this.height;
 
     let minX = w, minY = h, maxX = -1, maxY = -1;
     for (let y = 0; y < h; y++) {
-      const row = y * w;
       for (let x = 0; x < w; x++) {
-        if (px[row + x] >>> 24 !== 0) {
+        if (data[(y * w + x) * 4 + 3] > 0) {
           if (x < minX) minX = x;
           if (x > maxX) maxX = x;
           if (y < minY) minY = y;
@@ -133,28 +165,23 @@ export class SelectionManager {
     };
   }
 
-  public beginTransformSelection(knownBounds?: SKRectI | null): TransformSelectionState | null {
-    const bounds = knownBounds ?? this.getSelectionBounds();
+  public beginTransformSelection(): TransformSelectionState | null {
+    const bounds = this.getSelectionBounds();
     if (!bounds) return null;
 
     const initCanvas = document.createElement('canvas');
     initCanvas.width = this.width;
     initCanvas.height = this.height;
-    const ictx = initCanvas.getContext('2d', { willReadFrequently: true })!;
-    // Maska jest niezerowa tylko w `bounds` - kopiujemy i binaryzujemy wyłącznie ten fragment
-    ictx.drawImage(
-      this.maskCanvas,
-      bounds.left, bounds.top, bounds.width, bounds.height,
-      bounds.left, bounds.top, bounds.width, bounds.height
-    );
+    const ictx = initCanvas.getContext('2d')!;
+    ictx.drawImage(this.maskCanvas, 0, 0);
 
     // Oczyszczanie maski do postaci binarnej
-    const mImgData = ictx.getImageData(bounds.left, bounds.top, bounds.width, bounds.height);
+    const mImgData = ictx.getImageData(0, 0, this.width, this.height);
     const mData = mImgData.data;
     for (let i = 3; i < mData.length; i += 4) {
       mData[i] = mData[i] > 0 ? 255 : 0;
     }
-    ictx.putImageData(mImgData, bounds.left, bounds.top);
+    ictx.putImageData(mImgData, 0, 0);
 
     const cx = bounds.left + bounds.width / 2;
     const cy = bounds.top + bounds.height / 2;
@@ -300,12 +327,16 @@ export class SelectionManager {
     if (!this.hasActiveSelection) {
       return { imgData: null, seedPoint: null, activeMultiPoly: [] };
     }
-    const imgData = this.maskCtx.getImageData(0, 0, this.width, this.height);
-    return {
-      imgData,
-      seedPoint: this.wandSeedPoint ? { ...this.wandSeedPoint } : null,
-      activeMultiPoly: JSON.parse(JSON.stringify(this.activeMultiPoly)),
-    };
+    const seedPoint = this.wandSeedPoint ? { ...this.wandSeedPoint } : null;
+    const activeMultiPoly = JSON.parse(JSON.stringify(this.activeMultiPoly));
+    // Gdy istnieje wektorowy opis zaznaczenia, restore odtwarza maskę z niego i ignoruje piksele,
+    // więc kopiowanie całego płótna (np. 48 MB przy 4000x3000) nie ma sensu.
+    if (this.activeMultiPoly.length > 0) {
+      return { imgData: null, seedPoint, activeMultiPoly };
+    }
+    const full = this.maskCtx.getImageData(0, 0, this.width, this.height);
+    const cropped = cropImageDataToAlpha(full);
+    return { imgData: cropped.imgData, x: cropped.x, y: cropped.y, seedPoint, activeMultiPoly };
   }
 
   public restoreMaskSnapshot(snapshot: SelectionSnapshot): void {
@@ -318,7 +349,11 @@ export class SelectionManager {
       this.wandSeedPoint = snapshot.seedPoint ? { ...snapshot.seedPoint } : null;
       this.rebuildFromActiveMultiPoly();
     } else if (snapshot.imgData) {
-      this.maskCtx.putImageData(snapshot.imgData, 0, 0);
+      if (snapshot.x !== undefined || snapshot.y !== undefined) {
+        // Przycięty fragment: reszta maski ma być pusta
+        this.maskCtx.clearRect(0, 0, this.width, this.height);
+      }
+      this.maskCtx.putImageData(snapshot.imgData, snapshot.x ?? 0, snapshot.y ?? 0);
       this.hasActiveSelection = true;
       this.wandSeedPoint = snapshot.seedPoint ? { ...snapshot.seedPoint } : null;
       this.rebuildContoursFromMask();
