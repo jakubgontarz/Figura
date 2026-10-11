@@ -6,7 +6,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Lock } from 'lucide-react';
 import { GraphicEngine } from './core/skia/GraphicEngine.ts';
-import { Layer } from './core/skia/Layer.ts';
 import {
   BrushSettings,
   ColorReplaceSettings,
@@ -53,15 +52,6 @@ export default function App() {
   const [engineRevision, setEngineRevision] = useState(0);
   const bumpEngineRevision = useCallback(() => {
     setEngineRevision((r) => r + 1);
-  }, []);
-
-  // Miniatury warstw odświeżają się z opóźnieniem (debounce) - wtedy przerysuj tylko panel warstw
-  const [thumbRevision, setThumbRevision] = useState(0);
-  useEffect(() => {
-    Layer.onThumbnailRefreshed = () => setThumbRevision((r) => r + 1);
-    return () => {
-      Layer.onThumbnailRefreshed = null;
-    };
   }, []);
 
   // Stan powiadomień Toast (np. dla zablokowanej warstwy)
@@ -685,7 +675,6 @@ export default function App() {
           setDeformSettings((prev) => ({ ...prev, size: Math.max(1, Math.min(2000, prev.size + delta)) }));
         }
       } else if (e.key === 'Delete') {
-        if (engine.gradientStartPoint) engine.commitGradientSession();
         const mask = engine.selectionManager.hasActiveSelection ? engine.selectionManager.maskCanvas : null;
         engine.getActiveLayer()?.clear(mask);
         bumpEngineRevision();
@@ -823,22 +812,7 @@ export default function App() {
       />
 
       {/* 2. Menu główne z sekcją Zaznacz */}
-      <MenuBar
-        handlers={
-          // Oczekujący gradient (sesja z podglądem) trafia do kafelków przed każdą akcją menu
-          Object.fromEntries(
-            Object.entries(menuHandlers).map(([k, f]) => [
-              k,
-              typeof f === 'function'
-                ? (...args: unknown[]) => {
-                    if (engine.gradientStartPoint) engine.commitGradientSession();
-                    return (f as (...a: unknown[]) => unknown)(...args);
-                  }
-                : f,
-            ])
-          ) as unknown as MenuActionHandlers
-        }
-      />
+      <MenuBar handlers={menuHandlers} />
 
       {/* 3. Pasek opcji narzędzi z opcjami zaznaczania, transformacji i figur/linii */}
       <ToolOptionsBar
@@ -963,7 +937,6 @@ export default function App() {
           />
 
           <LayersPanel
-            thumbRevision={thumbRevision}
             layers={engine.layers}
             activeLayerIndex={engine.activeLayerIndex}
             onSelectLayer={(idx) => {
