@@ -4,6 +4,7 @@
  */
 
 import { Layer } from './Layer.ts';
+import type { TileGrid } from './TileGrid.ts';
 import {
   BrushSettings,
   ColorReplaceSettings,
@@ -29,6 +30,7 @@ export interface StrokeResult {
 
 export interface EndStrokeResult {
   dirtyRect: SKRectI;
+  other?: { before: { tx: number; ty: number; imgData: ImageData; hasContent: boolean }[]; after: { tx: number; ty: number; imgData: ImageData; hasContent: boolean }[] };
   before: { tx: number; ty: number; imgData: ImageData; hasContent: boolean }[];
   after: { tx: number; ty: number; imgData: ImageData; hasContent: boolean }[];
 }
@@ -66,6 +68,10 @@ export class BrushEngine {
   private correctionDabCtx: CanvasRenderingContext2D;
   private deformDabCanvas: HTMLCanvasElement;
   private deformDabCtx: CanvasRenderingContext2D;
+  /** Połączone klonowanie: drugi bufor śladu (maska, gdy edytowane są piksele, i odwrotnie); null = klonowany jest tylko cel edycji. */
+  public stampDualCanvas: HTMLCanvasElement | null = null;
+  private stampDualCtx: CanvasRenderingContext2D | null = null;
+  private stampDualGrid: TileGrid | null = null;
   private stampSampleCanvas: HTMLCanvasElement;
   private stampSampleCtx: CanvasRenderingContext2D;
 
@@ -345,6 +351,39 @@ export class BrushEngine {
     return this.clampRectToCanvas(minX, minY, maxX, maxY, canvasWidth, canvasHeight);
   }
 
+  private discSpriteKey = '';
+  private discSprite: HTMLCanvasElement | null = null;
+
+  /** Dysk o średnicy size (bez wygładzania) w kolorze r,g,b: te same piksele co regułą odległości od środka. */
+  private getDiscSprite(size: number, r: number, g: number, b: number): HTMLCanvasElement {
+    const key = `${size}|${r}|${g}|${b}`;
+    if (this.discSprite && this.discSpriteKey === key) return this.discSprite;
+    const cv = this.discSprite ?? document.createElement('canvas');
+    cv.width = size;
+    cv.height = size;
+    const cx = cv.getContext('2d')!;
+    const img = cx.createImageData(size, size);
+    const u32 = new Uint32Array(img.data.buffer);
+    const little = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1;
+    const px = little ? ((255 << 24) | (b << 16) | (g << 8) | r) >>> 0 : ((r << 24) | (g << 16) | (b << 8) | 255) >>> 0;
+    const radius = size / 2;
+    const radiusSq = radius * radius;
+    const isEven = size % 2 === 0;
+    const half = isEven ? size / 2 : Math.floor(size / 2);
+    for (let y = 0; y < size; y++) {
+      // parzysty: środek między pikselami (odległość od środka piksela), nieparzysty: środek w pikselu
+      const dy = isEven ? y - half + 0.5 : y - half;
+      for (let x = 0; x < size; x++) {
+        const dx = isEven ? x - half + 0.5 : x - half;
+        if (dx * dx + dy * dy <= radiusSq + 0.05) u32[y * size + x] = px;
+      }
+    }
+    cx.putImageData(img, 0, 0);
+    this.discSprite = cv;
+    this.discSpriteKey = key;
+    return cv;
+  }
+
   public stampOnStrokeBuffer(rawX: number, rawY: number, settings: BrushSettings): void {
     const size = Math.max(1, Math.round(settings.size));
     const radius = Math.max(1, size / 2);
@@ -380,36 +419,14 @@ export class BrushEngine {
         ctx.fillRect(cx - 1, cy, 3, 1);
         ctx.fillRect(cx, cy - 1, 1, 3);
       } else {
-        const isEven = size % 2 === 0;
-        const radius = size / 2;
-        const radiusSq = radius * radius;
-
-        if (isEven) {
-          const originX = Math.floor(rawX - 0.5);
-          const originY = Math.floor(rawY - 0.5);
-          const half = size / 2;
-
-          for (let dy = 0; dy < size; dy++) {
-            const distY = dy - half + 0.5;
-            for (let dx = 0; dx < size; dx++) {
-              const distX = dx - half + 0.5;
-              if (distX * distX + distY * distY <= radiusSq + 0.05) {
-                ctx.fillRect(originX - half + 1 + dx, originY - half + 1 + dy, 1, 1);
-              }
-            }
-          }
+        // Dysk bez wygładzania: gotowy sprite (ten sam zestaw pikseli co dawniej rysowany fillRect 1x1 na piksel,
+        // czyli size^2 wywołań na jedną plamkę) kopiowany jednym drawImage o całkowite współrzędne.
+        const half = Math.floor(size / 2);
+        const sprite = this.getDiscSprite(size, r, g, b);
+        if (size % 2 === 0) {
+          ctx.drawImage(sprite, Math.floor(rawX - 0.5) - half + 1, Math.floor(rawY - 0.5) - half + 1);
         } else {
-          const cx = Math.floor(rawX);
-          const cy = Math.floor(rawY);
-          const half = Math.floor(size / 2);
-
-          for (let dy = -half; dy <= half; dy++) {
-            for (let dx = -half; dx <= half; dx++) {
-              if (dx * dx + dy * dy <= radiusSq + 0.05) {
-                ctx.fillRect(cx + dx, cy + dy, 1, 1);
-              }
-            }
-          }
+          ctx.drawImage(sprite, Math.floor(rawX) - half, Math.floor(rawY) - half);
         }
       }
     } else {
@@ -1766,6 +1783,21 @@ export class BrushEngine {
     this.ensureBufferSize(layer.tileGrid.width, layer.tileGrid.height);
     this.strokeCtx.clearRect(0, 0, this.strokeCanvas.width, this.strokeCanvas.height);
 
+    // Połączona maska + źródło „Warstwa”: klonuj jednocześnie piksele z pikseli i maskę z maski
+    if (settings.sampleSource === 'layer' && layer.maskGrid && layer.maskLinked) {
+      this.stampDualGrid = layer.editMask ? layer.pixelGrid : layer.maskGrid;
+      if (!this.stampDualCanvas) {
+        this.stampDualCanvas = document.createElement('canvas');
+        this.stampDualCtx = this.stampDualCanvas.getContext('2d')!;
+      }
+      this.stampDualCanvas.width = this.strokeCanvas.width;
+      this.stampDualCanvas.height = this.strokeCanvas.height;
+    } else {
+      this.stampDualGrid = null;
+      this.stampDualCanvas = null;
+      this.stampDualCtx = null;
+    }
+
     const pad = Math.max(2, Math.ceil(settings.size / 2) + 2);
     this.strokeDirtyRect = this.clampRectToCanvas(
       point.x - pad,
@@ -2017,6 +2049,20 @@ export class BrushEngine {
 
     sCtx.imageSmoothingEnabled = settings.antiAliasing;
     engine.drawCroppedComposite(sCtx, srcLeft, srcTop, size, size, settings.sampleSource);
+    // Druga próbka (połączona maska): z drugiej siatki, w tym samym miejscu źródła
+    let dualSample: HTMLCanvasElement | null = null;
+    if (this.stampDualGrid && this.stampDualCtx) {
+      dualSample = document.createElement('canvas');
+      dualSample.width = size;
+      dualSample.height = size;
+      const dctx = dualSample.getContext('2d')!;
+      dctx.imageSmoothingEnabled = settings.antiAliasing;
+      if (this.stampDualGrid === layer.maskGrid) {
+        dctx.fillStyle = '#fff';
+        dctx.fillRect(0, 0, size, size);
+      }
+      this.stampDualGrid.drawCroppedToContext(dctx, srcLeft, srcTop, size, size);
+    }
 
     // Utwórz maskę obcięcia krawędzi stempla
     const maskCanvas = document.createElement('canvas');
@@ -2078,6 +2124,18 @@ export class BrushEngine {
     this.strokeCtx.imageSmoothingEnabled = settings.antiAliasing;
     this.strokeCtx.drawImage(this.stampSampleCanvas, dstLeft, dstTop);
     this.strokeCtx.restore();
+
+    if (dualSample && this.stampDualCtx) {
+      const dc = dualSample.getContext('2d')!;
+      dc.save();
+      dc.globalCompositeOperation = 'destination-in';
+      dc.drawImage(maskCanvas, 0, 0);
+      dc.restore();
+      this.stampDualCtx.save();
+      this.stampDualCtx.imageSmoothingEnabled = settings.antiAliasing;
+      this.stampDualCtx.drawImage(dualSample, dstLeft, dstTop);
+      this.stampDualCtx.restore();
+    }
   }
 
   public endStampStroke(layer?: Layer, selectionMask?: HTMLCanvasElement | null): EndStrokeResult | null {
@@ -2091,6 +2149,7 @@ export class BrushEngine {
     const dirty = this.strokeDirtyRect;
     let before: { tx: number; ty: number; imgData: ImageData; hasContent: boolean }[] = [];
     let after: { tx: number; ty: number; imgData: ImageData; hasContent: boolean }[] = [];
+    let otherResult: EndStrokeResult['other'] = undefined;
 
     if (layer && dirty && this.activeStampSettings && dirty.width > 0 && dirty.height > 0) {
       const affectedTiles = layer.tileGrid.getTilesIntersectingRect(dirty);
@@ -2102,6 +2161,16 @@ export class BrushEngine {
         hasContent: t.hasContent,
       }));
 
+      let otherBefore: typeof before | null = null;
+      if (this.stampDualGrid && this.stampDualCanvas) {
+        otherBefore = this.stampDualGrid.getTilesIntersectingRect(dirty).map((t) => ({
+          tx: t.tileX,
+          ty: t.tileY,
+          imgData: t.ctx.getImageData(0, 0, t.width, t.height),
+          hasContent: t.hasContent,
+        }));
+      }
+
       this.bakeStampStrokeToLayer(layer, dirty, this.activeStampSettings, this.activeStampAlpha, selectionMask);
 
       after = affectedTiles.map((t) => ({
@@ -2110,14 +2179,31 @@ export class BrushEngine {
         imgData: t.ctx.getImageData(0, 0, t.width, t.height),
         hasContent: t.hasContent,
       }));
+
+      if (otherBefore && this.stampDualGrid && this.stampDualCanvas) {
+        this.bakeStampStrokeToGrid(this.stampDualGrid, this.stampDualCanvas, dirty, this.activeStampSettings, this.activeStampAlpha, selectionMask);
+        const otherAfter = this.stampDualGrid.getTilesIntersectingRect(dirty).map((t) => ({
+          tx: t.tileX,
+          ty: t.tileY,
+          imgData: t.ctx.getImageData(0, 0, t.width, t.height),
+          hasContent: t.hasContent,
+        }));
+        otherResult = { before: otherBefore, after: otherAfter };
+        layer.updateThumbnail();
+      }
     }
 
     this.strokeCtx.clearRect(0, 0, this.strokeCanvas.width, this.strokeCanvas.height);
     this.strokeDirtyRect = null;
     this.activeStampSettings = null;
+    if (this.stampDualCtx && this.stampDualCanvas) {
+      this.stampDualCtx.clearRect(0, 0, this.stampDualCanvas.width, this.stampDualCanvas.height);
+    }
+    this.stampDualCanvas = null;
+    this.stampDualGrid = null;
 
     if (dirty && before.length > 0) {
-      return { dirtyRect: dirty, before, after };
+      return { dirtyRect: dirty, before, after, other: otherResult };
     }
     return null;
   }
@@ -2129,9 +2215,21 @@ export class BrushEngine {
     alpha: number,
     selectionMask?: HTMLCanvasElement | null
   ): void {
+    this.bakeStampStrokeToGrid(layer.tileGrid, this.strokeCanvas, dirty, settings, alpha, selectionMask);
+    layer.updateThumbnail();
+  }
+
+  private bakeStampStrokeToGrid(
+    grid: TileGrid,
+    strokeSrc: HTMLCanvasElement,
+    dirty: SKRectI,
+    settings: StampSettings,
+    alpha: number,
+    selectionMask?: HTMLCanvasElement | null
+  ): void {
     const compositeOp = getCanvasCompositeOperation(settings.blendMode);
 
-    let sourceCanvas: HTMLCanvasElement = this.strokeCanvas;
+    let sourceCanvas: HTMLCanvasElement = strokeSrc;
     if (selectionMask) {
       const maskedCanvas = document.createElement('canvas');
       maskedCanvas.width = dirty.width;
@@ -2139,7 +2237,7 @@ export class BrushEngine {
       const mctx = maskedCanvas.getContext('2d')!;
 
       mctx.drawImage(
-        this.strokeCanvas,
+        strokeSrc,
         dirty.left, dirty.top, dirty.width, dirty.height,
         0, 0, dirty.width, dirty.height
       );
@@ -2153,7 +2251,7 @@ export class BrushEngine {
       sourceCanvas = maskedCanvas;
     }
 
-    const affectedTiles = layer.tileGrid.getTilesIntersectingRect(dirty);
+    const affectedTiles = grid.getTilesIntersectingRect(dirty);
 
     for (const tile of affectedTiles) {
       tile.ctx.save();
@@ -2163,7 +2261,7 @@ export class BrushEngine {
 
       if (!selectionMask) {
         tile.ctx.drawImage(
-          this.strokeCanvas,
+          strokeSrc,
           tile.pixelX, tile.pixelY, tile.width, tile.height,
           0, 0, tile.width, tile.height
         );
@@ -2180,7 +2278,6 @@ export class BrushEngine {
       tile.isDirty = true;
     }
 
-    layer.updateThumbnail();
   }
 
   // --- SILNIK DEFORMACJI (LIQUIFY / WARP / DEFORM) ---

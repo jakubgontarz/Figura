@@ -5,6 +5,16 @@
 
 import { SKBlendMode, SKColor, getCanvasCompositeOperation } from './types.ts';
 
+let tileEpoch = 0;
+
+/**
+ * Licznik rośnie przy każdym oznaczeniu jakiegokolwiek kafelka jako zmienionego (isDirty = true).
+ * Pozwala tanio sprawdzić, czy piksele dokumentu mogły się zmienić od chwili zapamiętania kopii (np. próbki różdżki).
+ */
+export function getTileEpoch(): number {
+  return tileEpoch;
+}
+
 /**
  * Odpowiednik kafelka (Tile / SKSurface / SKBitmap fragment) w architekturze SkiaSharp.
  * Każdy kafelek przechowuje bufor rastrowy o stałym rozmiarze (domyślnie 64x64 px).
@@ -20,7 +30,19 @@ export class Tile {
 
   public canvas: HTMLCanvasElement;
   public ctx: CanvasRenderingContext2D;
-  public isDirty: boolean = false;
+  private dirty: boolean = false;
+  public get isDirty(): boolean {
+    return this.dirty;
+  }
+  public set isDirty(v: boolean) {
+    if (v) {
+      tileEpoch++;
+      this.version++;
+    }
+    this.dirty = v;
+  }
+  /** Rośnie przy każdej zmianie zawartości (niezależnie od zerowania isDirty); służy do unieważniania pamięci podręcznych (maski warstw). */
+  public version: number = 0;
   public hasContent: boolean = false;
 
   constructor(tileX: number, tileY: number, tileSize: number, docWidth: number, docHeight: number) {

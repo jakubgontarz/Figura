@@ -20,22 +20,29 @@ export const NewDocumentModal: React.FC<NewDocumentModalProps> = ({
   defaultTitle = 'obraz2.fig',
 }) => {
   const [title, setTitle] = useState(defaultTitle);
-  const [width, setWidth] = useState(800);
-  const [height, setHeight] = useState(600);
+  // Pola wymiarów trzymają tekst, żeby można było swobodnie skasować i wpisać wartość; liczba jest sprawdzana przy zatwierdzeniu
+  const [width, setWidth] = useState('800');
+  const [height, setHeight] = useState('600');
 
   if (!isOpen) return null;
 
+  const clampDim = (s: string, fallback: number) => {
+    const n = parseInt(s, 10);
+    return Math.max(16, Math.min(8000, Number.isFinite(n) ? n : fallback));
+  };
+  const digitsOnly = (s: string) => s.replace(/\D/g, '').slice(0, 4);
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    const w = Math.max(16, Math.min(8000, width));
-    const h = Math.max(16, Math.min(8000, height));
+    const w = clampDim(width, 800);
+    const h = clampDim(height, 600);
     const cleanTitle = title.trim() || 'obraz.fig';
     onCreate(cleanTitle.endsWith('.fig') ? cleanTitle : `${cleanTitle}.fig`, w, h);
     onClose();
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4 select-none">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 select-none">
       <div className="bg-[#1e1e1e] border border-[#3f3f46] rounded-lg shadow-2xl w-full max-w-sm flex flex-col text-xs text-[#dddddd]">
         <div className="flex items-center justify-between px-4 py-2.5 bg-[#252526] border-b border-[#333] rounded-t-lg">
           <div className="flex items-center gap-2">
@@ -65,22 +72,24 @@ export const NewDocumentModal: React.FC<NewDocumentModalProps> = ({
             <div>
               <label className="block text-[11px] text-[#aaa] mb-1">Szerokość (px):</label>
               <input
-                type="number"
-                min="16"
-                max="8000"
+                type="text"
+                inputMode="numeric"
                 value={width}
-                onChange={(e) => setWidth(parseInt(e.target.value) || 16)}
+                onChange={(e) => setWidth(digitsOnly(e.target.value))}
+                onBlur={() => setWidth(String(clampDim(width, 800)))}
+                onFocus={(e) => e.target.select()}
                 className="w-full bg-[#121212] border border-[#444] rounded px-2.5 py-1.5 text-white text-center focus:outline-none focus:border-[#007acc]"
               />
             </div>
             <div>
               <label className="block text-[11px] text-[#aaa] mb-1">Wysokość (px):</label>
               <input
-                type="number"
-                min="16"
-                max="8000"
+                type="text"
+                inputMode="numeric"
                 value={height}
-                onChange={(e) => setHeight(parseInt(e.target.value) || 16)}
+                onChange={(e) => setHeight(digitsOnly(e.target.value))}
+                onBlur={() => setHeight(String(clampDim(height, 600)))}
+                onFocus={(e) => e.target.select()}
                 className="w-full bg-[#121212] border border-[#444] rounded px-2.5 py-1.5 text-white text-center focus:outline-none focus:border-[#007acc]"
               />
             </div>
@@ -92,21 +101,21 @@ export const NewDocumentModal: React.FC<NewDocumentModalProps> = ({
             <div className="grid grid-cols-3 gap-1.5">
               <button
                 type="button"
-                onClick={() => { setWidth(800); setHeight(600); }}
+                onClick={() => { setWidth('800'); setHeight('600'); }}
                 className="px-2 py-1 bg-[#2a2a2a] hover:bg-[#3a3a3a] border border-[#444] rounded text-[10px] text-[#ccc]"
               >
                 800 × 600
               </button>
               <button
                 type="button"
-                onClick={() => { setWidth(1024); setHeight(768); }}
+                onClick={() => { setWidth('1024'); setHeight('768'); }}
                 className="px-2 py-1 bg-[#2a2a2a] hover:bg-[#3a3a3a] border border-[#444] rounded text-[10px] text-[#ccc]"
               >
                 1024 × 768
               </button>
               <button
                 type="button"
-                onClick={() => { setWidth(1920); setHeight(1080); }}
+                onClick={() => { setWidth('1920'); setHeight('1080'); }}
                 className="px-2 py-1 bg-[#2a2a2a] hover:bg-[#3a3a3a] border border-[#444] rounded text-[10px] text-[#ccc]"
               >
                 Full HD (1080p)

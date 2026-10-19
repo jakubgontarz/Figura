@@ -3,11 +3,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Layer } from './Layer.ts';
+import { PenNode, penAllPoints } from './PenPath.ts';
+import { Layer, grayToAlpha } from './Layer.ts';
+import { Quad, drawPerspectiveMesh, isConvexQuad, warpPerspectiveExact, WarpResult } from './Perspective.ts';
 import { renderGradientPreview } from './GradientRenderer.ts';
 import { BrushEngine } from './BrushEngine.ts';
 import { SelectionManager, SelectionSnapshot } from './SelectionManager.ts';
-import { DEFAULT_TILE_SIZE, TileSnapshot, trimUnchangedTiles, snapshotBytes } from './TileGrid.ts';
+import { getTileEpoch } from './Tile.ts';
+import { FillClient } from './FillClient.ts';
+import { BucketAlpha, bucketAlphaOfFlood, floodSelect } from './WandCore.ts';
+import { DEFAULT_TILE_SIZE, TileGrid, TileSnapshot, trimUnchangedTiles, snapshotBytes } from './TileGrid.ts';
 import {
   BrushSettings,
   FiguraProjectFile,
@@ -28,7 +33,7 @@ import {
   getCanvasCompositeOperation,
 } from './types.ts';
 import {
-  renderVectorBezier,
+  renderVectorPath,
   renderVectorLine,
   renderVectorShape,
 } from './VectorRenderer.ts';
@@ -41,13 +46,27 @@ export interface TransformContentSession {
   initialTilesSnapshot: { tx: number; ty: number; imgData: ImageData; hasContent: boolean }[];
   initialSelectionSnapshot: SelectionSnapshot;
   interpolation: InterpolationMode;
+  /** Połączona maska: druga siatka (maska, gdy edytowane są piksele, i odwrotnie) przesuwana razem z pierwszą. */
+  other?: { grid: TileGrid; content: HTMLCanvasElement; cutMask: HTMLCanvasElement; before: TileSnapshotLike[] } | null;
+  /** Podgląd pływającej zawartości (piksele zamaskowane poruszaną maską); gdy brak, używana jest `sourceContentCanvas`. */
+  previewCanvas?: HTMLCanvasElement | null;
+  /** Maska zaznaczenia w układzie źródła (rozmiar `sourceContentCanvas`); potrzebna w trybie perspektywy. */
+  srcMask?: HTMLCanvasElement | null;
+  /** Tryb perspektywy: aktualny czworokąt (lewy-górny, prawy-górny, prawy-dolny, lewy-dolny) i jego stan początkowy. */
+  persp?: { quad: Quad; quad0: Quad; changed: boolean } | null;
 }
+
+type TileSnapshotLike = { tx: number; ty: number; imgData: ImageData; hasContent: boolean };
 
 export type HistoryAction =
   | {
       type: 'tiles';
       description: string;
       layerIndex: number;
+      /** true = zmiana dotyczy maski warstwy, a nie jej pikseli */
+      onMask?: boolean;
+      /** druga siatka (piksele <-> maska) zmieniona razem z pierwszą (połączone klonowanie) */
+      other?: { before: TileSnapshotLike[]; after: TileSnapshotLike[] };
       before: { tx: number; ty: number; imgData: ImageData; hasContent: boolean }[];
       after: { tx: number; ty: number; imgData: ImageData; hasContent: boolean }[];
     }
@@ -55,7 +74,7 @@ export type HistoryAction =
       type: 'layerProperty';
       description: string;
       layerIndex: number;
-      property: 'opacity' | 'blendMode' | 'visible';
+      property: 'opacity' | 'blendMode' | 'visible' | 'maskEnabled' | 'maskLinked';
       oldValue: number | SKBlendMode | boolean;
       newValue: number | SKBlendMode | boolean;
     }
@@ -75,6 +94,9 @@ export type HistoryAction =
       type: 'transformContent';
       description: string;
       layerIndex: number;
+      onMask?: boolean;
+      /** druga siatka (piksele <-> maska) przekształcona razem z pierwszą, gdy maska jest połączona z warstwą */
+      other?: { before: TileSnapshotLike[]; after: TileSnapshotLike[] };
       tilesBefore: { tx: number; ty: number; imgData: ImageData; hasContent: boolean }[];
       tilesAfter: { tx: number; ty: number; imgData: ImageData; hasContent: boolean }[];
       selectionBefore: SelectionSnapshot;
@@ -111,12 +133,46 @@ export class GraphicEngine {
 
   // Sesja nieinwazyjnego przekształcania zawartości zaznaczenia
   public transformContentSession: TransformContentSession | null = null;
+  /**
+   * true = pływającą zawartość sesji przekształcania rysuje zewnętrzny renderer podglądu (ViewportTileRenderer: tryb mieszania
+   * i krycie warstwy, kafelki), więc kompozycja dokumentu jej NIE zawiera (płótno dokumentu pokazuje warstwę z otworem).
+   */
+  public floatingContentExternal: boolean = false;
 
   // Stan interaktywnego narzedzia Wiadro z woda (Paint Bucket)
   public bucketSeedPoint: SKPoint | null = null;
-  public bucketInitialTilesSnapshot: { tx: number; ty: number; imgData: ImageData; hasContent: boolean }[] | null = null;
   public bucketInitialLayerIndex: number = -1;
   public bucketColorSource: 'primary' | 'secondary' = 'primary';
+  /**
+   * Wypełnienie wiadra w trakcie edycji (maska alfa w prostokącie). Warstwa NIE jest modyfikowana podczas przeciągania
+   * uchwytu ani suwaka: podgląd rysują kafelki ekranu (jak przy gradiencie), a piksele zmieniane są raz, przy zatwierdzeniu.
+   * Obszar liczy wątek roboczy, więc uchwyt i suwak reagują od razu, a wynik pojawia się, gdy jest gotowy.
+   */
+  private bucketPreview: {
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    alpha: Uint8Array;
+    seq: number;
+    tinted: HTMLCanvasElement | null;
+    tintKey: string;
+  } | null = null;
+  private bucketParams: {
+    tol: number;
+    global: boolean;
+    sampleSource: WandSampleSource | undefined;
+    aa: boolean;
+    blend: SKBlendMode;
+    color: SKColor;
+  } | null = null;
+  private bucketJob: { id: number } | null = null;
+  private bucketGeomKey: string | null = null;
+  private bucketSeq = 0;
+  private selAlphaPath: unknown = null;
+  private selAlphaSeq = 0;
+  /** Wywoływane, gdy wynik liczony w tle (różdżka, wiadro) jest gotowy i trzeba odświeżyć widok */
+  public onAsyncUpdate: (() => void) | null = null;
 
   // Stan interaktywnego narzędzia Wypełnienie gradientowe (Gradient Fill)
   public gradientStartPoint: SKPoint | null = null;
@@ -167,6 +223,28 @@ export class GraphicEngine {
 
     this.initDefaultLayers();
     this.initCheckerPattern();
+
+    // Operacje czytające zaznaczenie lub warstwę najpierw dokańczają to, co liczy się w tle (różdżka, wiadro)
+    const self = this as unknown as Record<string, (...a: unknown[]) => unknown>;
+    for (const name of [
+      'undo',
+      'redo',
+      'deselect',
+      'selectAll',
+      'invertSelection',
+      'copy',
+      'cut',
+      'pasteCanvas',
+      'applySelectionShape',
+      'beginTransformContent',
+    ]) {
+      const orig = self[name];
+      if (typeof orig !== 'function') continue;
+      self[name] = (...a: unknown[]) => {
+        this.flushPendingFill();
+        return orig.apply(this, a);
+      };
+    }
   }
 
   public initDefaultLayers(): void {
@@ -216,6 +294,22 @@ export class GraphicEngine {
     return { canvas: this.dirtyScratchCanvas, ctx: this.dirtyScratchCtx! };
   }
 
+  private brushMaskCanvas: HTMLCanvasElement | null = null;
+  private brushMaskCtx: CanvasRenderingContext2D | null = null;
+  private getBrushMaskScratch(w: number, h: number): { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D } {
+    if (!this.brushMaskCanvas) {
+      this.brushMaskCanvas = document.createElement('canvas');
+      this.brushMaskCanvas.width = Math.max(256, w);
+      this.brushMaskCanvas.height = Math.max(256, h);
+      this.brushMaskCtx = this.brushMaskCanvas.getContext('2d');
+    }
+    if (this.brushMaskCanvas.width < w || this.brushMaskCanvas.height < h) {
+      this.brushMaskCanvas.width = Math.max(this.brushMaskCanvas.width, w);
+      this.brushMaskCanvas.height = Math.max(this.brushMaskCanvas.height, h);
+    }
+    return { canvas: this.brushMaskCanvas, ctx: this.brushMaskCtx! };
+  }
+
   private getVectorScratch(w: number, h: number): { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D } {
     if (!this.vectorPreviewCanvas) {
       this.vectorPreviewCanvas = document.createElement('canvas');
@@ -257,7 +351,8 @@ export class GraphicEngine {
         break;
       case 'layers':
         for (const l of a.layers) {
-          for (const row of l.tileGrid.tiles) for (const t of row) if (t.hasContent) n += t.width * t.height * 4;
+          for (const row of l.pixelGrid.tiles) for (const t of row) if (t.hasContent) n += t.width * t.height * 4;
+          if (l.maskGrid) for (const row of l.maskGrid.tiles) for (const t of row) if (t.hasContent) n += t.width * t.height * 4;
         }
         break;
       default:
@@ -297,6 +392,10 @@ export class GraphicEngine {
   }
 
   public pushTileAction(action: HistoryAction): void {
+    if ((action.type === 'tiles' || action.type === 'transformContent') && action.onMask === undefined) {
+      const L = this.layers[action.layerIndex];
+      action = { ...action, onMask: !!(L && L.editMask && L.maskGrid) };
+    }
     // Zapamiętujemy tylko kafelki, które operacja faktycznie zmieniła
     if (action.type === 'tiles') {
       const t = trimUnchangedTiles(action.before, action.after);
@@ -311,7 +410,7 @@ export class GraphicEngine {
 
   public pushPropertyAction(
     layerIndex: number,
-    property: 'opacity' | 'blendMode' | 'visible',
+    property: 'opacity' | 'blendMode' | 'visible' | 'maskEnabled' | 'maskLinked',
     oldValue: number | SKBlendMode | boolean,
     newValue: number | SKBlendMode | boolean,
     description: string
@@ -338,6 +437,24 @@ export class GraphicEngine {
     }
   }
 
+  /** Siatka, której dotyczy zapisana akcja historii (piksele albo maska). */
+  private historyGrid(layer: Layer, onMask?: boolean): TileGrid {
+    return onMask && layer.maskGrid ? layer.maskGrid : layer.pixelGrid;
+  }
+
+  private applyOtherSnapshot(layer: Layer, primaryOnMask: boolean | undefined, snap: TileSnapshotLike[]): void {
+    const grid = primaryOnMask ? layer.pixelGrid : layer.maskGrid;
+    if (!grid) return;
+    for (const t of snap) {
+      const tile = grid.getTile(t.tx, t.ty);
+      if (tile) {
+        tile.ctx.putImageData(t.imgData, 0, 0);
+        tile.hasContent = t.hasContent;
+        tile.isDirty = true;
+      }
+    }
+  }
+
   public undo(): boolean {
     if (this.bucketSeedPoint) {
       this.commitPaintBucketSession();
@@ -357,13 +474,14 @@ export class GraphicEngine {
       const layer = this.layers[action.layerIndex];
       if (layer) {
         for (const t of action.before) {
-          const tile = layer.tileGrid.getTile(t.tx, t.ty);
+          const tile = this.historyGrid(layer, action.onMask).getTile(t.tx, t.ty);
           if (tile) {
             tile.ctx.putImageData(t.imgData, 0, 0);
             tile.hasContent = t.hasContent;
             tile.isDirty = true;
           }
         }
+        if (action.other) this.applyOtherSnapshot(layer, action.onMask, action.other.before);
         layer.updateThumbnail();
       }
       this.redoStack.push(action);
@@ -376,6 +494,10 @@ export class GraphicEngine {
           layer.blendMode = action.oldValue as SKBlendMode;
         } else if (action.property === 'visible') {
           layer.visible = action.oldValue as boolean;
+        } else if (action.property === 'maskEnabled') {
+          layer.maskEnabled = action.oldValue as boolean;
+        } else if (action.property === 'maskLinked') {
+          layer.maskLinked = action.oldValue as boolean;
         }
         layer.updateThumbnail();
       }
@@ -387,7 +509,7 @@ export class GraphicEngine {
       const layer = this.layers[action.layerIndex];
       if (layer) {
         for (const t of action.tilesBefore) {
-          const tile = layer.tileGrid.getTile(t.tx, t.ty);
+          const tile = this.historyGrid(layer, action.onMask).getTile(t.tx, t.ty);
           if (tile) {
             tile.ctx.putImageData(t.imgData, 0, 0);
             tile.hasContent = t.hasContent;
@@ -396,6 +518,7 @@ export class GraphicEngine {
         }
         layer.updateThumbnail();
       }
+      if (layer && action.other) this.applyOtherSnapshot(layer, action.onMask, action.other.before);
       this.selectionManager.restoreMaskSnapshot(action.selectionBefore);
       this.redoStack.push(action);
     } else {
@@ -408,6 +531,7 @@ export class GraphicEngine {
       this.redoStack.push(currentSnapshot);
 
       // Akcja zostaje zdjęta ze stosu, więc jej warstwy można przejąć bez kosztownego klonowania
+      this.maskView = null;
       this.layers = action.layers;
       this.activeLayerIndex = Math.min(action.activeLayerIndex, this.layers.length - 1);
     }
@@ -436,13 +560,14 @@ export class GraphicEngine {
       const layer = this.layers[action.layerIndex];
       if (layer) {
         for (const t of action.after) {
-          const tile = layer.tileGrid.getTile(t.tx, t.ty);
+          const tile = this.historyGrid(layer, action.onMask).getTile(t.tx, t.ty);
           if (tile) {
             tile.ctx.putImageData(t.imgData, 0, 0);
             tile.hasContent = t.hasContent;
             tile.isDirty = true;
           }
         }
+        if (action.other) this.applyOtherSnapshot(layer, action.onMask, action.other.after);
         layer.updateThumbnail();
       }
       this.undoStack.push(action);
@@ -455,6 +580,10 @@ export class GraphicEngine {
           layer.blendMode = action.newValue as SKBlendMode;
         } else if (action.property === 'visible') {
           layer.visible = action.newValue as boolean;
+        } else if (action.property === 'maskEnabled') {
+          layer.maskEnabled = action.newValue as boolean;
+        } else if (action.property === 'maskLinked') {
+          layer.maskLinked = action.newValue as boolean;
         }
         layer.updateThumbnail();
       }
@@ -466,7 +595,7 @@ export class GraphicEngine {
       const layer = this.layers[action.layerIndex];
       if (layer) {
         for (const t of action.tilesAfter) {
-          const tile = layer.tileGrid.getTile(t.tx, t.ty);
+          const tile = this.historyGrid(layer, action.onMask).getTile(t.tx, t.ty);
           if (tile) {
             tile.ctx.putImageData(t.imgData, 0, 0);
             tile.hasContent = t.hasContent;
@@ -475,6 +604,7 @@ export class GraphicEngine {
         }
         layer.updateThumbnail();
       }
+      if (layer && action.other) this.applyOtherSnapshot(layer, action.onMask, action.other.after);
       this.selectionManager.restoreMaskSnapshot(action.selectionAfter);
       this.undoStack.push(action);
     } else {
@@ -487,6 +617,7 @@ export class GraphicEngine {
       this.undoStack.push(currentSnapshot);
 
       // Akcja zostaje zdjęta ze stosu, więc jej warstwy można przejąć bez kosztownego klonowania
+      this.maskView = null;
       this.layers = action.layers;
       this.activeLayerIndex = Math.min(action.activeLayerIndex, this.layers.length - 1);
     }
@@ -654,6 +785,15 @@ export class GraphicEngine {
       0, 0, bounds.width, bounds.height
     );
 
+    const pasteSrcMask = document.createElement('canvas');
+    pasteSrcMask.width = bounds.width;
+    pasteSrcMask.height = bounds.height;
+    pasteSrcMask.getContext('2d')!.drawImage(
+      this.selectionManager.maskCanvas,
+      bounds.left, bounds.top, bounds.width, bounds.height,
+      0, 0, bounds.width, bounds.height
+    );
+
     // 2. Rozpocznij PŁYWAJĄCĄ SESJĘ BEZ ZAPISYWANIA PIKSELI NA WARSTWIE POD SPODEM!
     // Warstwa pod spodem pozostaje w 100% czysta (nic nie zostaje z tyłu przy przenoszeniu)
     this.selectionManager.beginTransformSelection();
@@ -665,6 +805,7 @@ export class GraphicEngine {
       initialTilesSnapshot,
       initialSelectionSnapshot,
       interpolation: 'bilinear',
+      srcMask: pasteSrcMask,
     };
 
     this.markAllLayersDirty();
@@ -697,8 +838,122 @@ export class GraphicEngine {
   /** Sygnatura stanu wpływającego na wygląd kompozytu (piksele, widoczność, krycie, tryby, aktywna warstwa). */
   public getBaseSignature(): string {
     let sig = `${this.pixelVersion}|${this.width}x${this.height}|${this.activeLayerIndex}`;
-    for (const l of this.layers) sig += `|${l.id}:${l.visible ? 1 : 0}:${l.opacity}:${l.blendMode}`;
+    for (const l of this.layers) sig += `|${l.id}:${l.visible ? 1 : 0}:${l.opacity}:${l.blendMode}:${l.maskGrid ? (l.maskEnabled ? 'm' : 'n') : '-'}`;
+    if (this.maskView) sig += `|mv:${this.maskView.id}`;
     return sig;
+  }
+
+  // --- MASKI PRZEZROCZYSTOŚCI WARSTW ---
+
+  /** Warstwa, której maska jest pokazywana na płótnie w skali szarości (null = zwykły widok). */
+  public maskView: Layer | null = null;
+  private maskViewProxy: Layer | null = null;
+
+  /** Warstwy używane przy rysowaniu widoku: zwykle `layers`; w podglądzie maski jedna warstwa-pośrednik z maską w szarości. */
+  public get renderLayers(): Layer[] {
+    const mv = this.maskView;
+    if (mv) {
+      if (mv.maskGrid && this.layers[this.activeLayerIndex] === mv) {
+        let px = this.maskViewProxy;
+        if (!px || px.id !== `mv_${mv.id}` || px.pixelGrid !== mv.maskGrid) {
+          px = new Layer(`mv_${mv.id}`, mv.name, this.width, this.height, this.tileSize);
+          px.pixelGrid = mv.maskGrid;
+          px.grayView = true;
+          this.maskViewProxy = px;
+        }
+        return [px];
+      }
+      this.maskView = null;
+    }
+    return this.layers;
+  }
+
+  /** Indeks aktywnej warstwy w `renderLayers`. */
+  public get renderActiveIndex(): number {
+    return this.maskView ? 0 : this.activeLayerIndex;
+  }
+
+  /** Indeks rzeczywistej warstwy odpowiadającej pozycji `i` w `renderLayers`. */
+  public realLayerIndex(i: number): number {
+    return this.maskView ? this.layers.indexOf(this.maskView) : i;
+  }
+
+  /** Zatwierdza otwarte sesje (przekształcanie, gradient, wiadro), zanim zmieni się cel edycji. */
+  private finishOpenSessions(): void {
+    if (this.transformContentSession) this.commitTransformContent();
+    if (this.bucketSeedPoint) this.commitPaintBucketSession();
+    if (this.gradientStartPoint) this.commitGradientSession();
+  }
+
+  public addLayerMask(fromSelection: boolean): boolean {
+    const layer = this.getActiveLayer();
+    if (!layer || layer.hasMask) return false;
+    this.finishOpenSessions();
+    this.saveFullSnapshot('Dodanie maski');
+    layer.createMask(fromSelection && this.selectionManager.hasActiveSelection ? this.selectionManager.maskCanvas : null);
+    this.markAllLayersDirty();
+    return true;
+  }
+
+  /** Usuwa maskę aktywnej warstwy; `apply` wpieka ją w piksele. */
+  public removeLayerMask(apply: boolean): boolean {
+    const layer = this.getActiveLayer();
+    if (!layer || !layer.hasMask) return false;
+    this.finishOpenSessions();
+    this.saveFullSnapshot(apply ? 'Zastosowanie maski' : 'Usunięcie maski');
+    if (this.maskView === layer) this.maskView = null;
+    if (apply) layer.applyMask();
+    else layer.dropMask();
+    this.markAllLayersDirty();
+    return true;
+  }
+
+  /** Wybiera cel edycji warstwy: piksele albo maska. */
+  public setEditTarget(index: number, target: 'pixels' | 'mask'): void {
+    const layer = this.layers[index];
+    if (!layer) return;
+    if (this.maskView && this.maskView !== layer) this.maskView = null;
+    const wantMask = target === 'mask' && layer.hasMask;
+    if (layer.editMask === wantMask && (index === this.activeLayerIndex)) {
+      this.activeLayerIndex = index;
+      return;
+    }
+    this.finishOpenSessions();
+    this.activeLayerIndex = index;
+    layer.editMask = wantMask;
+    // wyjście z edycji maski kończy też jej podgląd w szarości
+    if (!wantMask && this.maskView === layer) this.maskView = null;
+    this.markAllLayersDirty();
+  }
+
+  /** Pokazuje maskę warstwy w skali szarości na płótnie (null = powrót do zwykłego widoku). */
+  public setMaskView(index: number | null): void {
+    this.finishOpenSessions();
+    if (index === null) {
+      this.maskView = null;
+    } else {
+      const layer = this.layers[index];
+      if (!layer || !layer.hasMask) return;
+      this.activeLayerIndex = index;
+      layer.editMask = true;
+      this.maskView = layer;
+    }
+    this.markAllLayersDirty();
+  }
+
+  public toggleMaskEnabled(index: number): void {
+    const layer = this.layers[index];
+    if (!layer || !layer.hasMask) return;
+    this.pushPropertyAction(index, 'maskEnabled', layer.maskEnabled, !layer.maskEnabled, 'Widoczność maski');
+    layer.maskEnabled = !layer.maskEnabled;
+    this.markAllLayersDirty();
+  }
+
+  public toggleMaskLink(index: number): void {
+    const layer = this.layers[index];
+    if (!layer || !layer.hasMask) return;
+    this.pushPropertyAction(index, 'maskLinked', layer.maskLinked, !layer.maskLinked, 'Powiązanie maski z warstwą');
+    layer.maskLinked = !layer.maskLinked;
   }
 
   public markAllLayersDirty(): void {
@@ -756,20 +1011,22 @@ export class GraphicEngine {
     const bottomLayer = this.layers[this.activeLayerIndex - 1];
     if (topLayer?.locked || bottomLayer?.locked) return false;
     this.saveFullSnapshot('Scalenie w dół');
+    this.maskView = null;
 
-    const topFlat = topLayer.tileGrid.compositeToFlatCanvas();
+    const topFlat = topLayer.renderFlatCanvas();
     const mergedCanvas = document.createElement('canvas');
     mergedCanvas.width = this.width;
     mergedCanvas.height = this.height;
     const mctx = mergedCanvas.getContext('2d')!;
 
-    bottomLayer.tileGrid.drawToFlatContext(mctx);
+    bottomLayer.drawRenderedToContext(mctx);
     mctx.save();
     mctx.globalAlpha = topLayer.opacity;
     mctx.globalCompositeOperation = getCanvasCompositeOperation(topLayer.blendMode);
     mctx.drawImage(topFlat, 0, 0);
     mctx.restore();
 
+    bottomLayer.dropMask();
     for (let ty = 0; ty < bottomLayer.tileGrid.rows; ty++) {
       for (let tx = 0; tx < bottomLayer.tileGrid.cols; tx++) {
         const tile = bottomLayer.tileGrid.tiles[ty][tx];
@@ -925,7 +1182,18 @@ export class GraphicEngine {
     this.markAllLayersDirty();
   }
 
+  private fillSampling = false;
+
   private getMagicWandSampleCanvas(sampleSource?: WandSampleSource): HTMLCanvasElement {
+    this.fillSampling = true;
+    try {
+      return this.getMagicWandSampleCanvasImpl(sampleSource);
+    } finally {
+      this.fillSampling = false;
+    }
+  }
+
+  private getMagicWandSampleCanvasImpl(sampleSource?: WandSampleSource): HTMLCanvasElement {
     if (sampleSource === 'layer') {
       const activeLayer = this.getActiveLayer();
       if (activeLayer) {
@@ -935,49 +1203,227 @@ export class GraphicEngine {
     return this.getCompositeFlatCanvas();
   }
 
+  /**
+   * Kopia pikseli próbkowanego obrazu (różdżka, wiadro); ponownie używana przy zmianie tolerancji i przesuwaniu punktu.
+   * `data` = null, gdy bufor został przekazany do wątku roboczego (wtedy główny wątek go nie trzyma).
+   */
+  private wandSample: { key: string; data: ImageData | null; id: number } | null = null;
+  private wandSampleSeq = 0;
+  private fillClient: FillClient | null = null;
+
+  private getFillClient(): FillClient {
+    return this.fillClient ?? (this.fillClient = new FillClient());
+  }
+
+  private wandSampleKey(sampleSource?: WandSampleSource): string {
+    return `${this.getBaseSignature()}|${sampleSource === 'layer' ? 'layer' : 'composite'}|${getTileEpoch()}`;
+  }
+
+  /**
+   * Piksele do próbkowania. Składanie warstw w płaskie płótno i odczyt całego obrazu kosztują
+   * setki milisekund przy dużych dokumentach, więc podczas przeciągania suwaka tolerancji lub uchwytu
+   * kopia jest używana ponownie, dopóki nic w dokumencie się nie zmieni (sygnatura podkładu i licznik zmian kafelków).
+   */
+  private getMagicWandSample(
+    sampleSource: WandSampleSource | undefined,
+    reuse: boolean,
+    needData: boolean = true
+  ): { key: string; data: ImageData | null; id: number } {
+    const cached = this.wandSample;
+    if (reuse && cached && cached.key === this.wandSampleKey(sampleSource) && (cached.data || !needData)) return cached;
+    const canvas = this.getMagicWandSampleCanvas(sampleSource);
+    const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
+    const data = ctx.getImageData(0, 0, this.width, this.height);
+    // Klucz liczony po odczycie (odczyt może np. zatwierdzić sesję gradientu)
+    const sample = { key: this.wandSampleKey(sampleSource), data, id: ++this.wandSampleSeq };
+    this.wandSample = sample;
+    return sample;
+  }
+
+  /** Próbka z pikselami w głównym wątku (do obliczeń synchronicznych); odczytuje ją ponownie, gdy trafiła do wątku roboczego. */
+  private getSampleWithData(sampleSource: WandSampleSource | undefined, reuse: boolean): { key: string; data: ImageData; id: number } {
+    return this.getMagicWandSample(sampleSource, reuse, true) as { key: string; data: ImageData; id: number };
+  }
+
+  /** Zapewnia, że wątek roboczy ma aktualne piksele próbki (przesyłane raz na próbkę, bez kopiowania). */
+  private ensureWorkerSample(sampleSource: WandSampleSource | undefined): { key: string; id: number } {
+    const client = this.getFillClient();
+    let sample = this.getMagicWandSample(sampleSource, true, false);
+    let key = `s${sample.id}`;
+    if (!client.hasSample(key)) {
+      if (!sample.data) sample = this.getMagicWandSample(sampleSource, false, true);
+      key = `s${sample.id}`;
+      client.setSample(key, this.width, this.height, sample.data!.data);
+      // Bufor został przeniesiony do wątku roboczego; lokalny solver trzyma ten sam bufor, więc tam nic się nie zmienia
+      if (client.threaded) sample.data = null;
+    }
+    return { key, id: sample.id };
+  }
+
+  /** Płaszczyzna alfa zaznaczenia w wątku roboczym (wiadro nie wchodzi w niezaznaczone piksele). */
+  private ensureWorkerSelection(): string {
+    const sm = this.selectionManager;
+    if (this.selAlphaPath !== sm.contourPath) {
+      this.selAlphaPath = sm.contourPath;
+      this.selAlphaSeq++;
+    }
+    const key = `sel${this.selAlphaSeq}`;
+    const client = this.getFillClient();
+    if (!client.hasSelection(key)) {
+      client.setSelection(key, this.selectionAlphaPlane());
+    }
+    return key;
+  }
+
+  private selectionAlphaPlane(): Uint8Array {
+    const d = this.selectionManager.maskCtx.getImageData(0, 0, this.width, this.height).data;
+    const n = this.width * this.height;
+    const alpha = new Uint8Array(n);
+    for (let i = 0, p = 3; i < n; i++, p += 4) alpha[i] = d[p];
+    return alpha;
+  }
+
+  /** Zwalnia pamięć kopii próbki (np. po zmianie narzędzia) i wątek roboczy. */
+  public releaseWandSample(): void {
+    this.wandSample = null;
+    this.fillClient?.release();
+  }
+
+  // --- RÓŻDŻKA LICZONA W TLE ---
+  // Punkt (uchwyt) i ustawienia są zapamiętywane od razu, a obszar liczy wątek roboczy: kolejne zmiany suwaka lub uchwytu
+  // nie blokują interfejsu, a z zakolejkowanych zadań liczone jest tylko najnowsze.
+
+  private wandPending: { id: number; before: SelectionSnapshot | null; settings: SelectionSettings; sig: string } | null = null;
+  private wandAppliedId: number | null = null;
+  private wandWaiters: Array<() => void> = [];
+
+  /** Czy trwa liczenie różdżki w tle */
+  public get wandBusy(): boolean {
+    return this.wandPending !== null;
+  }
+
+  /** Obietnica rozwiązywana, gdy bieżące liczenie różdżki się zakończy (np. przed zapisem stanu do historii). */
+  public whenWandIdle(): Promise<void> {
+    return this.wandPending ? new Promise<void>((r) => this.wandWaiters.push(r)) : Promise.resolve();
+  }
+
+  /** Dokańcza synchronicznie wszystko, co liczy się w tle (przed operacją, która czyta zaznaczenie lub warstwę). */
+  public flushPendingFill(): void {
+    const p = this.wandPending;
+    if (p) this.finishWandSync(p);
+    if (this.bucketJob) this.flushBucketSync();
+  }
+
+  private completeWand(p: NonNullable<GraphicEngine['wandPending']>): void {
+    this.wandPending = null;
+    if (p.before) {
+      const after = this.selectionManager.getMaskSnapshot();
+      this.pushSelectionAction(p.before, after, 'Magiczna różdżka');
+      this.markAllLayersDirty();
+      // markAllLayersDirty zmienia sygnaturę podkładu - przepisujemy klucz, żeby następne odświeżenia mogły użyć kopii
+      const smp = this.wandSample;
+      if (smp) smp.key = this.wandSampleKey(p.settings.sampleSource);
+    }
+    const waiters = this.wandWaiters;
+    this.wandWaiters = [];
+    for (const w of waiters) w();
+    this.onAsyncUpdate?.();
+  }
+
+  private finishWandSync(p: NonNullable<GraphicEngine['wandPending']>): void {
+    const sm = this.selectionManager;
+    const seed = sm.wandSeedPoint;
+    this.wandPending = p; // zakończenie zdejmuje oczekujące zadanie, więc spóźniony wynik z wątku zostanie zignorowany
+    if (seed) {
+      const sample = this.getSampleWithData(p.settings.sampleSource, true);
+      sm.applyMagicWand(seed, sample.data, p.settings, false, `s${sample.id}`);
+    }
+    this.wandAppliedId = null;
+    this.completeWand(p);
+  }
+
+  private submitWand(settings: SelectionSettings, before: SelectionSnapshot | null): void {
+    const sm = this.selectionManager;
+    const seed = sm.wandSeedPoint;
+    if (!seed) return;
+    const sample = this.ensureWorkerSample(settings.sampleSource);
+    const sig = `${sample.key}|${settings.wandMode}|${settings.feather}|${settings.mode}`;
+    const client = this.getFillClient();
+    const id = client.nextId();
+    const isNew = before !== null;
+    const prevBefore = this.wandPending?.before ?? null;
+    this.wandPending = { id, before: before ?? prevBefore, settings: { ...settings }, sig };
+    const reuseId = !isNew && this.wandAppliedId !== null && sm.canReuseAsyncWand(sig) ? this.wandAppliedId : null;
+    client
+      .wand({
+        id,
+        key: sample.key,
+        sx: Math.max(0, Math.min(this.width - 1, Math.floor(seed.x))),
+        sy: Math.max(0, Math.min(this.height - 1, Math.floor(seed.y))),
+        tol: settings.tolerance,
+        global: settings.wandMode === 'global',
+        reuseId,
+      })
+      .then((r) => this.onWandResult(r));
+  }
+
+  private onWandResult(r: { id: number; status: string; rings?: Float64Array[] }): void {
+    const p = this.wandPending;
+    if (!p || p.id !== r.id) return; // wyprzedzone nowszym zadaniem albo już zakończone synchronicznie
+    if (r.status !== 'ok' && r.status !== 'same') {
+      this.finishWandSync(p); // wątek nie miał próbki / błąd: liczymy w głównym wątku
+      return;
+    }
+    const sm = this.selectionManager;
+    if (r.status === 'ok') sm.applyWandRings(r.rings!, p.settings, p.sig);
+    else sm.confirmAsyncWandSame(p.sig);
+    this.wandAppliedId = r.id;
+    this.completeWand(p);
+  }
+
   public applyMagicWand(seedPoint: SKPoint, settings: SelectionSettings): void {
-    const before = this.selectionManager.getMaskSnapshot();
-    const sampleCanvas = this.getMagicWandSampleCanvas(settings.sampleSource);
-    this.selectionManager.applyMagicWand(seedPoint, sampleCanvas, settings, true);
-    const after = this.selectionManager.getMaskSnapshot();
-    this.pushSelectionAction(before, after, 'Magiczna różdżka');
-    this.markAllLayersDirty();
+    if (settings.feather > 0) {
+      // Z piórkowaniem wynik jest maską rastrową (rozmycie na płótnie), więc ta ścieżka zostaje synchroniczna
+      this.flushPendingFill();
+      const before = this.selectionManager.getMaskSnapshot();
+      const sample = this.getSampleWithData(settings.sampleSource, false);
+      this.selectionManager.applyMagicWand(seedPoint, sample.data, settings, true, `s${sample.id}`);
+      const after = this.selectionManager.getMaskSnapshot();
+      this.pushSelectionAction(before, after, 'Magiczna różdżka');
+      this.markAllLayersDirty();
+      // markAllLayersDirty zmienia sygnaturę podkładu - przepisujemy klucz, żeby następne odświeżenia mogły użyć kopii
+      sample.key = this.wandSampleKey(settings.sampleSource);
+      return;
+    }
+    const before = this.wandPending?.before ?? this.selectionManager.getMaskSnapshot();
+    this.selectionManager.beginWand(seedPoint, settings, true);
+    this.submitWand(settings, before);
   }
 
   public refreshMagicWand(settings: SelectionSettings, seedPoint?: SKPoint): void {
+    const sm = this.selectionManager;
     if (seedPoint) {
-      this.selectionManager.wandSeedPoint = seedPoint;
+      sm.wandSeedPoint = seedPoint;
     }
-    if (!this.selectionManager.wandSeedPoint) return;
+    if (!sm.wandSeedPoint) return;
 
-    const sampleCanvas = this.getMagicWandSampleCanvas(settings.sampleSource);
-    this.selectionManager.applyMagicWand(this.selectionManager.wandSeedPoint, sampleCanvas, settings, false);
-    this.markAllLayersDirty();
+    if (settings.feather > 0) {
+      this.flushPendingFill();
+      const sample = this.getSampleWithData(settings.sampleSource, true);
+      sm.applyMagicWand(sm.wandSeedPoint, sample.data, settings, false, `s${sample.id}`);
+      // Zmiana zaznaczenia nie zmienia pikseli warstw, więc nie unieważniamy kafelków ani miniatur
+      return;
+    }
+    sm.lastWandSettings = { ...settings };
+    this.submitWand(settings, null);
   }
 
   // --- INTERAKTYWNE WIADRO Z WODĄ (PAINT BUCKET) ---
 
-  public restoreBucketInitialTiles(): void {
-    if (
-      this.bucketInitialTilesSnapshot &&
-      this.bucketInitialLayerIndex >= 0 &&
-      this.bucketInitialLayerIndex < this.layers.length
-    ) {
-      const layer = this.layers[this.bucketInitialLayerIndex];
-      if (layer) {
-        for (const t of this.bucketInitialTilesSnapshot) {
-          const tile = layer.tileGrid.getTile(t.tx, t.ty);
-          if (tile) {
-            tile.ctx.putImageData(t.imgData, 0, 0);
-            tile.hasContent = t.hasContent;
-            tile.isDirty = true;
-          }
-        }
-        layer.updateThumbnail();
-      }
-    }
-  }
-
+  /**
+   * Wiadro: zapamiętuje punkt, kolor i parametry od razu (uchwyt i suwak reagują natychmiast), a obszar liczy wątek roboczy.
+   * Piksele warstwy zmieniane są dopiero przy zatwierdzeniu (commitPaintBucketSession).
+   */
   public applyPaintBucket(
     seedPoint: SKPoint,
     selectionSettings: SelectionSettings,
@@ -991,204 +1437,185 @@ export class GraphicEngine {
     if (isNewClick) {
       this.commitPaintBucketSession();
       this.bucketInitialLayerIndex = this.activeLayerIndex;
-      this.bucketInitialTilesSnapshot = layer.tileGrid.getTilesSnapshot();
       this.bucketSeedPoint = { ...seedPoint };
+      this.bucketPreview = null;
+      this.bucketGeomKey = null;
       if (colorSource) {
         this.bucketColorSource = colorSource;
       }
-    } else {
-      // Przy modyfikacji parametrów na żywo lub przesuwaniu uchwytu:
-      // Zawsze najpierw przywróć czysty, pierwotny stan warstwy przed próbkowaniem!
-      this.restoreBucketInitialTiles();
-      if (seedPoint) {
-        this.bucketSeedPoint = { ...seedPoint };
-      }
+    } else if (seedPoint) {
+      this.bucketSeedPoint = { ...seedPoint };
     }
-
     if (!this.bucketSeedPoint) return false;
 
-    // Pobierz czyste płótno próbkowania koloru (Obraz vs Warstwa) z czystego stanu dokumentu
-    const sampleCanvas = this.getMagicWandSampleCanvas(selectionSettings.sampleSource);
-    const w = this.width;
-    const h = this.height;
-
-    const sx = Math.max(0, Math.min(w - 1, Math.floor(this.bucketSeedPoint.x)));
-    const sy = Math.max(0, Math.min(h - 1, Math.floor(this.bucketSeedPoint.y)));
-
-    const sCtx = sampleCanvas.getContext('2d');
-    if (!sCtx) return false;
-
-    const sampleImgData = sCtx.getImageData(0, 0, w, h);
-    const sData = sampleImgData.data;
-
-    const startIndex = (sy * w + sx) * 4;
-    const targetR = sData[startIndex];
-    const targetG = sData[startIndex + 1];
-    const targetB = sData[startIndex + 2];
-    const targetA = sData[startIndex + 3];
-
-    const maxDist = ((selectionSettings.tolerance ?? 15) / 100) * 441.67;
-
-    let selectionMaskData: Uint8ClampedArray | null = null;
-    if (this.selectionManager.hasActiveSelection) {
-      const mctx = this.selectionManager.maskCanvas.getContext('2d');
-      if (mctx) {
-        selectionMaskData = mctx.getImageData(0, 0, w, h).data;
-      }
-    }
-
-    const fillMask = new Uint8Array(w * h);
-    const mode = selectionSettings.wandMode || 'contiguous';
-
-    if (mode === 'global') {
-      for (let i = 0; i < w * h; i++) {
-        if (selectionMaskData && selectionMaskData[i * 4 + 3] === 0) continue;
-        const p = i * 4;
-        const dr = sData[p] - targetR;
-        const dg = sData[p + 1] - targetG;
-        const db = sData[p + 2] - targetB;
-        const da = sData[p + 3] - targetA;
-        const dist = Math.sqrt(dr * dr + dg * dg + db * db + (da * da) / 4);
-        if (dist <= maxDist) {
-          if (brushSettings.antiAliasing && maxDist > 0 && dist > maxDist * 0.75) {
-            const factor = 1 - (dist - maxDist * 0.75) / (maxDist * 0.25);
-            fillMask[i] = Math.max(1, Math.round(factor * 255));
-          } else {
-            fillMask[i] = 255;
-          }
-        }
-      }
-    } else {
-      const queue: number[] = [sy * w + sx];
-      fillMask[sy * w + sx] = 255;
-
-      let head = 0;
-      while (head < queue.length) {
-        const idx = queue[head++];
-        const cy = Math.floor(idx / w);
-        const cx = idx % w;
-
-        const neighbors = [
-          cx > 0 ? idx - 1 : -1,
-          cx < w - 1 ? idx + 1 : -1,
-          cy > 0 ? idx - w : -1,
-          cy < h - 1 ? idx + w : -1,
-        ];
-
-        for (const nIdx of neighbors) {
-          if (nIdx >= 0 && !fillMask[nIdx]) {
-            if (selectionMaskData && selectionMaskData[nIdx * 4 + 3] === 0) continue;
-
-            const p = nIdx * 4;
-            const dr = sData[p] - targetR;
-            const dg = sData[p + 1] - targetG;
-            const db = sData[p + 2] - targetB;
-            const da = sData[p + 3] - targetA;
-            const dist = Math.sqrt(dr * dr + dg * dg + db * db + (da * da) / 4);
-
-            if (dist <= maxDist) {
-              if (brushSettings.antiAliasing && maxDist > 0 && dist > maxDist * 0.75) {
-                const factor = 1 - (dist - maxDist * 0.75) / (maxDist * 0.25);
-                fillMask[nIdx] = Math.max(1, Math.round(factor * 255));
-              } else {
-                fillMask[nIdx] = 255;
-              }
-              queue.push(nIdx);
-            }
-          }
-        }
-      }
-    }
-
-    let minX = w, minY = h, maxX = -1, maxY = -1;
-
-    // Utwórz bufor dla wylewanego koloru
-    const fillCanvas = document.createElement('canvas');
-    fillCanvas.width = w;
-    fillCanvas.height = h;
-    const fctx = fillCanvas.getContext('2d')!;
-    const fillImgData = fctx.createImageData(w, h);
-    const fData = fillImgData.data;
-
-    const fillColor = brushSettings.color;
-
-    for (let i = 0; i < w * h; i++) {
-      if (fillMask[i] > 0) {
-        const px = i % w;
-        const py = Math.floor(i / w);
-        if (px < minX) minX = px;
-        if (px > maxX) maxX = px;
-        if (py < minY) minY = py;
-        if (py > maxY) maxY = py;
-
-        const p = i * 4;
-        let alpha = Math.round((fillColor.a * fillMask[i]) / 255);
-        if (selectionMaskData) {
-          alpha = Math.round((alpha * selectionMaskData[p + 3]) / 255);
-        }
-        fData[p] = fillColor.r;
-        fData[p + 1] = fillColor.g;
-        fData[p + 2] = fillColor.b;
-        fData[p + 3] = alpha;
-      }
-    }
-
-    if (maxX >= minX && maxY >= minY) {
-      fctx.putImageData(fillImgData, 0, 0);
-
-      const layerFlat = layer.tileGrid.compositeToFlatCanvas();
-      const lctx = layerFlat.getContext('2d')!;
-
-      lctx.save();
-      lctx.globalCompositeOperation = getCanvasCompositeOperation(brushSettings.blendMode || 'SrcOver');
-      lctx.drawImage(fillCanvas, 0, 0);
-      lctx.restore();
-
-      const dirtyRect: SKRectI = {
-        left: minX,
-        top: minY,
-        right: maxX + 1,
-        bottom: maxY + 1,
-        width: maxX - minX + 1,
-        height: maxY - minY + 1,
-      };
-
-      const affectedTiles = layer.tileGrid.getTilesIntersectingRect(dirtyRect);
-      for (const tile of affectedTiles) {
-        tile.ctx.clearRect(0, 0, tile.width, tile.height);
-        tile.ctx.drawImage(
-          layerFlat,
-          tile.pixelX, tile.pixelY, tile.width, tile.height,
-          0, 0, tile.width, tile.height
-        );
-        tile.hasContent = true;
-        tile.isDirty = true;
-      }
-    }
-
-    layer.updateThumbnail();
-    this.markAllLayersDirty();
+    this.bucketParams = {
+      tol: selectionSettings.tolerance ?? 15,
+      global: (selectionSettings.wandMode || 'contiguous') === 'global',
+      sampleSource: selectionSettings.sampleSource,
+      aa: !!brushSettings.antiAliasing,
+      blend: brushSettings.blendMode || 'SrcOver',
+      color: { ...brushSettings.color },
+    };
+    this.submitBucket();
+    this.onAsyncUpdate?.();
     return true;
   }
 
-  public commitPaintBucketSession(): void {
-    if (this.bucketInitialTilesSnapshot && this.bucketInitialLayerIndex >= 0) {
-      const layer = this.layers[this.bucketInitialLayerIndex];
-      if (layer) {
-        const tilesAfter = layer.tileGrid.getTilesSnapshot();
-        this.pushTileAction({
-          type: 'tiles',
-          description: 'Wypełnienie wiaderkiem',
-          layerIndex: this.bucketInitialLayerIndex,
-          before: this.bucketInitialTilesSnapshot,
-          after: tilesAfter,
-        });
-      }
+  private bucketSeedPixel(): { sx: number; sy: number } {
+    const sp = this.bucketSeedPoint!;
+    return {
+      sx: Math.max(0, Math.min(this.width - 1, Math.floor(sp.x))),
+      sy: Math.max(0, Math.min(this.height - 1, Math.floor(sp.y))),
+    };
+  }
+
+  private submitBucket(): void {
+    const prm = this.bucketParams;
+    if (!prm || !this.bucketSeedPoint) return;
+    const { sx, sy } = this.bucketSeedPixel();
+    const sample = this.ensureWorkerSample(prm.sampleSource);
+    const selKey = this.selectionManager.hasActiveSelection ? this.ensureWorkerSelection() : null;
+    const geomKey = `${sx},${sy}|${prm.tol}|${prm.global}|${prm.aa}|${sample.key}|${selKey}`;
+    // Zmiana samego koloru lub trybu mieszania nie zmienia obszaru: wystarczy odświeżyć podgląd
+    if (geomKey === this.bucketGeomKey) {
+      this.bucketJob = null;
+      return;
     }
-    this.bucketInitialTilesSnapshot = null;
+    const client = this.getFillClient();
+    const id = client.nextId();
+    this.bucketJob = { id };
+    this.bucketGeomKey = geomKey;
+    client
+      .bucket({ id, key: sample.key, selKey, sx, sy, tol: prm.tol, global: prm.global, aa: prm.aa })
+      .then((r) => {
+        if (!this.bucketJob || this.bucketJob.id !== r.id) return; // wyprzedzone nowszym zadaniem
+        if (r.status === 'ok' && r.kind === 'bucket') {
+          this.bucketJob = null;
+          this.setBucketResult(r.res);
+          this.onAsyncUpdate?.();
+        } else {
+          this.flushBucketSync();
+          this.onAsyncUpdate?.();
+        }
+      });
+  }
+
+  private setBucketResult(res: BucketAlpha | null): void {
+    this.bucketPreview = res
+      ? { x: res.x, y: res.y, w: res.w, h: res.h, alpha: res.alpha, seq: ++this.bucketSeq, tinted: null, tintKey: '' }
+      : null;
+  }
+
+  /** Liczy wypełnienie wiadra od razu w głównym wątku (zatwierdzenie przed końcem liczenia w tle albo awaria wątku). */
+  private flushBucketSync(): void {
+    const prm = this.bucketParams;
+    this.bucketJob = null;
+    if (!prm || !this.bucketSeedPoint) return;
+    const { sx, sy } = this.bucketSeedPixel();
+    const sample = this.getSampleWithData(prm.sampleSource, true);
+    const allow = this.selectionManager.hasActiveSelection ? this.selectionAlphaPlane() : null;
+    const flood = floodSelect(sample.data.data, this.width, this.height, sx, sy, prm.tol, prm.global, allow);
+    this.setBucketResult(bucketAlphaOfFlood(flood, sample.data.data, this.width, sx, sy, prm.tol, prm.aa));
+  }
+
+  /** Gotowe wypełnienie wiadra do narysowania przez renderer kafelków (kolor i tryb mieszania z bieżących parametrów). */
+  public getBucketPreview(): {
+    canvas: HTMLCanvasElement;
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    blendMode: SKBlendMode;
+    key: string;
+  } | null {
+    const pv = this.bucketPreview;
+    const prm = this.bucketParams;
+    if (!pv || !prm || !this.bucketSeedPoint) return null;
+    const c = prm.color;
+    const tintKey = `${c.r},${c.g},${c.b},${c.a}`;
+    if (!pv.tinted || pv.tintKey !== tintKey) {
+      const canvas = pv.tinted ?? document.createElement('canvas');
+      if (canvas.width !== pv.w || canvas.height !== pv.h) {
+        canvas.width = pv.w;
+        canvas.height = pv.h;
+      }
+      const ctx = canvas.getContext('2d')!;
+      const img = ctx.createImageData(pv.w, pv.h);
+      const px = new Uint32Array(img.data.buffer);
+      const little = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1;
+      const lut = new Uint32Array(256);
+      for (let a = 1; a < 256; a++) {
+        const al = Math.round((c.a * a) / 255);
+        lut[a] = little ? ((al << 24) | (c.b << 16) | (c.g << 8) | c.r) >>> 0 : ((c.r << 24) | (c.g << 16) | (c.b << 8) | al) >>> 0;
+      }
+      const src = pv.alpha;
+      for (let i = 0; i < src.length; i++) {
+        const a = src[i];
+        if (a !== 0) px[i] = lut[a];
+      }
+      ctx.putImageData(img, 0, 0);
+      pv.tinted = canvas;
+      pv.tintKey = tintKey;
+    }
+    return { canvas: pv.tinted, x: pv.x, y: pv.y, w: pv.w, h: pv.h, blendMode: prm.blend, key: `bk${pv.seq}|${tintKey}|${prm.blend}` };
+  }
+
+  private resetBucketSession(): void {
+    if (this.bucketPreview?.tinted) this.bucketPreview.tinted.width = 0;
+    this.bucketPreview = null;
+    this.bucketParams = null;
+    this.bucketJob = null;
+    this.bucketGeomKey = null;
     this.bucketInitialLayerIndex = -1;
     this.bucketSeedPoint = null;
     this.bucketColorSource = 'primary';
+  }
+
+  /** Anuluje wiadro bez zmiany pikseli (Esc). */
+  public cancelPaintBucketSession(): void {
+    this.resetBucketSession();
+  }
+
+  public commitPaintBucketSession(): void {
+    if (this.bucketJob) this.flushBucketSync();
+    const pv = this.getBucketPreview();
+    const layerIndex = this.bucketInitialLayerIndex;
+    const layer = layerIndex >= 0 ? this.layers[layerIndex] : undefined;
+    if (pv && layer && layer.visible) {
+      const rect: SKRectI = { left: pv.x, top: pv.y, right: pv.x + pv.w, bottom: pv.y + pv.h, width: pv.w, height: pv.h };
+      const before = layer.tileGrid.getTilesSnapshot(rect);
+      const hasSel = this.selectionManager.hasActiveSelection;
+      const mask = hasSel ? this.selectionManager.maskCanvas : null;
+      const blendOp = getCanvasCompositeOperation(pv.blendMode);
+      const scratch = document.createElement('canvas');
+      for (const tile of layer.tileGrid.getTilesIntersectingRect(rect)) {
+        if (tile.width <= 0 || tile.height <= 0) continue;
+        if (scratch.width !== tile.width || scratch.height !== tile.height) {
+          scratch.width = tile.width;
+          scratch.height = tile.height;
+        }
+        const g = scratch.getContext('2d')!;
+        g.globalCompositeOperation = 'source-over';
+        g.clearRect(0, 0, tile.width, tile.height);
+        g.drawImage(pv.canvas, pv.x - tile.pixelX, pv.y - tile.pixelY);
+        if (mask) {
+          g.globalCompositeOperation = 'destination-in';
+          g.drawImage(mask, tile.pixelX, tile.pixelY, tile.width, tile.height, 0, 0, tile.width, tile.height);
+          g.globalCompositeOperation = 'source-over';
+        }
+        tile.ctx.save();
+        tile.ctx.globalCompositeOperation = blendOp;
+        tile.ctx.drawImage(scratch, 0, 0);
+        tile.ctx.restore();
+        tile.hasContent = true;
+        tile.isDirty = true;
+      }
+      const after = layer.tileGrid.getTilesSnapshot(rect);
+      this.pushTileAction({ type: 'tiles', description: 'Wypełnienie wiaderkiem', layerIndex, before, after });
+      layer.updateThumbnail();
+      this.markAllLayersDirty();
+    }
+    this.resetBucketSession();
   }
 
   // --- INTERAKTYWNE WYPEŁNIENIE GRADIENTOWE (GRADIENT FILL) ---
@@ -1370,6 +1797,11 @@ export class GraphicEngine {
 
     const layer = this.getActiveLayer();
     if (!layer || !layer.visible) return false;
+    // Połączona maska: warstwa przekształca się jako całość (piksele + maska), więc celem jest zawsze siatka pikseli
+    if (layer.maskGrid && layer.maskLinked && layer.editMask) {
+      if (this.maskView === layer) this.maskView = null;
+      layer.editMask = false;
+    }
 
     const bounds = this.selectionManager.getSelectionBounds();
     if (!bounds) return false;
@@ -1409,6 +1841,48 @@ export class GraphicEngine {
     );
     sctx.globalCompositeOperation = 'source-over';
 
+    const srcMaskCanvas = document.createElement('canvas');
+    srcMaskCanvas.width = bounds.width;
+    srcMaskCanvas.height = bounds.height;
+    srcMaskCanvas.getContext('2d')!.drawImage(
+      cleanCutMask,
+      bounds.left, bounds.top, bounds.width, bounds.height,
+      0, 0, bounds.width, bounds.height
+    );
+
+    // 2b. Połączona maska: druga siatka (maska / piksele) przesuwa się razem z pierwszą
+    let other: TransformContentSession['other'] = null;
+    if (layer.maskGrid && layer.maskLinked) {
+      const og = layer.editMask ? layer.pixelGrid : layer.maskGrid;
+      const oc = document.createElement('canvas');
+      oc.width = bounds.width;
+      oc.height = bounds.height;
+      const octx = oc.getContext('2d')!;
+      og.drawCroppedToContext(octx, bounds.left, bounds.top, bounds.width, bounds.height);
+      octx.globalCompositeOperation = 'destination-in';
+      octx.drawImage(cleanCutMask, bounds.left, bounds.top, bounds.width, bounds.height, 0, 0, bounds.width, bounds.height);
+      octx.globalCompositeOperation = 'source-over';
+      other = { grid: og, content: oc, cutMask: cleanCutMask, before: og.getTilesSnapshot() };
+    }
+    let previewCanvas: HTMLCanvasElement | null = null;
+    if (other && layer.maskEnabled) {
+      // pływające piksele widać przez poruszaną razem z nimi maskę
+      previewCanvas = document.createElement('canvas');
+      previewCanvas.width = sourceContentCanvas.width;
+      previewCanvas.height = sourceContentCanvas.height;
+      const pctx = previewCanvas.getContext('2d', { willReadFrequently: true })!;
+      pctx.drawImage(sourceContentCanvas, 0, 0);
+      const mimg = other.content.getContext('2d', { willReadFrequently: true })!.getImageData(0, 0, other.content.width, other.content.height);
+      grayToAlpha(mimg.data);
+      const mtmp = document.createElement('canvas');
+      mtmp.width = other.content.width;
+      mtmp.height = other.content.height;
+      mtmp.getContext('2d')!.putImageData(mimg, 0, 0);
+      pctx.globalCompositeOperation = 'destination-in';
+      pctx.drawImage(mtmp, 0, 0);
+      pctx.globalCompositeOperation = 'source-over';
+    }
+
     // 3. Wyczyść wycięty fragment na aktywnej warstwie (otwór pod pływającą zawartością)
     layer.clear(cleanCutMask);
 
@@ -1422,10 +1896,196 @@ export class GraphicEngine {
       initialTilesSnapshot,
       initialSelectionSnapshot,
       interpolation,
+      other,
+      previewCanvas,
+      srcMask: srcMaskCanvas,
     };
 
     this.markAllLayersDirty();
     return true;
+  }
+
+  // --- TRYB PERSPEKTYWY (narzędzie manipulacji zawartością) ---
+
+  public get perspectiveActive(): boolean {
+    return !!this.transformContentSession?.persp;
+  }
+
+  public getPerspectiveQuad(): Quad | null {
+    return this.transformContentSession?.persp?.quad ?? null;
+  }
+
+  /** Czworokąt odpowiadający aktualnej ramce (pozycja, kąt, rozmiar, odbicia) przekształcenia. */
+  private quadFromTransformState(): Quad | null {
+    const st = this.selectionManager.transformState;
+    if (!st) return null;
+    const cos = Math.cos(st.angle);
+    const sin = Math.sin(st.angle);
+    const fx = st.flipX ? -1 : 1;
+    const fy = st.flipY ? -1 : 1;
+    const corner = (u: number, v: number) => {
+      const lx = (u - 0.5) * st.width * fx;
+      const ly = (v - 0.5) * st.height * fy;
+      return { x: st.pos.x + lx * cos - ly * sin, y: st.pos.y + lx * sin + ly * cos };
+    };
+    return [corner(0, 0), corner(1, 0), corner(1, 1), corner(0, 1)];
+  }
+
+  public enterPerspective(): boolean {
+    const sess = this.transformContentSession;
+    if (!sess || sess.persp) return !!sess;
+    const q = this.quadFromTransformState();
+    if (!q) return false;
+    if (!sess.srcMask) {
+      const m = document.createElement('canvas');
+      m.width = sess.sourceContentCanvas.width;
+      m.height = sess.sourceContentCanvas.height;
+      const mc = m.getContext('2d')!;
+      mc.fillStyle = '#fff';
+      mc.fillRect(0, 0, m.width, m.height);
+      sess.srcMask = m;
+    }
+    sess.persp = { quad: q.map((p) => ({ ...p })) as Quad, quad0: q.map((p) => ({ ...p })) as Quad, changed: false };
+    this.markAllLayersDirty();
+    return true;
+  }
+
+  /** Ustawia nowy czworokąt (odrzuca niewypukły) i przelicza maskę zaznaczenia. */
+  public setPerspectiveQuad(q: Quad): boolean {
+    const sess = this.transformContentSession;
+    if (!sess?.persp || !sess.srcMask) return false;
+    if (!isConvexQuad(q)) return false;
+    sess.persp.quad = q.map((p) => ({ x: p.x, y: p.y })) as Quad;
+    sess.persp.changed = true;
+    const mask = sess.srcMask;
+    const quad = sess.persp.quad;
+    this.selectionManager.replaceMaskRaster((ctx) => {
+      ctx.imageSmoothingEnabled = false;
+      drawPerspectiveMesh(ctx, mask, mask.width, mask.height, quad);
+    });
+    this.markAllLayersDirty();
+    return true;
+  }
+
+  private buildMaskedPreview(content: HTMLCanvasElement, maskContent: HTMLCanvasElement): HTMLCanvasElement {
+    const pc = document.createElement('canvas');
+    pc.width = content.width;
+    pc.height = content.height;
+    const pctx = pc.getContext('2d', { willReadFrequently: true })!;
+    pctx.drawImage(content, 0, 0);
+    const mimg = maskContent.getContext('2d', { willReadFrequently: true })!.getImageData(0, 0, maskContent.width, maskContent.height);
+    grayToAlpha(mimg.data);
+    const mtmp = document.createElement('canvas');
+    mtmp.width = maskContent.width;
+    mtmp.height = maskContent.height;
+    mtmp.getContext('2d')!.putImageData(mimg, 0, 0);
+    pctx.globalCompositeOperation = 'destination-in';
+    pctx.drawImage(mtmp, 0, 0);
+    pctx.globalCompositeOperation = 'source-over';
+    return pc;
+  }
+
+  /**
+   * Wychodzi z trybu perspektywy: zawartość (i maska zaznaczenia) zostają przeliczone dokładnie piksel po pikselu
+   * i stają się nowym źródłem zwykłej ramki manipulacji.
+   */
+  public exitPerspective(): boolean {
+    const sess = this.transformContentSession;
+    if (!sess?.persp) return false;
+    const persp = sess.persp;
+    const sm = this.selectionManager;
+
+    if (!persp.changed) {
+      sess.persp = null;
+      sm.updateTransformSelection({});
+      this.markAllLayersDirty();
+      return true;
+    }
+
+    const nearest = sess.interpolation === 'nearest-neighbor';
+    const quad = persp.quad;
+    const wc = warpPerspectiveExact(sess.sourceContentCanvas, quad, this.width, this.height, nearest);
+    const wmRaw = sess.srcMask ? warpPerspectiveExact(sess.srcMask, quad, this.width, this.height, true) : null;
+    const wo = sess.other ? warpPerspectiveExact(sess.other.content, quad, this.width, this.height, nearest) : null;
+    if (!wc || !wmRaw) {
+      sess.persp = null;
+      sm.updateTransformSelection({});
+      this.markAllLayersDirty();
+      return false;
+    }
+    // maska binarna
+    const mctx = wmRaw.canvas.getContext('2d', { willReadFrequently: true })!;
+    const mimg = mctx.getImageData(0, 0, wmRaw.canvas.width, wmRaw.canvas.height);
+    for (let i = 3; i < mimg.data.length; i += 4) {
+      mimg.data[i] = mimg.data[i] >= 128 ? 255 : 0;
+      if (mimg.data[i]) {
+        mimg.data[i - 3] = 255;
+        mimg.data[i - 2] = 255;
+        mimg.data[i - 1] = 255;
+      }
+    }
+    mctx.putImageData(mimg, 0, 0);
+    const wm: WarpResult = wmRaw;
+
+    sm.replaceMaskRaster((ctx) => {
+      ctx.drawImage(wm.canvas, wm.left, wm.top);
+    });
+    sm.commitTransformSelection();
+    const st = sm.beginTransformSelection();
+    if (!st) {
+      sess.persp = null;
+      this.markAllLayersDirty();
+      return false;
+    }
+    const b = st.initialBounds;
+    const crop = (w: WarpResult): HTMLCanvasElement => {
+      const c = document.createElement('canvas');
+      c.width = b.width;
+      c.height = b.height;
+      c.getContext('2d')!.drawImage(w.canvas, w.left - b.left, w.top - b.top);
+      return c;
+    };
+    sess.sourceContentCanvas = crop(wc);
+    sess.srcMask = crop(wm);
+    if (sess.other && wo) {
+      sess.other.content = crop(wo);
+      sess.previewCanvas = this.getActiveLayer()?.maskEnabled ? this.buildMaskedPreview(sess.sourceContentCanvas, sess.other.content) : null;
+    }
+    sess.sourceBounds = b;
+    sess.persp = null;
+    this.markAllLayersDirty();
+    return true;
+  }
+
+  /** Renderuje przekształcony (przesunięty / przeskalowany / obrócony) fragment do płótna dokumentu, przycięty do maski zaznaczenia. */
+  private renderTransformedContent(src: HTMLCanvasElement, interpolation: InterpolationMode): HTMLCanvasElement {
+    const st = this.selectionManager.transformState!;
+    const tempCanvas = document.createElement('canvas');
+    tempCanvas.width = this.width;
+    tempCanvas.height = this.height;
+    const tctx = tempCanvas.getContext('2d')!;
+    tctx.save();
+    tctx.translate(st.pos.x, st.pos.y);
+    tctx.rotate(st.angle);
+    const sx = (st.width / Math.max(1, st.initialBounds.width)) * (st.flipX ? -1 : 1);
+    const sy = (st.height / Math.max(1, st.initialBounds.height)) * (st.flipY ? -1 : 1);
+    tctx.scale(sx, sy);
+    if (interpolation === 'nearest-neighbor') {
+      tctx.imageSmoothingEnabled = false;
+    } else if (interpolation === 'bilinear') {
+      tctx.imageSmoothingEnabled = true;
+      tctx.imageSmoothingQuality = 'medium';
+    } else {
+      tctx.imageSmoothingEnabled = true;
+      tctx.imageSmoothingQuality = 'high';
+    }
+    tctx.drawImage(src, -st.initialBounds.width / 2, -st.initialBounds.height / 2);
+    tctx.restore();
+    tctx.save();
+    tctx.globalCompositeOperation = 'destination-in';
+    tctx.drawImage(this.selectionManager.maskCanvas, 0, 0);
+    tctx.restore();
+    return tempCanvas;
   }
 
   public updateTransformContentInterpolation(interpolation: InterpolationMode): void {
@@ -1436,6 +2096,7 @@ export class GraphicEngine {
   }
 
   public commitTransformContent(): boolean {
+    if (this.transformContentSession?.persp) this.exitPerspective();
     if (!this.transformContentSession || !this.selectionManager.transformState) {
       this.transformContentSession = null;
       return false;
@@ -1498,6 +2159,42 @@ export class GraphicEngine {
           tile.isDirty = true;
         }
       }
+      let otherHist: { before: TileSnapshotLike[]; after: TileSnapshotLike[] } | undefined;
+      if (sess.other) {
+        const o = sess.other;
+        const moved = this.renderTransformedContent(o.content, sess.interpolation);
+        const vacatedIsMask = o.grid === layer.maskGrid;
+        for (const row of o.grid.tiles) {
+          for (const tile of row) {
+            // miejsce po przesuniętym fragmencie: w masce biel (widoczne), w pikselach przezroczystość
+            tile.ctx.save();
+            tile.ctx.globalCompositeOperation = 'destination-out';
+            tile.ctx.drawImage(o.cutMask, tile.pixelX, tile.pixelY, tile.width, tile.height, 0, 0, tile.width, tile.height);
+            tile.ctx.restore();
+            if (vacatedIsMask) {
+              tile.ctx.save();
+              tile.ctx.globalCompositeOperation = 'destination-over';
+              tile.ctx.fillStyle = '#ffffff';
+              // biel tylko pod wyciętym obszarem (maska wycinania jako kształt)
+              const t2 = document.createElement('canvas');
+              t2.width = tile.width;
+              t2.height = tile.height;
+              const c2 = t2.getContext('2d')!;
+              c2.drawImage(o.cutMask, tile.pixelX, tile.pixelY, tile.width, tile.height, 0, 0, tile.width, tile.height);
+              c2.globalCompositeOperation = 'source-in';
+              c2.fillStyle = '#ffffff';
+              c2.fillRect(0, 0, tile.width, tile.height);
+              tile.ctx.globalCompositeOperation = 'source-over';
+              tile.ctx.drawImage(t2, 0, 0);
+              tile.ctx.restore();
+            }
+            tile.ctx.drawImage(moved, tile.pixelX, tile.pixelY, tile.width, tile.height, 0, 0, tile.width, tile.height);
+            tile.hasContent = true;
+            tile.isDirty = true;
+          }
+        }
+        otherHist = { before: o.before, after: o.grid.getTilesSnapshot() };
+      }
       layer.updateThumbnail();
 
       const tilesAfter = layer.tileGrid.getTilesSnapshot();
@@ -1507,6 +2204,7 @@ export class GraphicEngine {
         type: 'transformContent',
         description: 'Przekształcenie zawartości',
         layerIndex: sess.sourceLayerIndex,
+        other: otherHist,
         tilesBefore: sess.initialTilesSnapshot,
         tilesAfter,
         selectionBefore: sess.initialSelectionSnapshot,
@@ -1544,7 +2242,38 @@ export class GraphicEngine {
 
   // --- SZYBKI PIPELINE KOMPOZYCJI Z DIRTY-RECT ---
 
+  /** Wywoływane po każdej kompozycji do płótna widoku (dirty = zmieniony fragment dokumentu albo null = całość). */
+  public onViewportComposited: ((target: HTMLCanvasElement, dirty: SKRectI | null) => void) | null = null;
+
   public compositeToViewport(
+    targetCanvas: HTMLCanvasElement,
+    dirtyRect?: SKRectI | null,
+    previewPointA?: SKPoint | null,
+    previewPointB?: SKPoint | null,
+    previewShapeType?: string | null,
+    previewBrushSettings?: BrushSettings | null,
+    customPreviewRenderer?: ((ctx: CanvasRenderingContext2D) => void) | null,
+    customPreviewBlendMode?: SKBlendMode | null
+  ): void {
+    const wasResized = targetCanvas.width !== this.width || targetCanvas.height !== this.height;
+    this.compositeToViewportImpl(
+      targetCanvas,
+      dirtyRect,
+      previewPointA,
+      previewPointB,
+      previewShapeType,
+      previewBrushSettings,
+      customPreviewRenderer,
+      customPreviewBlendMode
+    );
+    const hook = this.onViewportComposited;
+    if (hook) {
+      const partial = !wasResized && !customPreviewRenderer && !!dirtyRect && dirtyRect.width > 0 && dirtyRect.height > 0;
+      hook(targetCanvas, partial ? dirtyRect! : null);
+    }
+  }
+
+  private compositeToViewportImpl(
     targetCanvas: HTMLCanvasElement,
     dirtyRect?: SKRectI | null,
     previewPointA?: SKPoint | null,
@@ -1586,21 +2315,24 @@ export class GraphicEngine {
 
         ctx.clearRect(clipLeft, clipTop, clipW, clipH);
 
-        for (let i = 0; i < this.layers.length; i++) {
-          const layer = this.layers[i];
+        const rLayers = this.renderLayers;
+        const rActive = this.renderActiveIndex;
+        for (let i = 0; i < rLayers.length; i++) {
+          const layer = rLayers[i];
           if (!layer.visible || layer.opacity <= 0) continue;
 
-          const affectedTiles = layer.tileGrid.getTilesIntersectingRect(dirtyRect);
+          const affectedTiles = layer.pixelGrid.getTilesIntersectingRect(dirtyRect);
           if (affectedTiles.length === 0) continue;
 
-          if (i !== this.activeLayerIndex || !isDrawingLive) {
+          if (i !== rActive || !isDrawingLive) {
             ctx.save();
             ctx.globalAlpha = layer.opacity;
             ctx.globalCompositeOperation = getCanvasCompositeOperation(layer.blendMode);
 
             for (const tile of affectedTiles) {
-              if (tile.hasContent) {
-                ctx.drawImage(tile.canvas, tile.pixelX, tile.pixelY);
+              if (tile.hasContent || layer.grayView) {
+                const rc = layer.renderCanvas(tile);
+                if (rc) ctx.drawImage(rc, tile.pixelX, tile.pixelY);
               }
             }
             ctx.restore();
@@ -1609,8 +2341,9 @@ export class GraphicEngine {
             const { canvas: scratch, ctx: sctx } = this.getDirtyScratch(clipW, clipH);
             sctx.clearRect(0, 0, clipW, clipH);
 
-            // 1. Narysuj oryginalne kafelki aktywnej warstwy
-            for (const tile of affectedTiles) {
+            // 1. Narysuj oryginalne kafelki celu edycji aktywnej warstwy (piksele albo maska)
+            const editTiles = layer.tileGrid === layer.pixelGrid ? affectedTiles : layer.tileGrid.getTilesIntersectingRect(dirtyRect);
+            for (const tile of editTiles) {
               if (tile.hasContent) {
                 sctx.drawImage(tile.canvas, tile.pixelX - clipLeft, tile.pixelY - clipTop);
               }
@@ -1635,10 +2368,10 @@ export class GraphicEngine {
               );
               sctx.restore();
             } else {
-              const brushScratch = document.createElement('canvas');
-              brushScratch.width = clipW;
-              brushScratch.height = clipH;
-              const bsCtx = brushScratch.getContext('2d')!;
+              // Bufor wielokrotnego użytku (alokacja płótna na każde pociągnięcie powodowała zacięcia przy zaznaczeniu)
+              const { canvas: brushScratch, ctx: bsCtx } = this.getBrushMaskScratch(clipW, clipH);
+              bsCtx.globalCompositeOperation = 'source-over';
+              bsCtx.clearRect(0, 0, clipW, clipH);
 
               bsCtx.drawImage(
                 this.brushEngine.strokeCanvas,
@@ -1655,15 +2388,22 @@ export class GraphicEngine {
               sctx.save();
               sctx.globalAlpha = brushAlpha;
               sctx.globalCompositeOperation = getCanvasCompositeOperation(brushBlend);
-              sctx.drawImage(brushScratch, 0, 0);
+              sctx.drawImage(brushScratch, 0, 0, clipW, clipH, 0, 0, clipW, clipH);
               sctx.restore();
             }
 
-            // 3. Połącz aktywną warstwę z płótnem dokumentu
+            // 3. Połącz aktywną warstwę z płótnem dokumentu (przy edycji maski: piksele warstwy zamaskowane podglądem maski)
+            const liveSrc = this.brushEngine.stampDualCanvas && layer.maskGrid && !layer.grayView
+              ? this.composeLinkedStampLive(layer, clipLeft, clipTop, clipW, clipH)
+              : layer.editMask && layer.maskGrid && layer !== null && !layer.grayView
+              ? layer.composeWithMaskRegion(scratch, clipLeft, clipTop, clipW, clipH)
+              : (layer.maskGrid && !layer.editMask && !layer.grayView
+                ? layer.applyMaskToRegion(scratch, clipLeft, clipTop, clipW, clipH)
+                : scratch);
             ctx.save();
             ctx.globalAlpha = layer.opacity;
             ctx.globalCompositeOperation = getCanvasCompositeOperation(layer.blendMode);
-            ctx.drawImage(scratch, 0, 0, clipW, clipH, clipLeft, clipTop, clipW, clipH);
+            ctx.drawImage(liveSrc, 0, 0, clipW, clipH, clipLeft, clipTop, clipW, clipH);
             ctx.restore();
           }
         }
@@ -1678,18 +2418,20 @@ export class GraphicEngine {
     ctx.save();
     ctx.clearRect(0, 0, this.width, this.height);
 
-    for (let i = 0; i < this.layers.length; i++) {
-      const layer = this.layers[i];
+    const rLayersF = this.renderLayers;
+    const rActiveF = this.renderActiveIndex;
+    for (let i = 0; i < rLayersF.length; i++) {
+      const layer = rLayersF[i];
       if (!layer.visible || layer.opacity <= 0) continue;
 
-      const isLiveBrushActive = (i === this.activeLayerIndex && isDrawingLive && (!!this.brushEngine.activeBrushSettings || !!this.brushEngine.activeStampSettings));
-      const isCustomPreviewActive = (i === this.activeLayerIndex && !!customPreviewRenderer);
+      const isLiveBrushActive = (i === rActiveF && isDrawingLive && (!!this.brushEngine.activeBrushSettings || !!this.brushEngine.activeStampSettings));
+      const isCustomPreviewActive = (i === rActiveF && !!customPreviewRenderer);
 
       if (!isLiveBrushActive && !isCustomPreviewActive) {
         ctx.save();
         ctx.globalAlpha = layer.opacity;
         ctx.globalCompositeOperation = getCanvasCompositeOperation(layer.blendMode);
-        layer.tileGrid.drawToFlatContext(ctx);
+        layer.drawRenderedToContext(ctx);
         ctx.restore();
       } else if (isLiveBrushActive) {
         // Aktywna warstwa podczas aktywnego rysowania na żywo w pełnym przerysowaniu
@@ -1726,10 +2468,17 @@ export class GraphicEngine {
           afCtx.restore();
         }
 
+        const liveFlat = this.brushEngine.stampDualCanvas && layer.maskGrid && !layer.grayView
+          ? this.composeLinkedStampLive(layer, 0, 0, this.width, this.height)
+          : layer.editMask && layer.maskGrid && !layer.grayView
+          ? layer.composeWithMaskRegion(activeFlat, 0, 0, this.width, this.height)
+          : (layer.maskGrid && !layer.editMask && !layer.grayView
+            ? layer.applyMaskToRegion(activeFlat, 0, 0, this.width, this.height)
+            : activeFlat);
         ctx.save();
         ctx.globalAlpha = layer.opacity;
         ctx.globalCompositeOperation = getCanvasCompositeOperation(layer.blendMode);
-        ctx.drawImage(activeFlat, 0, 0);
+        ctx.drawImage(liveFlat, 0, 0);
         ctx.restore();
       } else if (isCustomPreviewActive) {
         // Aktywna warstwa podczas podglądu narzędzi wektorowych (linie, krzywe, figury)
@@ -1758,21 +2507,35 @@ export class GraphicEngine {
         afCtx.restore();
 
         // 4. Rysujemy aktywną warstwę z nałożonym kształtem na płótno dokumentu zgodnie z kryciem i trybem warstwy
+        const customFlat = layer.editMask && layer.maskGrid && !layer.grayView
+          ? layer.composeWithMaskRegion(activeFlat, 0, 0, this.width, this.height)
+          : activeFlat;
         ctx.save();
         ctx.globalAlpha = layer.opacity;
         ctx.globalCompositeOperation = getCanvasCompositeOperation(layer.blendMode);
-        ctx.drawImage(activeFlat, 0, 0);
+        ctx.drawImage(customFlat, 0, 0);
         ctx.restore();
       }
 
       // Pływająca zawartość podczas aktywnej sesji przekształcania zawartości (SZYBKIE HARDWARE-ACCELERATED RENDEROWANIE CROP TEXTURE)
       if (
+        !this.floatingContentExternal &&
         this.transformContentSession &&
-        this.transformContentSession.sourceLayerIndex === i &&
+        this.transformContentSession.sourceLayerIndex === this.realLayerIndex(i) &&
         this.selectionManager.transformState
       ) {
         const st = this.selectionManager.transformState;
         const sess = this.transformContentSession;
+
+        if (sess.persp) {
+          const img = sess.previewCanvas ?? sess.sourceContentCanvas;
+          ctx.save();
+          ctx.imageSmoothingEnabled = sess.interpolation !== 'nearest-neighbor';
+          ctx.imageSmoothingQuality = 'medium';
+          drawPerspectiveMesh(ctx, img, img.width, img.height, sess.persp.quad);
+          ctx.restore();
+          continue;
+        }
 
         ctx.save();
         ctx.translate(st.pos.x, st.pos.y);
@@ -1794,7 +2557,7 @@ export class GraphicEngine {
         }
 
         ctx.drawImage(
-          sess.sourceContentCanvas,
+          sess.previewCanvas ?? sess.sourceContentCanvas,
           -st.initialBounds.width / 2,
           -st.initialBounds.height / 2
         );
@@ -1851,13 +2614,8 @@ export class GraphicEngine {
     this.bakeCanvasToLayer(layer, tempCanvas, dirtyRect, 'Linia', settings.blendMode);
   }
 
-  public commitVectorBezier(
-    p0: SKPoint,
-    p1: SKPoint,
-    p2: SKPoint,
-    p3: SKPoint,
-    settings: LineAndCurveSettings
-  ): void {
+  public commitVectorPath(nodes: PenNode[], closed: boolean, settings: LineAndCurveSettings): void {
+    if (nodes.length < 2) return;
     const layer = this.getActiveLayer();
     if (!layer || !layer.visible) return;
 
@@ -1867,7 +2625,7 @@ export class GraphicEngine {
     const tctx = tempCanvas.getContext('2d');
     if (!tctx) return;
 
-    renderVectorBezier(tctx, p0, p1, p2, p3, { ...settings, blendMode: 'SrcOver' });
+    renderVectorPath(tctx, nodes, closed, { ...settings, blendMode: 'SrcOver' });
 
     if (this.selectionManager.hasActiveSelection) {
       tctx.save();
@@ -1876,11 +2634,12 @@ export class GraphicEngine {
       tctx.restore();
     }
 
+    const pts = penAllPoints(nodes);
     const pad = Math.max(20, settings.strokeWidth * (settings.markerSize || 1.0) * 4 + 20);
-    const minX = Math.max(0, Math.floor(Math.min(p0.x, p1.x, p2.x, p3.x) - pad));
-    const minY = Math.max(0, Math.floor(Math.min(p0.y, p1.y, p2.y, p3.y) - pad));
-    const maxX = Math.min(this.width, Math.ceil(Math.max(p0.x, p1.x, p2.x, p3.x) + pad));
-    const maxY = Math.min(this.height, Math.ceil(Math.max(p0.y, p1.y, p2.y, p3.y) + pad));
+    const minX = Math.max(0, Math.floor(Math.min(...pts.map((q) => q.x)) - pad));
+    const minY = Math.max(0, Math.floor(Math.min(...pts.map((q) => q.y)) - pad));
+    const maxX = Math.min(this.width, Math.ceil(Math.max(...pts.map((q) => q.x)) + pad));
+    const maxY = Math.min(this.height, Math.ceil(Math.max(...pts.map((q) => q.y)) + pad));
 
     const dirtyRect: SKRectI = {
       left: minX,
@@ -2145,6 +2904,50 @@ export class GraphicEngine {
     layer.updateThumbnail();
   }
 
+  /** Podgląd na żywo połączonego klonowania: piksele + maska z naniesionymi śladami pieczątki, maska zastosowana. */
+  private composeLinkedStampLive(layer: Layer, x: number, y: number, w: number, h: number): HTMLCanvasElement {
+    const be = this.brushEngine;
+    const pxStroke = layer.editMask ? be.stampDualCanvas! : be.strokeCanvas;
+    const mkStroke = layer.editMask ? be.strokeCanvas : be.stampDualCanvas!;
+    const alpha = be.activeStampAlpha;
+    const sel = this.selectionManager.hasActiveSelection ? this.selectionManager.maskCanvas : null;
+    const overlay = (ctx: CanvasRenderingContext2D, stroke: HTMLCanvasElement) => {
+      let src: HTMLCanvasElement = stroke;
+      if (sel) {
+        const t = document.createElement('canvas');
+        t.width = w; t.height = h;
+        const tc = t.getContext('2d')!;
+        tc.drawImage(stroke, x, y, w, h, 0, 0, w, h);
+        tc.globalCompositeOperation = 'destination-in';
+        tc.drawImage(sel, x, y, w, h, 0, 0, w, h);
+        src = t;
+        ctx.save(); ctx.globalAlpha = alpha; ctx.drawImage(src, 0, 0); ctx.restore();
+        return;
+      }
+      ctx.save(); ctx.globalAlpha = alpha; ctx.drawImage(src, x, y, w, h, 0, 0, w, h); ctx.restore();
+    };
+    const out = document.createElement('canvas');
+    out.width = w; out.height = h;
+    const octx = out.getContext('2d')!;
+    layer.pixelGrid.drawCroppedToContext(octx, x, y, w, h);
+    overlay(octx, pxStroke);
+    if (!layer.maskEnabled) return out;
+    const tmp = document.createElement('canvas');
+    tmp.width = w; tmp.height = h;
+    const tctx = tmp.getContext('2d', { willReadFrequently: true })!;
+    tctx.fillStyle = '#fff';
+    tctx.fillRect(0, 0, w, h);
+    layer.maskGrid!.drawCroppedToContext(tctx, x, y, w, h);
+    overlay(tctx, mkStroke);
+    const img = tctx.getImageData(0, 0, w, h);
+    grayToAlpha(img.data);
+    tctx.putImageData(img, 0, 0);
+    octx.globalCompositeOperation = 'destination-in';
+    octx.drawImage(tmp, 0, 0);
+    octx.globalCompositeOperation = 'source-over';
+    return out;
+  }
+
   public drawCroppedComposite(
     ctx: CanvasRenderingContext2D,
     cropX: number,
@@ -2155,9 +2958,13 @@ export class GraphicEngine {
   ): void {
     if (sampleSource === 'layer') {
       const layer = this.getActiveLayer();
-      if (layer && layer.visible && layer.opacity > 0) {
+      if (layer) {
+        // Źródło "warstwa" = aktualny cel edycji: surowe piksele warstwy (bez maski) albo maska w skali szarości
         ctx.save();
-        ctx.globalAlpha = layer.opacity;
+        if (layer.editMask && layer.maskGrid) {
+          ctx.fillStyle = '#fff'; // brakujące kafelki maski = w pełni widoczne
+          ctx.fillRect(0, 0, cropWidth, cropHeight);
+        }
         layer.tileGrid.drawCroppedToContext(ctx, cropX, cropY, cropWidth, cropHeight);
         ctx.restore();
       }
@@ -2167,7 +2974,7 @@ export class GraphicEngine {
         ctx.save();
         ctx.globalAlpha = layer.opacity;
         ctx.globalCompositeOperation = getCanvasCompositeOperation(layer.blendMode);
-        layer.tileGrid.drawCroppedToContext(ctx, cropX, cropY, cropWidth, cropHeight);
+        layer.drawRenderedCropped(ctx, cropX, cropY, cropWidth, cropHeight);
         ctx.restore();
       }
     }
@@ -2203,7 +3010,7 @@ export class GraphicEngine {
       if (layer && layer.visible && layer.opacity > 0) {
         ctx.save();
         ctx.globalAlpha = layer.opacity;
-        layer.tileGrid.drawCroppedToContext(ctx, minX, minY, cropW, cropH);
+        layer.drawRenderedCropped(ctx, minX, minY, cropW, cropH);
         ctx.restore();
       }
     } else {
@@ -2212,7 +3019,7 @@ export class GraphicEngine {
         ctx.save();
         ctx.globalAlpha = layer.opacity;
         ctx.globalCompositeOperation = getCanvasCompositeOperation(layer.blendMode);
-        layer.tileGrid.drawCroppedToContext(ctx, minX, minY, cropW, cropH);
+        layer.drawRenderedCropped(ctx, minX, minY, cropW, cropH);
         ctx.restore();
       }
     }
@@ -2304,7 +3111,7 @@ export class GraphicEngine {
       if (layer && layer.visible && layer.opacity > 0) {
         ctx.save();
         ctx.globalAlpha = layer.opacity;
-        layer.tileGrid.drawCroppedToContext(ctx, cropX, cropY, boxSize, boxSize);
+        layer.drawRenderedCropped(ctx, cropX, cropY, boxSize, boxSize);
         ctx.restore();
       }
     } else {
@@ -2313,7 +3120,7 @@ export class GraphicEngine {
         ctx.save();
         ctx.globalAlpha = layer.opacity;
         ctx.globalCompositeOperation = getCanvasCompositeOperation(layer.blendMode);
-        layer.tileGrid.drawCroppedToContext(ctx, cropX, cropY, boxSize, boxSize);
+        layer.drawRenderedCropped(ctx, cropX, cropY, boxSize, boxSize);
         ctx.restore();
       }
     }
@@ -2323,6 +3130,7 @@ export class GraphicEngine {
 
   public getCompositeFlatCanvas(): HTMLCanvasElement {
     if (this.gradientPreview) this.commitGradientSession();
+    if (this.bucketSeedPoint && !this.fillSampling) this.commitPaintBucketSession();
     const canvas = document.createElement('canvas');
     canvas.width = this.width;
     canvas.height = this.height;
@@ -2332,7 +3140,7 @@ export class GraphicEngine {
     for (const layer of this.layers) {
       if (!layer.visible || layer.opacity <= 0) continue;
 
-      const layerFlat = layer.tileGrid.compositeToFlatCanvas();
+      const layerFlat = layer.renderFlatCanvas();
       ctx.save();
       ctx.globalAlpha = layer.opacity;
       ctx.globalCompositeOperation = getCanvasCompositeOperation(layer.blendMode);
@@ -2345,6 +3153,7 @@ export class GraphicEngine {
 
   public saveToFigFile(): string {
     if (this.gradientPreview) this.commitGradientSession();
+    if (this.bucketSeedPoint) this.commitPaintBucketSession();
     const project: FiguraProjectFile = {
       format: 'FIGURA_PROJECT',
       version: '1.0',
@@ -2359,7 +3168,10 @@ export class GraphicEngine {
         visible: l.visible,
         opacity: l.opacity,
         blendMode: l.blendMode,
-        dataUrl: l.tileGrid.compositeToFlatCanvas().toDataURL('image/png'),
+        dataUrl: l.pixelGrid.compositeToFlatCanvas().toDataURL('image/png'),
+        maskDataUrl: l.maskGrid ? l.maskGrid.compositeToFlatCanvas().toDataURL('image/png') : undefined,
+        maskEnabled: l.maskGrid ? l.maskEnabled : undefined,
+        maskLinked: l.maskGrid ? l.maskLinked : undefined,
       })),
     };
     return JSON.stringify(project, null, 2);
@@ -2424,8 +3236,34 @@ export class GraphicEngine {
           });
         }
 
+        if (lData.maskDataUrl) {
+          await new Promise<void>((resolve) => {
+            const img = new Image();
+            img.onload = () => {
+              layer.createMask(null);
+              layer.editMask = false;
+              const mg = layer.maskGrid!;
+              for (const row of mg.tiles) {
+                for (const tile of row) {
+                  tile.ctx.clearRect(0, 0, tile.width, tile.height);
+                  tile.ctx.drawImage(img, tile.pixelX, tile.pixelY, tile.width, tile.height, 0, 0, tile.width, tile.height);
+                  tile.hasContent = true;
+                  tile.isDirty = true;
+                }
+              }
+              layer.maskEnabled = lData.maskEnabled !== false;
+              layer.maskLinked = lData.maskLinked !== false;
+              layer.updateThumbnail();
+              resolve();
+            };
+            img.onerror = () => resolve();
+            img.src = lData.maskDataUrl;
+          });
+        }
+
         loadedLayers.push(layer);
       }
+      this.maskView = null;
 
       this.layers = loadedLayers.length > 0 ? loadedLayers : this.layers;
       this.activeLayerIndex = Math.min(data.activeLayerIndex || 0, this.layers.length - 1);

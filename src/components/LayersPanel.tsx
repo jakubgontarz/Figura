@@ -5,15 +5,25 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 import {
-  Plus,
-  Minus,
-  Copy,
   ArrowDown,
   ArrowUp,
-  Merge,
+  Component,
+  Copy,
   Eye,
   EyeOff,
+  FilePlus,
+  Filter,
+  FolderPlus,
+  GitMerge,
+  Link2,
+  Link2Off,
   Lock,
+  PenTool,
+  SlidersHorizontal,
+  Sparkles,
+  Split,
+  SquareDashed,
+  Trash2,
   Unlock,
 } from 'lucide-react';
 import { Layer, subscribeThumbnails } from '../core/skia/Layer.ts';
@@ -35,7 +45,47 @@ interface LayersPanelProps {
   onChangeOpacity: (index: number, opacity: number, recordOldValue?: number) => void;
   onChangeBlendMode: (index: number, mode: SKBlendMode) => void;
   onRenameLayer: (index: number, newName: string) => void;
+  /** Wybór celu edycji: piksele warstwy albo jej maska. */
+  onSelectTarget: (index: number, target: 'pixels' | 'mask') => void;
+  /** Podgląd maski w skali szarości na płótnie (null = powrót do zwykłego widoku). */
+  onViewMask: (index: number | null) => void;
+  maskViewIndex: number | null;
+  onAddMask: () => void;
+  onApplyMask: () => void;
+  onToggleMaskEnabled: (index: number) => void;
+  onToggleMaskLink: (index: number) => void;
+  hasSelection: boolean;
 }
+
+const IconBtn: React.FC<{
+  title: string;
+  onClick?: () => void;
+  disabled?: boolean;
+  placeholder?: boolean;
+  danger?: boolean;
+  children: React.ReactNode;
+}> = ({ title, onClick, disabled, placeholder, danger, children }) => {
+  const inactive = disabled || placeholder;
+  return (
+    <button
+      type="button"
+      title={title}
+      onClick={placeholder || disabled ? undefined : onClick}
+      aria-disabled={inactive}
+      className={`w-6 h-5.5 flex items-center justify-center bg-[#282828] border border-[#3e3e3e] rounded transition-colors ${
+        disabled
+          ? 'opacity-40 cursor-default text-[#ccc]'
+          : placeholder
+            ? 'opacity-60 cursor-default text-[#999]'
+            : danger
+              ? 'hover:bg-[#4a2a2a] text-[#e8a0a0] hover:text-white cursor-pointer'
+              : 'hover:bg-[#383838] text-[#ccc] hover:text-white cursor-pointer'
+      }`}
+    >
+      {children}
+    </button>
+  );
+};
 
 export const LayersPanel: React.FC<LayersPanelProps> = ({
   layers,
@@ -53,6 +103,14 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
   onChangeOpacity,
   onChangeBlendMode,
   onRenameLayer,
+  onSelectTarget,
+  onViewMask,
+  maskViewIndex,
+  onAddMask,
+  onApplyMask,
+  onToggleMaskEnabled,
+  onToggleMaskLink,
+  hasSelection,
 }) => {
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [editingName, setEditingName] = useState('');
@@ -66,6 +124,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
   useEffect(() => subscribeThumbnails(() => setThumbTick((t) => t + 1)), []);
 
   const activeLayer = layers[activeLayerIndex] || layers[0];
+  const maskSelected = !!activeLayer?.hasMask && activeLayer.editMask;
 
   const handleStartRename = (index: number, currentName: string) => {
     setEditingIndex(index);
@@ -178,70 +237,32 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
         </div>
       </div>
 
-      {/* Pasek narzędzi warstw ([+] [-] [duplikuj] [scal] [▲] [▼]) */}
-      <div className="flex items-center justify-between gap-1 mb-1.5 shrink-0 w-full">
-        <button
-          type="button"
-          onClick={onAddLayer}
-          title="Dodaj nową warstwę"
-          className="w-6 h-5.5 flex items-center justify-center bg-[#282828] hover:bg-[#383838] border border-[#3e3e3e] rounded text-[#ccc] hover:text-white transition-colors cursor-pointer"
-        >
-          <Plus size={12} strokeWidth={2.5} />
-        </button>
-        <button
-          type="button"
+      {/* Górny pasek: operacje na aktywnej warstwie */}
+      <div className="flex items-center gap-1 mb-1.5 shrink-0 w-full">
+        <IconBtn title="Przesuń w górę" onClick={onMoveUp} disabled={activeLayerIndex >= layers.length - 1}>
+          <ArrowUp size={12} />
+        </IconBtn>
+        <IconBtn title="Przesuń w dół" onClick={onMoveDown} disabled={activeLayerIndex <= 0}>
+          <ArrowDown size={12} />
+        </IconBtn>
+        <IconBtn title="Duplikuj warstwę" onClick={onDuplicateLayer}>
+          <Copy size={12} />
+        </IconBtn>
+        <IconBtn title="Połącz w dół" onClick={onMergeDown} disabled={activeLayerIndex <= 0}>
+          <GitMerge size={12} />
+        </IconBtn>
+        <IconBtn title="Przekształć warstwę (rasteryzuj / obiekt inteligentny) - wkrótce" placeholder>
+          <Component size={12} />
+        </IconBtn>
+        <div className="flex-1" />
+        <IconBtn
+          title={maskSelected ? 'Usuń maskę (zaznaczona jest maska)' : activeLayer?.hasMask ? 'Usuń warstwę razem z maską' : 'Usuń warstwę'}
           onClick={onRemoveLayer}
-          disabled={layers.length <= 1}
-          title="Usuń warstwę"
-          className={`w-6 h-5.5 flex items-center justify-center bg-[#282828] border border-[#3e3e3e] rounded transition-colors ${
-            layers.length > 1 ? 'hover:bg-[#383838] text-[#ccc] hover:text-white cursor-pointer' : 'opacity-40 cursor-default'
-          }`}
+          disabled={layers.length <= 1 && !maskSelected}
+          danger
         >
-          <Minus size={12} strokeWidth={2.5} />
-        </button>
-        <button
-          type="button"
-          onClick={onDuplicateLayer}
-          title="Duplikuj warstwę"
-          className="w-6 h-5.5 flex items-center justify-center bg-[#282828] hover:bg-[#383838] border border-[#3e3e3e] rounded text-[#ccc] hover:text-white transition-colors cursor-pointer"
-        >
-          <Copy size={11} />
-        </button>
-        <button
-          type="button"
-          onClick={onMergeDown}
-          disabled={activeLayerIndex <= 0}
-          title="Scal warstwę w dół"
-          className={`w-6 h-5.5 flex items-center justify-center bg-[#282828] border border-[#3e3e3e] rounded transition-colors ${
-            activeLayerIndex > 0 ? 'hover:bg-[#383838] text-[#ccc] hover:text-white cursor-pointer' : 'opacity-40 cursor-default'
-          }`}
-        >
-          <Merge size={11} />
-        </button>
-        <button
-          type="button"
-          onClick={onMoveUp}
-          disabled={activeLayerIndex >= layers.length - 1}
-          title="Przesuń w górę"
-          className={`w-6 h-5.5 flex items-center justify-center bg-[#282828] border border-[#3e3e3e] rounded transition-colors ${
-            activeLayerIndex < layers.length - 1
-              ? 'hover:bg-[#383838] text-[#ccc] hover:text-white cursor-pointer'
-              : 'opacity-40 cursor-default'
-          }`}
-        >
-          <ArrowUp size={11} />
-        </button>
-        <button
-          type="button"
-          onClick={onMoveDown}
-          disabled={activeLayerIndex <= 0}
-          title="Przesuń w dół"
-          className={`w-6 h-5.5 flex items-center justify-center bg-[#282828] border border-[#3e3e3e] rounded transition-colors ${
-            activeLayerIndex > 0 ? 'hover:bg-[#383838] text-[#ccc] hover:text-white cursor-pointer' : 'opacity-40 cursor-default'
-          }`}
-        >
-          <ArrowDown size={11} />
-        </button>
+          <Trash2 size={12} />
+        </IconBtn>
       </div>
 
       {/* Lista Warstw z obsługą Przeciągnij i Upuść */}
@@ -267,8 +288,17 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
             >
               {/* Miniatura Warstwy po lewej z nakładką (Oko + Kłódka) */}
               <div
-                className="relative w-11 h-8 rounded-xs border border-[#444] overflow-hidden flex-shrink-0 shadow-inner group"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onSelectTarget(index, 'pixels');
+                }}
+                title={layer.hasMask ? 'Edytuj piksele warstwy (przywraca zwykły widok)' : undefined}
+                className={`relative rounded-xs border overflow-hidden flex-shrink-0 shadow-inner group ${
+                  isSelected && !layer.editMask && layer.hasMask ? 'border-[#00e5ff] ring-1 ring-[#00e5ff]' : 'border-[#444]'
+                }`}
                 style={{
+                  width: layer.thumbW + 2,
+                  height: layer.thumbH + 2,
                   backgroundImage: `repeating-conic-gradient(#e4e4e4 0% 25%, #ffffff 0% 50%)`,
                   backgroundSize: '8px 8px',
                 }}
@@ -325,6 +355,66 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                 </div>
               </div>
 
+              {/* Maska: przełącznik powiązania + miniatura maski */}
+              {layer.hasMask && (
+                <>
+                  <div
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onSelectTarget(index, 'mask');
+                    }}
+                    onDoubleClick={(e) => {
+                      e.stopPropagation();
+                      onViewMask(maskViewIndex === index ? null : index);
+                    }}
+                    title="Kliknij: edytuj maskę. Dwukrotne kliknięcie: pokaż maskę w skali szarości na płótnie"
+                    style={{ width: layer.thumbW + 2, height: layer.thumbH + 2 }}
+                    className={`relative rounded-xs border overflow-hidden flex-shrink-0 bg-black ${
+                      isSelected && layer.editMask ? 'border-[#00e5ff] ring-1 ring-[#00e5ff]' : 'border-[#444]'
+                    }`}
+                  >
+                    <img src={layer.getMaskThumbnailDataUrl() ?? ''} alt="" className="w-full h-full object-contain" />
+                    {maskViewIndex === index && (
+                      <span className="absolute top-0 right-0 bg-[#00e5ff] text-black text-[7px] font-bold px-0.5 leading-tight">
+                        MASKA
+                      </span>
+                    )}
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onToggleMaskEnabled(index);
+                      }}
+                      onDoubleClick={(e) => e.stopPropagation()}
+                      title={layer.maskEnabled ? 'Wyłącz maskę (pokaż warstwę bez maski)' : 'Włącz maskę'}
+                      className={`absolute bottom-0.5 left-0.5 p-0.5 rounded cursor-pointer ${
+                        layer.maskEnabled ? 'bg-black/60 hover:bg-black/80 text-white' : 'bg-black/85 text-[#ff6666]'
+                      }`}
+                    >
+                      {layer.maskEnabled ? <Eye size={10} strokeWidth={2.2} /> : <EyeOff size={10} strokeWidth={2.2} />}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onToggleMaskLink(index);
+                      }}
+                      onDoubleClick={(e) => e.stopPropagation()}
+                      title={
+                        layer.maskLinked
+                          ? 'Powiązana: przekształcenia zawartości zaznaczenia obejmują piksele i maskę (kliknij, aby rozłączyć)'
+                          : 'Rozłączona: przekształcenia dotyczą tylko edytowanego elementu (kliknij, aby powiązać)'
+                      }
+                      className={`absolute bottom-0.5 right-0.5 p-0.5 rounded cursor-pointer bg-black/60 hover:bg-black/80 ${
+                        layer.maskLinked ? 'text-[#9cdcfe]' : 'text-[#999]'
+                      }`}
+                    >
+                      {layer.maskLinked ? <Link2 size={10} strokeWidth={2.2} /> : <Link2Off size={10} strokeWidth={2.2} />}
+                    </button>
+                  </div>
+                </>
+              )}
+
               {/* Nazwa Warstwy */}
               <div className="flex-1 min-w-0">
                 {editingIndex === index ? (
@@ -363,6 +453,42 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
             </div>
           );
         })}
+      </div>
+
+
+      {/* Dolny pasek: tworzenie warstw i elementów warstwy */}
+      <div className="flex items-center gap-1 mt-1.5 shrink-0 w-full">
+        <IconBtn title="Nowa warstwa rastrowa" onClick={onAddLayer}>
+          <FilePlus size={12} />
+        </IconBtn>
+        <IconBtn title="Nowa warstwa wektorowa - wkrótce" placeholder>
+          <PenTool size={12} />
+        </IconBtn>
+        <IconBtn title="Nowa grupa / Grupuj - wkrótce" placeholder>
+          <FolderPlus size={12} />
+        </IconBtn>
+        <div className="w-px h-4 bg-[#3a3a3a] mx-0.5" />
+        {activeLayer?.hasMask ? (
+          <IconBtn title="Wypiecz maskę (wpieka ją w piksele warstwy i usuwa)" onClick={onApplyMask}>
+            <Split size={12} />
+          </IconBtn>
+        ) : (
+          <IconBtn
+            title={hasSelection ? 'Dodaj maskę z zaznaczenia (zaznaczone = widoczne)' : 'Dodaj maskę przezroczystości'}
+            onClick={onAddMask}
+          >
+            <SquareDashed size={12} />
+          </IconBtn>
+        )}
+        <IconBtn title="Dodaj stylizację - wkrótce" placeholder>
+          <Sparkles size={12} />
+        </IconBtn>
+        <IconBtn title="Dodaj korekcję - wkrótce" placeholder>
+          <SlidersHorizontal size={12} />
+        </IconBtn>
+        <IconBtn title="Dodaj filtr - wkrótce" placeholder>
+          <Filter size={12} />
+        </IconBtn>
       </div>
     </div>
   );

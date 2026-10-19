@@ -152,7 +152,7 @@ export const Toolbox: React.FC<ToolboxProps> = ({
     },
     {
       id: 'bezier',
-      name: 'Linia krzywa',
+      name: 'Krzywa',
       shortcut: 'P',
       icon: <Spline size={16} strokeWidth={2.2} />,
     },

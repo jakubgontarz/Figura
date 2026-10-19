@@ -142,7 +142,10 @@ export interface PipetteSettings {
   showLoupe: boolean;              // Okrągły obszar przybliżenia (lupa)
 }
 
+export type LassoMode = 'freehand' | 'polygon';
+
 export interface SelectionSettings {
+  lassoMode: LassoMode;            // Lasso: 'freehand' (jednym pociągnięciem) | 'polygon' (punkt po punkcie: klik = prosta, przeciągnięcie = odręcznie)
   mode: SelectionCombineMode;      // Tryb: Zastąp, Dodaj, Odejmij, Część wspólna, Odwróć
   constraint: SelectionConstraint; // Rozmiar: Dowolny, Stały stosunek, Stały rozmiar
   ratioW: number;                  // np. 16
@@ -176,7 +179,8 @@ export interface GradientSettings {
 
 export type StrokeDashStyle = 'solid' | 'dashed' | 'dotted' | 'dash-dot' | 'long-dash';
 
-export type MarkerType = 'none' | 'arrow' | 'stealth-arrow' | 'circle' | 'square' | 'diamond';
+/** 'none' = ostry (płaski) koniec; 'cap-round' = zaokrąglony; 'cap-square' = ścięty (wysunięty płasko o pół grubości). */
+export type MarkerType = 'none' | 'cap-round' | 'cap-square' | 'arrow' | 'stealth-arrow' | 'circle' | 'square' | 'diamond';
 
 export type ShapeKind =
   | 'rect'
@@ -194,6 +198,12 @@ export type ShapeFillMode = 'none' | 'primary' | 'stroke-and-fill';
 export type StrokeCornerJoin = 'miter' | 'round' | 'bevel';
 
 export type StrokeAlignment = 'center' | 'inside' | 'outside';
+
+/** Zakończenia linii (końce otwartej linii / krzywej). */
+export type StrokeLineCap = 'butt' | 'round' | 'square';
+
+/** Wypełnienie zamkniętej krzywej: brak, kolor główny albo kolor dodatkowy. */
+export type PathFillMode = 'none' | 'primary' | 'secondary';
 
 export interface VectorShapeSettings {
   shapeKind: ShapeKind;
@@ -250,6 +260,15 @@ export interface LineAndCurveSettings {
   antiAliasing: boolean;
   hardness?: number;            // Opcjonalne (usunięte z UI)
   blendMode: SKBlendMode;
+  /** Zakończenia otwartej linii / krzywej */
+  lineCap: StrokeLineCap;
+  /** Narożniki obrysu krzywej (ostry / zaokrąglony / ścięty) */
+  cornerJoin: StrokeCornerJoin;
+  /** Wypełnienie zamkniętej krzywej (kolor dodatkowy = fillColor) */
+  fillMode: PathFillMode;
+  fillColor: SKColor;
+  /** Wyrównanie obrysu zamkniętej krzywej względem jej brzegu */
+  strokeAlignment: StrokeAlignment;
 }
 
 export type CorrectionBrushType =
@@ -358,5 +377,8 @@ export interface FiguraProjectFile {
     opacity: number;
     blendMode: SKBlendMode;
     dataUrl: string;
+    maskDataUrl?: string;
+    maskEnabled?: boolean;
+    maskLinked?: boolean;
   }[];
 }

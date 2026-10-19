@@ -171,12 +171,27 @@ export const ColorPanel: React.FC<ColorPanelProps> = ({
   );
 
   useEffect(() => {
-    const onMouseMove = (e: MouseEvent) => {
+    // Ruchy myszy są łączone: najwyżej jedna zmiana koloru na klatkę (każda przerysowuje całą aplikację)
+    let raf: number | null = null;
+    let lastEv: MouseEvent | null = null;
+    const apply = () => {
+      raf = null;
+      const e = lastEv;
+      lastEv = null;
+      if (!e) return;
       if (isDraggingSv) handleSvPointer(e);
       if (isDraggingHue) handleHuePointer(e);
       if (isDraggingAlpha) handleAlphaPointer(e);
     };
+    const onMouseMove = (e: MouseEvent) => {
+      lastEv = e;
+      if (raf === null) raf = requestAnimationFrame(apply);
+    };
     const onMouseUp = () => {
+      if (raf !== null) {
+        cancelAnimationFrame(raf);
+        apply();
+      }
       setIsDraggingSv(false);
       setIsDraggingHue(false);
       setIsDraggingAlpha(false);
@@ -187,6 +202,7 @@ export const ColorPanel: React.FC<ColorPanelProps> = ({
       window.addEventListener('mouseup', onMouseUp);
     }
     return () => {
+      if (raf !== null) cancelAnimationFrame(raf);
       window.removeEventListener('mousemove', onMouseMove);
       window.removeEventListener('mouseup', onMouseUp);
     };

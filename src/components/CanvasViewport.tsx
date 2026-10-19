@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { Quad, pointInQuad } from '../core/skia/Perspective.ts';
 import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react';
 import { GraphicEngine } from '../core/skia/GraphicEngine.ts';
 import { renderGradientPreview } from '../core/skia/GradientRenderer.ts';
@@ -55,10 +56,31 @@ import {
   wordBoundsAt,
 } from '../core/skia/TextEngine.ts';
 import {
-  renderVectorBezier,
+  renderVectorPath,
   renderVectorLine,
   renderVectorShape,
 } from '../core/skia/VectorRenderer.ts';
+import {
+  PEN_MODES,
+  PenHit,
+  PenMode,
+  PenNode,
+  insertNodeAt,
+  moveAllBy,
+  moveHandle,
+  moveNodeBy,
+  nearestOnPath,
+  normalizeOpenEnds,
+  penAllPoints,
+  penContentKey,
+  penModeAvailable,
+  penNodeMode,
+  penSegments,
+  penShapeKey,
+  removeNode,
+  setNodeMode,
+  setSmoothFromDrag,
+} from '../core/skia/PenPath.ts';
 
 interface CanvasViewportProps {
   engine: GraphicEngine;
@@ -95,6 +117,8 @@ interface CanvasViewportProps {
   onLiveVectorSessionChange?: (isActive: boolean) => void;
   liveVectorCommitTrigger?: number;
   liveVectorCancelTrigger?: number;
+  penCloseToggleTrigger?: number;
+  onPenInfoChange?: (info: { active: boolean; closed: boolean; count: number }) => void;
   onShowToast?: (msg: string) => void;
 }
 
@@ -110,6 +134,11 @@ type TransformHandleType =
   | 'pivot'
   | 'rotate'
   | 'move'
+  | 'p0'
+  | 'p1'
+  | 'p2'
+  | 'p3'
+  | 'pmove'
   | null;
 
 interface ActiveVectorShapeSession {
@@ -134,11 +163,23 @@ interface ActiveVectorLineSession {
   p1: SKPoint;
 }
 
+/** Krzywa wielowęzłowa: 'drawing' = trwa wyklikiwanie kolejnych węzłów, 'editing' = zakończona, ale jeszcze edytowalna. */
 interface ActiveVectorBezierSession {
-  p0: SKPoint;
-  p1: SKPoint;
-  p2: SKPoint;
-  p3: SKPoint;
+  nodes: PenNode[];
+  closed: boolean;
+  phase: 'drawing' | 'editing';
+  selected: number;
+}
+
+interface PenDrag {
+  kind: 'create' | 'node' | 'hin' | 'hout';
+  index: number;
+  startPt: SKPoint;
+  startScreen: { x: number; y: number };
+  moved: boolean;
+  initNodes: PenNode[];
+  /** po wstawieniu węzła na odcinku kliknięcie bez przesunięcia nie otwiera menu */
+  inserted?: boolean;
 }
 
 const rotateCursorCache = new Map<number, string>();
@@ -295,6 +336,8 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   onLiveVectorSessionChange,
   liveVectorCommitTrigger,
   liveVectorCancelTrigger,
+  penCloseToggleTrigger,
+  onPenInfoChange,
   onShowToast,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -303,6 +346,9 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   // Płótno kafelków podglądu edycji (leży nad płótnem dokumentu) i jego renderer
   const tileCanvasRef = useRef<HTMLCanvasElement>(null);
   const tileRendererRef = useRef<ViewportTileRenderer | null>(null);
+  const tileViewRef = useRef<{ zoom: number; left: number; top: number; width: number; height: number } | null>(null);
+  const tileSessionRef = useRef(false);
+  const viewOnlyRef = useRef(false);
   const tileRendererEngineRef = useRef<GraphicEngine | null>(null);
   const baseSigRef = useRef<string | null>(null);
 
@@ -315,6 +361,11 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   // SESJE EDYCJI WEKTOROWEJ NA ŻYWO
   const [activeVectorLineSession, setActiveVectorLineSession] = useState<ActiveVectorLineSession | null>(null);
   const [activeVectorBezierSession, setActiveVectorBezierSession] = useState<ActiveVectorBezierSession | null>(null);
+  // Lustro sesji krzywej dla obsługi zdarzeń (kilka zdarzeń może nadejść przed ponownym renderem)
+  const penRef = useRef<ActiveVectorBezierSession | null>(null);
+  penRef.current = activeVectorBezierSession;
+  const penDragRef = useRef<PenDrag | null>(null);
+  const [penMenu, setPenMenu] = useState<{ index: number } | null>(null);
   const [activeVectorShapeSession, setActiveVectorShapeSession] = useState<ActiveVectorShapeSession | null>(null);
 
   // SESJA EDYCJI TEKSTU (ramka + tekst z formatowaniem fragmentów)
@@ -393,6 +444,8 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   const [transformHoverHandle, setTransformHoverHandle] = useState<TransformHandleType>(null);
 
   const transformActiveHandleRef = useRef<TransformHandleType>(null);
+  const perspInitQuadRef = useRef<Quad | null>(null);
+  const transformDownScreenRef = useRef<{ x: number; y: number } | null>(null);
   const setTransformActiveHandleSynced = (val: TransformHandleType) => {
     transformActiveHandleRef.current = val;
     setTransformActiveHandle(val);
@@ -411,6 +464,15 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   };
   const [currentDragPoint, setCurrentDragPoint] = useState<SKPoint | null>(null);
   const [lassoPoints, setLassoPoints] = useState<SKPoint[]>([]);
+  // Lasso „punkt po punkcie”: sesja trwa między kliknięciami aż do Enter / zamknięcia / Esc
+  const lassoPointsRef = useRef<SKPoint[]>([]);
+  const lassoMultiRef = useRef(false);
+  const lassoPressRef = useRef<{ screen: { x: number; y: number }; moved: boolean; first: boolean } | null>(null);
+  const [lassoMultiActive, setLassoMultiActive] = useState(false);
+  const setLassoPts = (pts: SKPoint[]) => {
+    lassoPointsRef.current = pts;
+    setLassoPoints(pts);
+  };
 
   const [isDrawing, setIsDrawing] = useState(false);
   const isDrawingRef = useRef<boolean>(false);
@@ -527,8 +589,8 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   );
 
   useEffect(() => {
-    onLiveVectorSessionChange?.(isAnyVectorSessionActive);
-  }, [isAnyVectorSessionActive, onLiveVectorSessionChange]);
+    onLiveVectorSessionChange?.(isAnyVectorSessionActive || lassoMultiActive);
+  }, [isAnyVectorSessionActive, lassoMultiActive, onLiveVectorSessionChange]);
 
   // FUNKCJE ZATWIERDZANIA I ANULOWANIA SESJI WEKTOROWYCH
   const commitActiveVectorSession = useCallback(() => {
@@ -541,13 +603,11 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       setActiveVectorLineSession(null);
       onCanvasModified();
     } else if (activeVectorBezierSession) {
-      engine.commitVectorBezier(
-        activeVectorBezierSession.p0,
-        activeVectorBezierSession.p1,
-        activeVectorBezierSession.p2,
-        activeVectorBezierSession.p3,
-        lineAndCurveSettings
-      );
+      const bs = activeVectorBezierSession;
+      engine.commitVectorPath(normalizeOpenEnds(bs.nodes, bs.closed), bs.closed, lineAndCurveSettings);
+      penRef.current = null;
+      penDragRef.current = null;
+      setPenMenu(null);
       setActiveVectorBezierSession(null);
       onCanvasModified();
     } else if (activeVectorShapeSession) {
@@ -590,6 +650,9 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
 
   const cancelActiveVectorSession = useCallback(() => {
     setActiveVectorLineSession(null);
+    penRef.current = null;
+    penDragRef.current = null;
+    setPenMenu(null);
     setActiveVectorBezierSession(null);
     setActiveVectorShapeSession(null);
     setActiveTextSession(null);
@@ -1059,6 +1122,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         onCanvasModified();
       }
     }
+    if (activeTool !== 'magic-wand' && engine.wandBusy) engine.flushPendingFill();
     if (activeTool !== 'bucket' && engine.bucketSeedPoint) {
       engine.commitPaintBucketSession();
       onCanvasModified();
@@ -1076,13 +1140,13 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   useEffect(() => {
     if (activeTool === 'bucket' && engine.bucketSeedPoint) {
       const col = engine.bucketColorSource === 'secondary' ? secondaryColor : primaryColor;
+      // Liczenie obszaru idzie w tle; silnik sam odświeża widok, gdy wynik jest gotowy
       engine.applyPaintBucket(
         engine.bucketSeedPoint,
         selectionSettings,
         { ...brushSettings, color: col },
         false
       );
-      onCanvasModified();
     }
   }, [
     activeTool,
@@ -1098,10 +1162,59 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   ]);
 
   // Reakcja na zmianę parametrów magicznej różdżki na żywo (gdy aktywna jest sesja różdżki)
+  // Odświeżenia różdżki (suwak tolerancji, przeciąganie uchwytu) są łączone: najwyżej jedno na klatkę, z najnowszymi
+  // wartościami. Przy długim odświeżeniu zdarzenia nie ustawiają się w kolejkę, więc interfejs nie laguje po zatrzymaniu.
+  const selectionSettingsLatestRef = useRef(selectionSettings);
+  selectionSettingsLatestRef.current = selectionSettings;
+  const wandRefreshRafRef = useRef<number | null>(null);
+  const wandPendingPointRef = useRef<SKPoint | null>(null);
+  const wandRefreshPendingRef = useRef(false);
+  const onCanvasModifiedRef = useRef(onCanvasModified);
+  onCanvasModifiedRef.current = onCanvasModified;
+
+  // Wyniki liczone w tle (różdżka, wiadro) odświeżają widok, gdy są gotowe
+  useEffect(() => {
+    const cb = () => onCanvasModifiedRef.current();
+    engine.onAsyncUpdate = cb;
+    return () => {
+      if (engine.onAsyncUpdate === cb) engine.onAsyncUpdate = null;
+    };
+  }, [engine]);
+
+  const runWandRefresh = useCallback(() => {
+    if (wandRefreshRafRef.current !== null) {
+      cancelAnimationFrame(wandRefreshRafRef.current);
+      wandRefreshRafRef.current = null;
+    }
+    if (!wandRefreshPendingRef.current) return;
+    wandRefreshPendingRef.current = false;
+    const pt = wandPendingPointRef.current;
+    wandPendingPointRef.current = null;
+    if (pt || engine.selectionManager.wandSeedPoint) {
+      const st = selectionSettingsLatestRef.current;
+      engine.refreshMagicWand(st, pt ?? undefined);
+      // Bez piórkowania wynik liczy się w tle i silnik odświeży widok sam; z piórkowaniem jest gotowy od razu
+      if (st.feather > 0) onCanvasModifiedRef.current();
+    }
+  }, [engine]);
+
+  const scheduleWandRefresh = useCallback(
+    (pt?: SKPoint) => {
+      if (pt) wandPendingPointRef.current = pt;
+      wandRefreshPendingRef.current = true;
+      if (wandRefreshRafRef.current === null) {
+        wandRefreshRafRef.current = requestAnimationFrame(() => {
+          wandRefreshRafRef.current = null;
+          runWandRefresh();
+        });
+      }
+    },
+    [runWandRefresh]
+  );
+
   useEffect(() => {
     if (activeTool === 'magic-wand' && engine.selectionManager.wandSeedPoint) {
-      engine.refreshMagicWand(selectionSettings);
-      onCanvasModified();
+      scheduleWandRefresh();
     }
   }, [
     activeTool,
@@ -1109,8 +1222,22 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     selectionSettings.tolerance,
     selectionSettings.wandMode,
     selectionSettings.sampleSource,
-    onCanvasModified,
+    scheduleWandRefresh,
   ]);
+
+  // Kopia pikseli próbkowanych przez różdżkę zajmuje dużo pamięci - zwalniamy ją po opuszczeniu narzędzia
+  useEffect(() => {
+    if (activeTool === 'magic-wand' || activeTool === 'bucket') return;
+    engine.releaseWandSample();
+  }, [activeTool, engine]);
+
+  useEffect(
+    () => () => {
+      if (wandRefreshRafRef.current !== null) cancelAnimationFrame(wandRefreshRafRef.current);
+      wandRefreshRafRef.current = null;
+    },
+    []
+  );
 
   // Reakcja na zmianę parametrów gradientu na żywo (gdy aktywna jest sesja gradientu)
   useEffect(() => {
@@ -1152,12 +1279,10 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
           { ...lineAndCurveSettings, blendMode: 'SrcOver' }
         );
       } else if (activeVectorBezierSession) {
-        renderVectorBezier(
+        renderVectorPath(
           ctx,
-          activeVectorBezierSession.p0,
-          activeVectorBezierSession.p1,
-          activeVectorBezierSession.p2,
-          activeVectorBezierSession.p3,
+          activeVectorBezierSession.nodes,
+          activeVectorBezierSession.closed,
           { ...lineAndCurveSettings, blendMode: 'SrcOver' }
         );
       } else if (activeVectorShapeSession) {
@@ -1195,32 +1320,101 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     const tileCanvas = tileCanvasRef.current;
 
     const gradientPreview = engine.gradientPreview;
-    if ((isAnyVectorSessionActive || !!gradientPreview) && tileCanvas) {
+    const bucketPreview = engine.getBucketPreview();
+    if (tileCanvas && tileRendererEngineRef.current !== engine) {
+      tileRendererRef.current?.dispose();
+      tileRendererRef.current = new ViewportTileRenderer(tileCanvas, engine);
+      tileRendererEngineRef.current = engine;
+    }
+    // Widok kafelków (piksele urządzenia): jedna powierzchnia wyświetlająca dokument zarówno w sesji podglądu, jak i poza nią
+    const cW0 = containerSize.width || containerRef.current?.clientWidth || 0;
+    const cH0 = containerSize.height || containerRef.current?.clientHeight || 0;
+    const dpr0 = window.devicePixelRatio || 1;
+    const tileView = {
+      zoom: zoom * dpr0,
+      left: Math.round((cW0 / 2 + panOffset.x - (engine.width * zoom) / 2) * dpr0),
+      top: Math.round((cH0 / 2 + panOffset.y - (engine.height * zoom) / 2) * dpr0),
+      width: Math.round(cW0 * dpr0),
+      height: Math.round(cH0 * dpr0),
+    };
+    tileViewRef.current = tileView;
+    // Przekształcanie zawartości zaznaczenia (oderwany fragment: przenoszenie, skalowanie, obrót) to też podgląd kafelkowy
+    const tcs = engine.transformContentSession;
+    const tst = engine.selectionManager.transformState;
+    const contentSessionActive = !!tcs && !!tst && tcs.sourceLayerIndex === engine.activeLayerIndex && !!tileCanvas;
+    engine.floatingContentExternal = contentSessionActive;
+    const sessionNow = (isAnyVectorSessionActive || !!gradientPreview || !!bucketPreview || contentSessionActive) && !!tileCanvas;
+    tileSessionRef.current = sessionNow;
+    if (sessionNow) {
       // SZYBKI PODGLĄD EDYCJI: kafelki ekranu renderowane promieniowo od kursora, przerywane przy każdym ruchu.
-      if (tileRendererEngineRef.current !== engine) {
-        tileRendererRef.current?.dispose();
-        tileRendererRef.current = new ViewportTileRenderer(tileCanvas, engine);
-        tileRendererEngineRef.current = engine;
-      }
       const tr = tileRendererRef.current!;
 
       // Jeśli podkład zmienił się w trakcie sesji (np. cofnięcie), odśwież płótno dokumentu bez podglądu
       const sig = engine.getBaseSignature();
       if (baseSigRef.current !== null && baseSigRef.current !== sig) {
         engine.compositeToViewport(canvasRef.current, null, null, null, null, null, null, null);
+        tr.invalidateBase();
       }
       baseSigRef.current = sig;
+      tr.setBase(canvasRef.current);
+      // Płótno kafelków pracuje w pikselach urządzenia (devicePixelRatio) i samo rysuje dokument, więc podgląd i reszta
+      // widoku przechodzą przez ten sam resampler; zwykłe płótno jest wtedy tylko ukryte (zachowuje układ do getDocPoint).
+      const dpr = dpr0;
 
       const cW = containerSize.width || containerRef.current?.clientWidth || 0;
       const cH = containerSize.height || containerRef.current?.clientHeight || 0;
-      const left = Math.round(cW / 2 + panOffset.x - (engine.width * zoom) / 2);
-      const top = Math.round(cH / 2 + panOffset.y - (engine.height * zoom) / 2);
+      const left = Math.round((cW / 2 + panOffset.x - (engine.width * zoom) / 2) * dpr);
+      const top = Math.round((cH / 2 + panOffset.y - (engine.height * zoom) / 2) * dpr);
 
       let bounds;
       let centerDoc: SKPoint;
+      let contentKey: string | undefined;
       let previewRender: (ctx: CanvasRenderingContext2D) => void = customPreview;
       let previewBlend = currentBlendMode;
-      if (!isAnyVectorSessionActive && gradientPreview) {
+      if (contentSessionActive && !isAnyVectorSessionActive && !gradientPreview && !bucketPreview) {
+        // Oderwany fragment zaznaczenia: ten sam rysunek co przy zatwierdzaniu (GraphicEngine.commitTransformContent),
+        // z migawką parametrów (stan ramki jest mutowany w miejscu, a renderer rysuje zadania później)
+        const sess = tcs!;
+        const st0 = tst!;
+        const pos = { x: st0.pos.x, y: st0.pos.y };
+        const w = st0.width;
+        const h = st0.height;
+        const ang = st0.angle;
+        const fx = st0.flipX ? -1 : 1;
+        const fy = st0.flipY ? -1 : 1;
+        const iw = st0.initialBounds.width;
+        const ih = st0.initialBounds.height;
+        const interp = sess.interpolation;
+        const src = sess.previewCanvas ?? sess.sourceContentCanvas;
+        previewRender = (ctx) => {
+          ctx.save();
+          ctx.translate(pos.x, pos.y);
+          ctx.rotate(ang);
+          ctx.scale((w / Math.max(1, iw)) * fx, (h / Math.max(1, ih)) * fy);
+          if (interp === 'nearest-neighbor') {
+            ctx.imageSmoothingEnabled = false;
+          } else {
+            ctx.imageSmoothingEnabled = true;
+            ctx.imageSmoothingQuality = interp === 'bilinear' ? 'medium' : 'high';
+          }
+          ctx.drawImage(src, -iw / 2, -ih / 2);
+          ctx.restore();
+        };
+        previewBlend = 'SrcOver';
+        bounds = boundsForRotatedBox(pos, w, h, ang, 4);
+        centerDoc = pos;
+        contentKey = 'tc:' + JSON.stringify([pos, w, h, ang, fx, fy, interp]);
+      } else if (!isAnyVectorSessionActive && !gradientPreview && bucketPreview) {
+        // Wiadro: wypełnienie (maska alfa w prostokącie opisanym na obszarze) rysowane tak samo jak przy zatwierdzaniu;
+        // warstwa nietknięta do zatwierdzenia
+        const bp = bucketPreview;
+        previewRender = (ctx) => {
+          ctx.drawImage(bp.canvas, bp.x, bp.y);
+        };
+        previewBlend = bp.blendMode;
+        bounds = { left: bp.x, top: bp.y, right: bp.x + bp.w, bottom: bp.y + bp.h, width: bp.w, height: bp.h };
+        centerDoc = { x: bp.x + bp.w / 2, y: bp.y + bp.h / 2 };
+      } else if (!isAnyVectorSessionActive && gradientPreview) {
         // Gradient: cały dokument (przycięty do widoku i zaznaczenia przez renderer), warstwa nietknięta do zatwierdzenia
         previewRender = (ctx) => renderGradientPreview(ctx, gradientPreview, engine.width, engine.height);
         previewBlend = gradientPreview.blendMode;
@@ -1231,9 +1425,10 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         bounds = boundsForPoints([p0, p1], lineAndCurveSettings.strokeWidth, lineAndCurveSettings.markerSize);
         centerDoc = { x: (p0.x + p1.x) / 2, y: (p0.y + p1.y) / 2 };
       } else if (activeVectorBezierSession) {
-        const { p0, p1, p2, p3 } = activeVectorBezierSession;
-        bounds = boundsForPoints([p0, p1, p2, p3], lineAndCurveSettings.strokeWidth, lineAndCurveSettings.markerSize);
-        centerDoc = { x: (p0.x + p3.x) / 2, y: (p0.y + p3.y) / 2 };
+        const allPts = penAllPoints(activeVectorBezierSession.nodes);
+        bounds = boundsForPoints(allPts, lineAndCurveSettings.strokeWidth, lineAndCurveSettings.markerSize);
+        const pb = boundsForPoints(allPts, 0, 0);
+        centerDoc = { x: (pb.left + pb.right) / 2, y: (pb.top + pb.bottom) / 2 };
       } else if (activeVectorShapeSession) {
         const sh = activeVectorShapeSession;
         bounds = boundsForShape(sh.center, sh.width, sh.height, sh.angle, vectorShapeSettings.strokeWidth);
@@ -1251,19 +1446,87 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         centerDoc = tx.center;
       }
 
-      const dragging = (!!activeVectorHandleRef.current || !!gradientPreview) && !!cursorPosRef.current;
+      const dragging = (!!activeVectorHandleRef.current || !!penDragRef.current || !!gradientPreview || (contentSessionActive && !!transformActiveHandleRef.current)) && !!cursorPosRef.current;
       const focus = dragging
         ? { x: cursorPosRef.current!.x, y: cursorPosRef.current!.y }
-        : { x: left + centerDoc.x * zoom, y: top + centerDoc.y * zoom };
+        : { x: left + centerDoc.x * zoom * dpr, y: top + centerDoc.y * zoom * dpr };
+      if (dragging) {
+        focus.x *= dpr;
+        focus.y *= dpr;
+      }
+
+      // Klucz zawartości podglądu: zmienia się tylko przy modyfikacji (geometria, ustawienia, tryb mieszania), a nie
+      // przy zoomie / przesunięciu. Dzięki temu renderer nie regeneruje podglądu przy zmianie widoku.
+      // Tekst celowo bez klucza (jego stan żyje w mutowalnych refach), więc zachowuje się jak dotychczas.
+      let previewKey: string | undefined;
+      // Linia, krzywa i figura: podgląd rasteryzowany raz w rozdzielczości dokumentu (identyczne piksele jak po zatwierdzeniu)
+      const docSprite = contentKey === undefined && !gradientPreview && (!!activeVectorLineSession || !!activeVectorBezierSession || !!activeVectorShapeSession);
+      if (contentKey !== undefined) {
+        previewKey = contentKey;
+      } else if (!isAnyVectorSessionActive && !gradientPreview && bucketPreview) {
+        previewKey = bucketPreview.key;
+      } else if (!isAnyVectorSessionActive && gradientPreview) {
+        previewKey = 'g:' + JSON.stringify(gradientPreview);
+      } else if (activeVectorLineSession) {
+        previewKey = 'l:' + JSON.stringify([activeVectorLineSession, lineAndCurveSettings, previewBlend]);
+      } else if (activeVectorBezierSession) {
+        previewKey = 'b:' + JSON.stringify([penContentKey(activeVectorBezierSession.nodes, activeVectorBezierSession.closed), lineAndCurveSettings, previewBlend]);
+      } else if (activeVectorShapeSession) {
+        previewKey = 's:' + JSON.stringify([activeVectorShapeSession, vectorShapeSettings, previewBlend]);
+      }
+
+      // Opis czystego przesunięcia (figura, linia, krzywa): klucz zawartości BEZ położenia + punkt odniesienia.
+      // Gdy użytkownik tylko przesuwa obiekt, renderer kopiuje gotowy podgląd zamiast rasteryzować go od nowa.
+      const r4 = (n: number) => Math.round(n * 1e4) / 1e4;
+      let previewMove: { key: string; x: number; y: number } | undefined;
+      if (activeVectorLineSession) {
+        const { p0, p1 } = activeVectorLineSession;
+        previewMove = {
+          key: 'l:' + JSON.stringify([r4(p1.x - p0.x), r4(p1.y - p0.y), lineAndCurveSettings, previewBlend]),
+          x: p0.x,
+          y: p0.y,
+        };
+      } else if (activeVectorBezierSession && activeVectorBezierSession.nodes.length > 0) {
+        previewMove = {
+          key: 'b:' + penShapeKey(activeVectorBezierSession.nodes, activeVectorBezierSession.closed) + JSON.stringify([lineAndCurveSettings, previewBlend]),
+          x: activeVectorBezierSession.nodes[0].x,
+          y: activeVectorBezierSession.nodes[0].y,
+        };
+      } else if (activeVectorShapeSession) {
+        const sh = activeVectorShapeSession;
+        previewMove = {
+          key:
+            's:' +
+            JSON.stringify([
+              r4(sh.width),
+              r4(sh.height),
+              r4(sh.angle),
+              sh.flipX,
+              sh.flipY,
+              r4(sh.pivot.x - sh.center.x),
+              r4(sh.pivot.y - sh.center.y),
+              vectorShapeSettings,
+              previewBlend,
+            ]),
+          x: sh.center.x,
+          y: sh.center.y,
+        };
+      }
 
       tr.request({
-        view: { zoom, left, top, width: cW, height: cH },
-        preview: { render: previewRender, blendMode: previewBlend, bounds },
+        view: { zoom: zoom * dpr, left, top, width: Math.round(cW * dpr), height: Math.round(cH * dpr) },
+        preview: { render: previewRender, blendMode: previewBlend, bounds, key: previewKey, move: previewMove, docSprite: docSprite },
         focus,
+        // trwa przeciąganie uchwytu / gradientu: renderer może użyć niskiej rozdzielczości i wyostrzyć po pauzie
+        interactive: dragging,
       });
+      // Nakładka: kafelki zawierają tylko podgląd, a tło to zwykłe płótno dokumentu (identyczne w całym widoku).
+      // Gdy podgląd wymaga pełnej kompozycji (tryb mieszania, warstwy nad aktywną), dokument rysują kafelki, a płótno ukrywamy.
+      if (canvasRef.current) canvasRef.current.style.visibility = tr.isOverlay() ? '' : 'hidden';
       return;
     }
 
+    if (viewOnlyRef.current) return;
     engine.compositeToViewport(
       canvasRef.current,
       null,
@@ -1276,6 +1539,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     );
     baseSigRef.current = engine.getBaseSignature();
     tileRendererRef.current?.clear();
+    if (canvasRef.current) canvasRef.current.style.visibility = '';
   }, [
     engine,
     activeVectorLineSession,
@@ -1295,8 +1559,40 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     containerSize.height,
   ]);
 
+  // Samo przesunięcie / zoom / zmiana rozmiaru okna poza sesją podglądu nie zmienia pikseli dokumentu:
+  // płótno dokumentu skaluje przeglądarka (CSS), więc nie wolno za każdym razem składać wszystkich warstw od nowa.
+  const contentKeyRef = useRef<unknown[] | null>(null);
   useEffect(() => {
+    // Ustawienia narzędzi wektorowych (App podmienia je przy każdej zmianie koloru) liczą się do klucza tylko wtedy,
+    // gdy trwa sesja, która ich używa; inaczej zmiana koloru w palecie wymuszałaby pełne złożenie dużego płótna.
+    const vecActive = isAnyVectorSessionActive || !!activeTextSession;
+    const contentKey: unknown[] = [
+      engine,
+      activeVectorLineSession,
+      activeVectorBezierSession,
+      activeVectorShapeSession,
+      activeTextSession,
+      vecActive ? textSettings : null,
+      textLayout,
+      textVersion,
+      vecActive ? lineAndCurveSettings : null,
+      vecActive ? vectorShapeSettings : null,
+      isAnyVectorSessionActive,
+      engineRevision,
+      engine.width,
+      engine.height,
+      engine.activeLayerIndex,
+      engine.getBaseSignature(),
+      !!engine.gradientPreview,
+      !!engine.bucketSeedPoint,
+    ];
+    const prevKey = contentKeyRef.current;
+    contentKeyRef.current = contentKey;
+    const sameContent = !!prevKey && prevKey.length === contentKey.length && prevKey.every((v, i) => v === contentKey[i]);
+    const sessionNow = isAnyVectorSessionActive || !!engine.gradientPreview || !!engine.bucketSeedPoint;
+    viewOnlyRef.current = sameContent && !sessionNow && !tileSessionRef.current;
     redraw();
+    viewOnlyRef.current = false;
   }, [redraw, engineRevision, engine.width, engine.height, engine.activeLayerIndex]);
 
   useEffect(() => {
@@ -1452,24 +1748,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         return null;
       }
 
-      if (activeVectorBezierSession) {
-        const p0Screen = docToScreen(activeVectorBezierSession.p0);
-        const p1Screen = docToScreen(activeVectorBezierSession.p1);
-        const p2Screen = docToScreen(activeVectorBezierSession.p2);
-        const p3Screen = docToScreen(activeVectorBezierSession.p3);
-        const midDoc: SKPoint = {
-          x: (activeVectorBezierSession.p0.x + activeVectorBezierSession.p3.x) / 2,
-          y: (activeVectorBezierSession.p0.y + activeVectorBezierSession.p3.y) / 2,
-        };
-        const midScreen = docToScreen(midDoc);
-
-        if (Math.hypot(mouseX - p0Screen.x, mouseY - p0Screen.y) <= 12) return 'p0';
-        if (Math.hypot(mouseX - p1Screen.x, mouseY - p1Screen.y) <= 12) return 'p1';
-        if (Math.hypot(mouseX - p2Screen.x, mouseY - p2Screen.y) <= 12) return 'p2';
-        if (Math.hypot(mouseX - p3Screen.x, mouseY - p3Screen.y) <= 12) return 'p3';
-        if (Math.hypot(mouseX - midScreen.x, mouseY - midScreen.y) <= 12) return 'move';
-        return null;
-      }
+      if (activeVectorBezierSession) return null; // krzywa wielowęzłowa ma własną obsługę (patrz penPointerDown)
 
       const geomSess = activeVectorShapeSession ?? activeTextSession;
       if (geomSess) {
@@ -1620,6 +1899,25 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
 
   const hitTestTransformHandles = useCallback(
     (e: React.PointerEvent | MouseEvent): TransformHandleType => {
+      // Tryb perspektywy: 4 narożniki + wnętrze czworokąta
+      if (activeTool === 'transform-content' && engine.perspectiveActive && containerRef.current) {
+        const quad = engine.getPerspectiveQuad();
+        if (quad) {
+          const crect = containerRef.current.getBoundingClientRect();
+          const mx = e.clientX - crect.left;
+          const my = e.clientY - crect.top;
+          const cx = containerRef.current.clientWidth / 2 + panOffset.x;
+          const cy = containerRef.current.clientHeight / 2 + panOffset.y;
+          for (let i = 0; i < 4; i++) {
+            const sx = (quad[i].x - engine.width / 2) * zoom + cx;
+            const sy = (quad[i].y - engine.height / 2) * zoom + cy;
+            if (Math.hypot(mx - sx, my - sy) <= 10) return `p${i}` as TransformHandleType;
+          }
+          const dp = getDocPoint(e);
+          if (dp && pointInQuad(quad, dp.x, dp.y)) return 'pmove';
+        }
+        return null;
+      }
       const geom = getTransformScreenGeometry();
       if (!geom || !containerRef.current) return null;
 
@@ -1663,7 +1961,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
 
       return null;
     },
-    [getTransformScreenGeometry, engine.selectionManager.transformState, getDocPoint]
+    [getTransformScreenGeometry, engine.selectionManager.transformState, getDocPoint, activeTool, engine, panOffset, zoom]
   );
 
   // OBSŁUGA INTERAKCJI TRANSFORMACJI ZAZNACZENIA / ZAWARTOŚCI
@@ -1676,6 +1974,31 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
 
       const init = transformInitialStateRef.current;
       const startPt = transformDragStartDocPtRef.current;
+
+      if (activeHandle === 'pmove' || activeHandle.startsWith('p') && activeHandle !== 'pivot') {
+        const q0 = perspInitQuadRef.current;
+        if (!q0) return;
+        let dx = pt.x - startPt.x;
+        let dy = pt.y - startPt.y;
+        if (shiftKey && activeHandle === 'pmove') {
+          if (Math.abs(dx) >= Math.abs(dy)) dy = 0;
+          else dx = 0;
+        }
+        dx = Math.round(dx);
+        dy = Math.round(dy);
+        const nq = q0.map((p) => ({ x: p.x, y: p.y })) as Quad;
+        if (activeHandle === 'pmove') {
+          for (const p of nq) {
+            p.x += dx;
+            p.y += dy;
+          }
+        } else {
+          const idx = Number(activeHandle.slice(1));
+          nq[idx] = { x: q0[idx].x + dx, y: q0[idx].y + dy };
+        }
+        if (engine.setPerspectiveQuad(nq)) onCanvasModified();
+        return;
+      }
 
       if (activeHandle === 'move') {
         let dx = pt.x - startPt.x;
@@ -1939,75 +2262,6 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
             p1: { x: init.p1.x + moveDx, y: init.p1.y + moveDy },
           });
         }
-        redraw();
-        return;
-      }
-
-      if (activeVectorBezierSession) {
-        const init = vectorInitialSessionStateRef.current as ActiveVectorBezierSession;
-        if (activeHandle === 'p0') {
-          let moveX = Math.round(pt.x) - init.p0.x;
-          let moveY = Math.round(pt.y) - init.p0.y;
-          if (shiftKey) {
-            if (Math.abs(moveX) >= Math.abs(moveY)) moveY = 0;
-            else moveX = 0;
-          }
-          const newP0 = { x: init.p0.x + moveX, y: init.p0.y + moveY };
-          const newP1 = { x: init.p1.x + moveX, y: init.p1.y + moveY };
-          setActiveVectorBezierSession({ ...init, p0: newP0, p1: newP1 });
-        } else if (activeHandle === 'p3') {
-          let moveX = Math.round(pt.x) - init.p3.x;
-          let moveY = Math.round(pt.y) - init.p3.y;
-          if (shiftKey) {
-            if (Math.abs(moveX) >= Math.abs(moveY)) moveY = 0;
-            else moveX = 0;
-          }
-          const newP3 = { x: init.p3.x + moveX, y: init.p3.y + moveY };
-          const newP2 = { x: init.p2.x + moveX, y: init.p2.y + moveY };
-          setActiveVectorBezierSession({ ...init, p3: newP3, p2: newP2 });
-        } else if (activeHandle === 'p1') {
-          let targetX = Math.round(pt.x);
-          let targetY = Math.round(pt.y);
-          if (shiftKey) {
-            const hdx = targetX - init.p0.x;
-            const hdy = targetY - init.p0.y;
-            const angle = Math.atan2(hdy, hdx);
-            const step = Math.PI / 4;
-            const snappedAngle = Math.round(angle / step) * step;
-            const dist = Math.hypot(hdx, hdy);
-            targetX = Math.round(init.p0.x + Math.cos(snappedAngle) * dist);
-            targetY = Math.round(init.p0.y + Math.sin(snappedAngle) * dist);
-          }
-          setActiveVectorBezierSession({ ...init, p1: { x: targetX, y: targetY } });
-        } else if (activeHandle === 'p2') {
-          let targetX = Math.round(pt.x);
-          let targetY = Math.round(pt.y);
-          if (shiftKey) {
-            const hdx = targetX - init.p3.x;
-            const hdy = targetY - init.p3.y;
-            const angle = Math.atan2(hdy, hdx);
-            const step = Math.PI / 4;
-            const snappedAngle = Math.round(angle / step) * step;
-            const dist = Math.hypot(hdx, hdy);
-            targetX = Math.round(init.p3.x + Math.cos(snappedAngle) * dist);
-            targetY = Math.round(init.p3.y + Math.sin(snappedAngle) * dist);
-          }
-          setActiveVectorBezierSession({ ...init, p2: { x: targetX, y: targetY } });
-        } else if (activeHandle === 'move') {
-          let moveDx = dx;
-          let moveDy = dy;
-          if (shiftKey) {
-            if (Math.abs(moveDx) >= Math.abs(moveDy)) moveDy = 0;
-            else moveDx = 0;
-          }
-          setActiveVectorBezierSession({
-            p0: { x: init.p0.x + moveDx, y: init.p0.y + moveDy },
-            p1: { x: init.p1.x + moveDx, y: init.p1.y + moveDy },
-            p2: { x: init.p2.x + moveDx, y: init.p2.y + moveDy },
-            p3: { x: init.p3.x + moveDx, y: init.p3.y + moveDy },
-          });
-        }
-        redraw();
         return;
       }
 
@@ -2226,7 +2480,6 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
           },
           activeHandle
         );
-        redraw();
       }
     },
     [
@@ -2269,25 +2522,6 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
           p0: { x: Math.round(startPt.x), y: Math.round(startPt.y) },
           p1: { x: Math.round(p1.x), y: Math.round(p1.y) },
         });
-        redraw();
-        return;
-      }
-
-      if (activeTool === 'bezier') {
-        const p0 = { x: Math.round(startPt.x), y: Math.round(startPt.y) };
-        const p3 = { x: Math.round(pt.x), y: Math.round(pt.y) };
-        const dx = p3.x - p0.x;
-        const dy = p3.y - p0.y;
-        const p1 = {
-          x: Math.round(p0.x + dx * 0.33 - dy * 0.25),
-          y: Math.round(p0.y + dy * 0.33 + dx * 0.25),
-        };
-        const p2 = {
-          x: Math.round(p0.x + dx * 0.66 - dy * 0.25),
-          y: Math.round(p0.y + dy * 0.66 + dx * 0.25),
-        };
-        setActiveVectorBezierSession({ p0, p1, p2, p3 });
-        redraw();
         return;
       }
 
@@ -2358,7 +2592,6 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
             flipY: false,
           });
         }
-        redraw();
       }
     },
     [activeTool, redraw]
@@ -2366,6 +2599,289 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
 
   updateVectorHandleInteractionRef.current = updateVectorHandleInteraction;
   updateInitialDrawingDragRef.current = updateInitialDrawingDrag;
+
+  // ===== KRZYWA WIELOWĘZŁOWA (narzędzie "Krzywa Beziera"): wyklikiwanie, edycja węzłów i uchwytów =====
+  // Klik = węzeł ostry, przeciągnięcie = węzeł gładki. Enter / PPM kończy wyklikiwanie (krzywa pozostaje edytowalna),
+  // ponowny Enter zatwierdza. Kliknięcie węzła (po zakończeniu) otwiera menu rodzaju węzła.
+  const setPen = (next: ActiveVectorBezierSession) => {
+    penRef.current = next;
+    setActiveVectorBezierSession(next);
+  };
+
+  const penScreenPos = (e: { clientX: number; clientY: number }) => {
+    const rect = containerRef.current?.getBoundingClientRect();
+    return { x: e.clientX - (rect?.left ?? 0), y: e.clientY - (rect?.top ?? 0) };
+  };
+
+  const hitTestPen = (
+    sess: ActiveVectorBezierSession,
+    mx: number,
+    my: number,
+    docPt: SKPoint
+  ): { kind: 'node' | 'hin' | 'hout' | 'seg'; index: number; seg?: PenHit } | null => {
+    const R = 8;
+    const near = (q: SKPoint) => {
+      const sp = docToScreen(q);
+      return Math.hypot(mx - sp.x, my - sp.y) <= R;
+    };
+    const { nodes, closed, phase, selected } = sess;
+    const nN = nodes.length;
+    if (phase === 'drawing') {
+      if (nN >= 3 && near(nodes[0])) return { kind: 'node', index: 0 };
+      return null;
+    }
+    const isClosed = closed && nN > 2;
+    const order: number[] = [];
+    if (selected >= 0 && selected < nN) order.push(selected);
+    for (let i = 0; i < nN; i++) if (i !== selected) order.push(i);
+    for (const i of order) {
+      const nd = nodes[i];
+      if (nd.hout && (i < nN - 1 || isClosed) && near(nd.hout)) return { kind: 'hout', index: i };
+      if (nd.hin && (i > 0 || isClosed) && near(nd.hin)) return { kind: 'hin', index: i };
+    }
+    for (let i = nN - 1; i >= 0; i--) if (near(nodes[i])) return { kind: 'node', index: i };
+    const hit = nearestOnPath(nodes, closed, docPt);
+    if (hit && hit.dist * zoom <= 6) return { kind: 'seg', index: hit.seg.i, seg: hit };
+    return null;
+  };
+
+  const penFinishDrawing = () => {
+    const sess = penRef.current;
+    if (!sess || sess.phase !== 'drawing') return;
+    if (sess.nodes.length < 2) {
+      cancelActiveVectorSession();
+      return;
+    }
+    setPen({
+      ...sess,
+      nodes: normalizeOpenEnds(sess.nodes, sess.closed),
+      phase: 'editing',
+      selected: sess.nodes.length - 1,
+    });
+  };
+
+  const penDeleteNode = (index?: number) => {
+    const sess = penRef.current;
+    if (!sess) return;
+    if (sess.phase === 'drawing') {
+      const nodes = sess.nodes.slice(0, -1);
+      if (nodes.length === 0) cancelActiveVectorSession();
+      else setPen({ ...sess, nodes, selected: nodes.length - 1 });
+      return;
+    }
+    if (sess.nodes.length <= 2) return;
+    const idx = Math.max(0, Math.min(index ?? sess.selected, sess.nodes.length - 1));
+    const nodes = removeNode(sess.nodes, idx);
+    setPenMenu(null);
+    setPen({ ...sess, nodes, selected: Math.min(idx, nodes.length - 1) });
+  };
+
+  /** Zamyka / otwiera całą krzywą (przycisk na pasku opcji). Otwarcie usuwa odcinek zamykający. */
+  const penToggleClosed = () => {
+    const sess = penRef.current;
+    if (!sess || sess.nodes.length < 3) return;
+    setPenMenu(null);
+    setPen({ ...sess, closed: !sess.closed, phase: 'editing' });
+  };
+
+  /** Otwiera zamkniętą krzywą w wybranym węźle: ten węzeł zostaje początkiem, poprzedni końcem. */
+  const penOpenAt = (index: number) => {
+    const sess = penRef.current;
+    if (!sess || !sess.closed || sess.nodes.length < 3) return;
+    const k = Math.max(0, Math.min(index, sess.nodes.length - 1));
+    const rot = [...sess.nodes.slice(k), ...sess.nodes.slice(0, k)];
+    setPenMenu(null);
+    setPen({ ...sess, nodes: normalizeOpenEnds(rot, false), closed: false, phase: 'editing', selected: 0 });
+  };
+
+  const penToggleRef = useRef(penToggleClosed);
+  penToggleRef.current = penToggleClosed;
+  const prevPenToggleRef = useRef(penCloseToggleTrigger);
+  useEffect(() => {
+    if (penCloseToggleTrigger && penCloseToggleTrigger !== prevPenToggleRef.current) {
+      prevPenToggleRef.current = penCloseToggleTrigger;
+      penToggleRef.current();
+    }
+  }, [penCloseToggleTrigger]);
+
+  const penInfoActive = !!activeVectorBezierSession;
+  const penInfoClosed = !!activeVectorBezierSession?.closed;
+  const penInfoCount = activeVectorBezierSession?.nodes.length ?? 0;
+  useEffect(() => {
+    onPenInfoChange?.({ active: penInfoActive, closed: penInfoClosed, count: penInfoCount });
+  }, [penInfoActive, penInfoClosed, penInfoCount, onPenInfoChange]);
+
+  const penChooseMode = (mode: PenMode) => {
+    const sess = penRef.current;
+    const m = penMenuRef.current;
+    if (!sess || !m) return;
+    if (!penModeAvailable(sess.nodes, m.index, sess.closed, mode)) return;
+    setPen({ ...sess, nodes: setNodeMode(sess.nodes, m.index, mode, sess.closed), selected: m.index });
+    setPenMenu(null);
+  };
+
+  const penSnap45 = (origin: SKPoint, p: SKPoint): SKPoint => {
+    const dx = p.x - origin.x;
+    const dy = p.y - origin.y;
+    const step = Math.PI / 4;
+    const a = Math.round(Math.atan2(dy, dx) / step) * step;
+    const d = Math.hypot(dx, dy);
+    return { x: Math.round(origin.x + Math.cos(a) * d), y: Math.round(origin.y + Math.sin(a) * d) };
+  };
+
+  const penPointerDown = (e: React.PointerEvent, pt: SKPoint) => {
+    const sess = penRef.current;
+    setPenMenu(null);
+    if (e.button === 2) {
+      if (sess && sess.phase === 'drawing') penFinishDrawing();
+      return;
+    }
+    const ms = penScreenPos(e);
+    const rounded = { x: Math.round(pt.x), y: Math.round(pt.y) };
+    const startDrag = (kind: PenDrag['kind'], index: number, nodes: PenNode[], inserted?: boolean) => {
+      penDragRef.current = { kind, index, startPt: pt, startScreen: ms, moved: false, initNodes: nodes, inserted };
+    };
+
+    if (sess) {
+      const hit = hitTestPen(sess, ms.x, ms.y, pt);
+      if (sess.phase === 'drawing') {
+        if (hit && hit.kind === 'node' && hit.index === 0) {
+          // kliknięcie pierwszego węzła zamyka krzywą
+          setPen({ ...sess, closed: true, phase: 'editing', selected: 0 });
+          return;
+        }
+        let p = rounded;
+        if (e.shiftKey && sess.nodes.length > 0) p = penSnap45(sess.nodes[sess.nodes.length - 1], p);
+        const nodes = [...sess.nodes, { x: p.x, y: p.y, hin: null, hout: null }];
+        setPen({ ...sess, nodes, selected: nodes.length - 1 });
+        startDrag('create', nodes.length - 1, nodes);
+        return;
+      }
+      if (hit) {
+        if (hit.kind === 'hin' || hit.kind === 'hout') {
+          setPen({ ...sess, selected: hit.index });
+          startDrag(hit.kind, hit.index, sess.nodes);
+          return;
+        }
+        if (hit.kind === 'node') {
+          setPen({ ...sess, selected: hit.index });
+          startDrag('node', hit.index, sess.nodes);
+          return;
+        }
+        if (hit.kind === 'seg' && hit.seg) {
+          const ins = insertNodeAt(sess.nodes, hit.seg);
+          setPen({ ...sess, nodes: ins.nodes, selected: ins.index });
+          startDrag('node', ins.index, ins.nodes, true);
+          return;
+        }
+      }
+      // Kliknięcie poza krzywą zatwierdza ją i zaczyna nową
+      commitActiveVectorSession();
+    }
+    const nodes: PenNode[] = [{ x: rounded.x, y: rounded.y, hin: null, hout: null }];
+    setPen({ nodes, closed: false, phase: 'drawing', selected: 0 });
+    startDrag('create', 0, nodes);
+  };
+
+  /** Zwraca true, gdy zdarzenie zostało obsłużone przez narzędzie krzywej. */
+  const penPointerMove = (e: React.PointerEvent, pt: SKPoint | null): boolean => {
+    if (activeTool !== 'bezier' || isSamplingPipetteRef.current) return false;
+    const sess = penRef.current;
+    const d = penDragRef.current;
+    if (!pt) return true;
+    const ms = penScreenPos(e);
+    if (d && sess) {
+      if (!d.moved && Math.hypot(ms.x - d.startScreen.x, ms.y - d.startScreen.y) < 3) return true;
+      d.moved = true;
+      const rounded = { x: Math.round(pt.x), y: Math.round(pt.y) };
+      let nodes = d.initNodes;
+      if (d.kind === 'create') {
+        const n = d.initNodes[d.index];
+        const c = e.shiftKey ? penSnap45(n, rounded) : rounded;
+        nodes = setSmoothFromDrag(d.initNodes, d.index, c);
+      } else if (d.kind === 'node') {
+        let dx = Math.round(pt.x - d.startPt.x);
+        let dy = Math.round(pt.y - d.startPt.y);
+        if (e.shiftKey) {
+          if (Math.abs(dx) >= Math.abs(dy)) dy = 0;
+          else dx = 0;
+        }
+        nodes = moveNodeBy(d.initNodes, d.index, dx, dy);
+      } else {
+        const n = d.initNodes[d.index];
+        const t = e.shiftKey ? penSnap45(n, rounded) : rounded;
+        nodes = moveHandle(d.initNodes, d.index, d.kind, t);
+      }
+      setPen({ ...sess, nodes });
+      return true;
+    }
+    if (sess) {
+      const hit = hitTestPen(sess, ms.x, ms.y, pt);
+      const str = !hit ? null : hit.kind === 'seg' ? 'seg' : hit.kind === 'node' ? `n:${hit.index}` : `${hit.kind}:${hit.index}`;
+      if (str !== hoverVectorHandle) setHoverVectorHandle(str);
+    }
+    return true;
+  };
+
+  const penPointerUp = (): boolean => {
+    if (activeTool !== 'bezier' || isSamplingPipetteRef.current) return false;
+    const d = penDragRef.current;
+    penDragRef.current = null;
+    const sess = penRef.current;
+    if (d && !d.moved && d.kind === 'node' && !d.inserted && sess && sess.phase === 'editing') {
+      setPenMenu({ index: d.index });
+    }
+    redraw();
+    return true;
+  };
+
+  const penApiRef = useRef({ finish: penFinishDrawing, del: () => penDeleteNode() });
+  penApiRef.current = { finish: penFinishDrawing, del: () => penDeleteNode() };
+  const penMenuRef = useRef<{ index: number } | null>(null);
+  penMenuRef.current = penMenu;
+
+  /** Lasso punkt po punkcie: zatwierdzenie (>= 3 punkty), anulowanie i cofnięcie ostatniego punktu. */
+  const lassoEnd = () => {
+    lassoMultiRef.current = false;
+    lassoPressRef.current = null;
+    setLassoMultiActive(false);
+    setLassoPts([]);
+    setIsDrawingSynced(false);
+    setDragStartPointSynced(null);
+    setCurrentDragPoint(null);
+  };
+  const lassoApiRef = useRef({
+    finish: (_ctrl: boolean, _alt: boolean) => {},
+    cancel: () => {},
+    undo: () => {},
+  });
+  lassoApiRef.current = {
+    finish: (ctrl, alt) => {
+      const pts = lassoPointsRef.current;
+      if (pts.length >= 3) {
+        let mode = selectionSettings.mode;
+        if (ctrl && alt) mode = 'intersect';
+        else if (alt) mode = 'subtract';
+        else if (ctrl) mode = 'add';
+        engine.applySelectionShape('lasso', pts, { ...selectionSettings, mode }, false, true);
+        onCanvasModified();
+      }
+      lassoEnd();
+    },
+    cancel: lassoEnd,
+    undo: () => {
+      const pts = lassoPointsRef.current.slice(0, -1);
+      if (pts.length === 0) lassoEnd();
+      else setLassoPts(pts);
+    },
+  };
+
+  // Zmiana narzędzia (lub trybu lasso) w trakcie sesji zatwierdza ją albo porzuca
+  useEffect(() => {
+    if (lassoMultiRef.current && (activeTool !== 'select-lasso' || selectionSettings.lassoMode !== 'polygon')) {
+      lassoApiRef.current.finish(false, false);
+    }
+  }, [activeTool, selectionSettings.lassoMode]);
 
   // OBSŁUGA SKRÓTÓW KLAWIATUROWYCH (Enter = Zatwierdź, Esc = Anuluj, Natychmiastowa reakcja na Shift / Alt)
   useEffect(() => {
@@ -2432,6 +2948,38 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
           }
         }
       }
+      if (lassoMultiRef.current && activeTool === 'select-lasso') {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          lassoApiRef.current.finish(e.ctrlKey || e.metaKey, e.altKey);
+          return;
+        }
+        if (e.key === 'Escape') {
+          lassoApiRef.current.cancel();
+          return;
+        }
+        if (e.key === 'Backspace') {
+          e.preventDefault();
+          lassoApiRef.current.undo();
+          return;
+        }
+      }
+      if (penRef.current && activeTool === 'bezier') {
+        if (e.key === 'Escape' && penMenuRef.current) {
+          setPenMenu(null);
+          return;
+        }
+        if (e.key === 'Enter' && penRef.current.phase === 'drawing') {
+          e.preventDefault();
+          penApiRef.current.finish();
+          return;
+        }
+        if (e.key === 'Backspace' || e.key === 'Delete') {
+          e.preventDefault();
+          penApiRef.current.del();
+          return;
+        }
+      }
       if (e.key === 'Escape') {
         if (isAnyVectorSessionActive) {
           cancelActiveVectorSession();
@@ -2442,11 +2990,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
           engine.selectionManager.cancelTransformSelection();
           onCanvasModified();
         } else if (engine.bucketSeedPoint) {
-          engine.restoreBucketInitialTiles();
-          engine.bucketSeedPoint = null;
-          engine.bucketInitialTilesSnapshot = null;
-          engine.bucketInitialLayerIndex = -1;
-          engine.bucketColorSource = 'primary';
+          engine.cancelPaintBucketSession();
           onCanvasModified();
         } else if (engine.gradientStartPoint) {
           engine.cancelGradientSession();
@@ -2599,13 +3143,21 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
             oCtx.lineWidth = 1 / zoom;
             oCtx.setLineDash([4 / zoom, 4 / zoom]);
 
+            // Tylko widoczny fragment konturu: pełny kontur przy dużym zoomie to miliony kresek poza ekranem
+            const antsPath = engine.selectionManager.getVisibleContourPath(
+              (0 - screenCenterX) / zoom + engine.width / 2,
+              (0 - screenCenterY) / zoom + engine.height / 2,
+              (cWidth - screenCenterX) / zoom + engine.width / 2,
+              (cHeight - screenCenterY) / zoom + engine.height / 2
+            );
+
             oCtx.lineDashOffset = dashOffset / zoom;
             oCtx.strokeStyle = '#000000';
-            oCtx.stroke(engine.selectionManager.contourPath);
+            oCtx.stroke(antsPath);
 
             oCtx.lineDashOffset = (dashOffset + 4) / zoom;
             oCtx.strokeStyle = '#ffffff';
-            oCtx.stroke(engine.selectionManager.contourPath);
+            oCtx.stroke(antsPath);
 
             oCtx.restore();
           }
@@ -2805,79 +3357,106 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
             drawHollowRing(mid, hoverVectorHandle === 'move', 4);
           }
 
-          // 6. INTERFEJS EDYCJI KRZYWEJ BEZIERA NA ŻYWO (P0, P1, P2, P3, ŚRODEK) - PUSTE ZNACZNIKI
+          // 6. INTERFEJS EDYCJI KRZYWEJ WIELOWĘZŁOWEJ NA ŻYWO (węzły, uchwyty, linia pomocnicza do kursora)
           if (activeVectorBezierSession) {
-            const { p0, p1, p2, p3 } = activeVectorBezierSession;
-            const mid: SKPoint = { x: (p0.x + p3.x) / 2, y: (p0.y + p3.y) / 2 };
+            const { nodes, closed, phase, selected } = activeVectorBezierSession;
+            const nN = nodes.length;
+            const hov = hoverVectorHandle;
+            const dragging = penDragRef.current;
 
             oCtx.save();
+            // Linia pomocnicza od ostatniego węzła do kursora (podczas wyklikiwania)
+            if (phase === 'drawing' && nN > 0 && !dragging) {
+              const cur = lastDocPtRef.current;
+              if (cur) {
+                const last = nodes[nN - 1];
+                const c = { x: Math.round(cur.x), y: Math.round(cur.y) };
+                oCtx.lineWidth = 1 / zoom;
+                oCtx.strokeStyle = 'rgba(168, 85, 247, 0.9)';
+                oCtx.setLineDash([4 / zoom, 3 / zoom]);
+                oCtx.beginPath();
+                oCtx.moveTo(last.x, last.y);
+                if (last.hout) oCtx.bezierCurveTo(last.hout.x, last.hout.y, c.x, c.y, c.x, c.y);
+                else oCtx.lineTo(c.x, c.y);
+                oCtx.stroke();
+                oCtx.setLineDash([]);
+              }
+            }
 
-            // Linie pomocnicze stycznych (P0-P1 oraz P3-P2)
+            // Które uchwyty pokazujemy: w trakcie wyklikiwania tylko przy ostatnim węźle, potem przy wszystkich
+            const showHin = (i: number) => (phase === 'drawing' ? i === nN - 1 : i > 0 || (closed && nN > 2));
+            const showHout = (i: number) => (phase === 'drawing' ? i === nN - 1 : i < nN - 1 || (closed && nN > 2));
+
             oCtx.lineWidth = 1 / zoom;
             oCtx.strokeStyle = 'rgba(168, 85, 247, 0.7)';
             oCtx.setLineDash([3 / zoom, 3 / zoom]);
-
             oCtx.beginPath();
-            oCtx.moveTo(p0.x, p0.y);
-            oCtx.lineTo(p1.x, p1.y);
-            oCtx.moveTo(p3.x, p3.y);
-            oCtx.lineTo(p2.x, p2.y);
+            for (let i = 0; i < nN; i++) {
+              const nd = nodes[i];
+              if (nd.hin && showHin(i)) {
+                oCtx.moveTo(nd.x, nd.y);
+                oCtx.lineTo(nd.hin.x, nd.hin.y);
+              }
+              if (nd.hout && showHout(i)) {
+                oCtx.moveTo(nd.x, nd.y);
+                oCtx.lineTo(nd.hout.x, nd.hout.y);
+              }
+            }
             oCtx.stroke();
             oCtx.setLineDash([]);
             oCtx.restore();
 
-            const drawHollowRing = (pt: SKPoint, isHover: boolean, rPx: number = 6) => {
-              const r = rPx / zoom;
+            const diamond = (pt: SKPoint, isHover: boolean) => {
+              const d = 5 / zoom;
+              const path = () => {
+                oCtx.beginPath();
+                oCtx.moveTo(pt.x, pt.y - d);
+                oCtx.lineTo(pt.x + d, pt.y);
+                oCtx.lineTo(pt.x, pt.y + d);
+                oCtx.lineTo(pt.x - d, pt.y);
+                oCtx.closePath();
+              };
               oCtx.save();
               oCtx.strokeStyle = '#000000';
               oCtx.lineWidth = 2.5 / zoom;
-              oCtx.beginPath();
-              oCtx.arc(pt.x, pt.y, r, 0, Math.PI * 2);
+              path();
               oCtx.stroke();
-
-              oCtx.strokeStyle = isHover ? '#00e5ff' : '#ffffff';
-              oCtx.lineWidth = 1.2 / zoom;
-              oCtx.beginPath();
-              oCtx.arc(pt.x, pt.y, r, 0, Math.PI * 2);
-              oCtx.stroke();
-              oCtx.restore();
-            };
-
-            const drawHollowDiamond = (pt: SKPoint, isHover: boolean, rPx: number = 6) => {
-              const d = rPx / zoom;
-              oCtx.save();
-              oCtx.strokeStyle = '#000000';
-              oCtx.lineWidth = 2.5 / zoom;
-              oCtx.beginPath();
-              oCtx.moveTo(pt.x, pt.y - d);
-              oCtx.lineTo(pt.x + d, pt.y);
-              oCtx.lineTo(pt.x, pt.y + d);
-              oCtx.lineTo(pt.x - d, pt.y);
-              oCtx.closePath();
-              oCtx.stroke();
-
               oCtx.strokeStyle = isHover ? '#00e5ff' : '#a855f7';
               oCtx.lineWidth = 1.2 / zoom;
-              oCtx.beginPath();
-              oCtx.moveTo(pt.x, pt.y - d);
-              oCtx.lineTo(pt.x + d, pt.y);
-              oCtx.lineTo(pt.x, pt.y + d);
-              oCtx.lineTo(pt.x - d, pt.y);
-              oCtx.closePath();
+              path();
               oCtx.stroke();
               oCtx.restore();
             };
 
-            // P0 i P3 (kotwice - puste okręgi)
-            drawHollowRing(p0, hoverVectorHandle === 'p0', 6);
-            drawHollowRing(p3, hoverVectorHandle === 'p3', 6);
+            const nodeMark = (pt: SKPoint, isHover: boolean, isSel: boolean, isFirstClose: boolean) => {
+              const r = 5.5 / zoom;
+              oCtx.save();
+              oCtx.strokeStyle = '#000000';
+              oCtx.lineWidth = 2.5 / zoom;
+              oCtx.beginPath();
+              oCtx.arc(pt.x, pt.y, r, 0, Math.PI * 2);
+              oCtx.stroke();
+              oCtx.strokeStyle = isHover ? '#00e5ff' : '#ffffff';
+              oCtx.lineWidth = 1.2 / zoom;
+              oCtx.stroke();
+              if (isSel || isFirstClose) {
+                oCtx.fillStyle = isFirstClose ? '#00e5ff' : '#a855f7';
+                oCtx.beginPath();
+                oCtx.arc(pt.x, pt.y, r * 0.55, 0, Math.PI * 2);
+                oCtx.fill();
+              }
+              oCtx.restore();
+            };
 
-            // P1 i P2 (uchwyty kontrolne - puste romby)
-            drawHollowDiamond(p1, hoverVectorHandle === 'p1', 6);
-            drawHollowDiamond(p2, hoverVectorHandle === 'p2', 6);
-
-            // Środek
-            drawHollowRing(mid, hoverVectorHandle === 'move', 4);
+            for (let i = 0; i < nN; i++) {
+              const nd = nodes[i];
+              if (nd.hin && showHin(i)) diamond(nd.hin, hov === `hin:${i}`);
+              if (nd.hout && showHout(i)) diamond(nd.hout, hov === `hout:${i}`);
+            }
+            for (let i = 0; i < nN; i++) {
+              const nd = nodes[i];
+              nodeMark(nd, hov === `n:${i}`, phase === 'editing' && i === selected, phase === 'drawing' && i === 0 && nN >= 3 && hov === 'n:0');
+            }
           }
 
           // 7. INTERFEJS EDYCJI FIGURY NA ŻYWO (RAMKA, 8 UCHWYTÓW, OBRÓT, MODYFIKATOR)
@@ -3067,7 +3646,33 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
           }
 
           // 8. INTERFEJS PRZEKSZTAŁCANIA ZAZNACZENIA / ZAWARTOŚCI NA ŻYWO (RAMKA, 8 UCHWYTÓW, PIVOT)
-          if (isTransformTool && engine.selectionManager.transformState) {
+          const perspQuad = activeTool === 'transform-content' ? engine.getPerspectiveQuad() : null;
+          if (perspQuad) {
+            oCtx.save();
+            oCtx.beginPath();
+            oCtx.moveTo(perspQuad[0].x, perspQuad[0].y);
+            for (let i = 1; i < 4; i++) oCtx.lineTo(perspQuad[i].x, perspQuad[i].y);
+            oCtx.closePath();
+            oCtx.lineWidth = 1.5 / zoom;
+            oCtx.strokeStyle = '#ff9800';
+            oCtx.stroke();
+            oCtx.setLineDash([4 / zoom, 4 / zoom]);
+            oCtx.lineWidth = 1 / zoom;
+            oCtx.strokeStyle = '#ffffff';
+            oCtx.stroke();
+            oCtx.setLineDash([]);
+            for (let i = 0; i < 4; i++) {
+              const hov = transformHoverHandle === `p${i}` || transformActiveHandle === `p${i}`;
+              oCtx.beginPath();
+              oCtx.arc(perspQuad[i].x, perspQuad[i].y, 5.5 / zoom, 0, Math.PI * 2);
+              oCtx.fillStyle = hov ? '#ffeb3b' : '#ffffff';
+              oCtx.fill();
+              oCtx.lineWidth = 2 / zoom;
+              oCtx.strokeStyle = '#ff9800';
+              oCtx.stroke();
+            }
+            oCtx.restore();
+          } else if (isTransformTool && engine.selectionManager.transformState) {
             const st = engine.selectionManager.transformState;
             oCtx.save();
 
@@ -3642,6 +4247,9 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       return;
     }
 
+    // Narzędzia inne niż różdżka i wiadro czytają zaznaczenie i warstwy, więc najpierw dokończ liczenie w tle
+    if (activeTool !== 'magic-wand' && activeTool !== 'bucket') engine.flushPendingFill();
+
     const isQuickPipette = (e.ctrlKey || e.metaKey || isCtrlKeyDown) && isDrawingTool(activeTool) && activeTool !== 'stamp';
     const isRightButtonAllowed =
       e.button === 2 &&
@@ -3652,6 +4260,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         activeTool === 'gradient' ||
         activeTool === 'pipette' ||
         activeTool === 'zoom' ||
+        (activeTool === 'bezier' && !!penRef.current) ||
         isQuickPipette);
 
     if (e.button !== 0 && !isRightButtonAllowed) return;
@@ -3722,6 +4331,12 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       }
     }
 
+    // KRZYWA WIELOWĘZŁOWA
+    if (activeTool === 'bezier') {
+      penPointerDown(e, pt);
+      return;
+    }
+
     // OBSŁUGA NARZĘDZI TRANSFORMACJI ZAZNACZENIA / ZAWARTOŚCI
     if (isTransformTool) {
       if (activeTool === 'transform-content' && !engine.transformContentSession) {
@@ -3738,6 +4353,9 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       if (hit && engine.selectionManager.transformState) {
         setTransformActiveHandleSynced(hit);
         lastTransformPtRef.current = pt;
+        transformDownScreenRef.current = { x: e.clientX, y: e.clientY };
+        const pq = engine.getPerspectiveQuad();
+        perspInitQuadRef.current = pq ? (pq.map((p) => ({ x: p.x, y: p.y })) as Quad) : null;
         transformDragStartDocPtRef.current = pt;
         transformInitialStateRef.current = {
           ...engine.selectionManager.transformState,
@@ -3788,8 +4406,6 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       vectorDragStartPtRef.current = pt;
       if (activeVectorLineSession) {
         vectorInitialSessionStateRef.current = { ...activeVectorLineSession };
-      } else if (activeVectorBezierSession) {
-        vectorInitialSessionStateRef.current = { ...activeVectorBezierSession };
       } else if (activeVectorShapeSession) {
         vectorInitialSessionStateRef.current = {
           ...activeVectorShapeSession,
@@ -3826,7 +4442,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       }
     }
 
-    if (activeTool === 'line' || activeTool === 'bezier' || activeTool === 'shapes' || activeTool === 'text') {
+    if (activeTool === 'line' || activeTool === 'shapes' || activeTool === 'text') {
       if (activeVectorLineSession || activeVectorBezierSession || activeVectorShapeSession || activeTextSession) {
         commitActiveVectorSession();
       }
@@ -3843,6 +4459,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     if (activeTool === 'magic-wand') {
       const sp = engine.selectionManager.wandSeedPoint;
       if (sp && Math.hypot(pt.x - sp.x, pt.y - sp.y) * zoom <= 16) {
+        engine.flushPendingFill();
         wandDragInitialSnapshotRef.current = engine.selectionManager.getMaskSnapshot();
         setIsDraggingWandHandle(true);
         return;
@@ -3862,9 +4479,31 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
 
     if (activeTool === 'select-lasso') {
       engine.selectionManager.wandSeedPoint = null;
+      if (selectionSettings.lassoMode === 'polygon') {
+        const ms = penScreenPos(e);
+        if (lassoMultiRef.current) {
+          const pts = lassoPointsRef.current;
+          // kliknięcie w pierwszy punkt zamyka i zatwierdza
+          if (pts.length >= 3 && Math.hypot(pt.x - pts[0].x, pt.y - pts[0].y) * zoom <= 8) {
+            lassoPressRef.current = null;
+            lassoApiRef.current.finish(e.ctrlKey || e.metaKey, e.altKey);
+            return;
+          }
+          lassoPressRef.current = { screen: ms, moved: false, first: false };
+          return;
+        }
+        setDragStartPointSynced(pt);
+        setCurrentDragPoint(pt);
+        setLassoPts([pt]);
+        lassoMultiRef.current = true;
+        setLassoMultiActive(true);
+        lassoPressRef.current = { screen: ms, moved: false, first: true };
+        setIsDrawingSynced(true);
+        return;
+      }
       setDragStartPointSynced(pt);
       setCurrentDragPoint(pt);
-      setLassoPoints([pt]);
+      setLassoPts([pt]);
       setIsDrawingSynced(true);
       return;
     }
@@ -4090,6 +4729,8 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       return;
     }
 
+    if (penPointerMove(e, pt)) return;
+
     // INTERAKCJA PRZEKSZTAŁCANIA ZAZNACZENIA
     if (isTransformTool) {
       if (
@@ -4135,15 +4776,17 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     }
 
     if (isDraggingWandHandle && pt) {
-      engine.refreshMagicWand(selectionSettings, pt);
-      onCanvasModified();
+      // Uchwyt podąża za kursorem od razu; obszar jest liczony w tle (najwyżej jedno zadanie na klatkę)
+      engine.selectionManager.wandSeedPoint = { x: pt.x, y: pt.y };
+      scheduleWandRefresh(pt);
       return;
     }
 
     if (isDraggingBucketHandle && pt) {
+      // Uchwyt podąża za kursorem od razu; obszar jest liczony w tle (silnik odświeża widok, gdy wynik jest gotowy)
+      engine.bucketSeedPoint = { x: pt.x, y: pt.y };
       const col = engine.bucketColorSource === 'secondary' ? secondaryColor : primaryColor;
       engine.applyPaintBucket(pt, selectionSettings, { ...brushSettings, color: col }, false);
-      onCanvasModified();
       return;
     }
 
@@ -4271,14 +4914,28 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       return;
     }
 
+    if (activeTool === 'select-lasso' && lassoMultiRef.current) {
+      setCurrentDragPoint(pt);
+      const pr = lassoPressRef.current;
+      if (pr && (e.buttons & 1)) {
+        const ms = penScreenPos(e);
+        if (!pr.moved && Math.hypot(ms.x - pr.screen.x, ms.y - pr.screen.y) < 3) return;
+        pr.moved = true;
+        const prev = lassoPointsRef.current;
+        const last = prev[prev.length - 1];
+        if (!last || Math.hypot(pt.x - last.x, pt.y - last.y) * zoom >= 0.5) setLassoPts([...prev, pt]);
+      }
+      return;
+    }
+
     if (activeTool === 'select-lasso') {
       setCurrentDragPoint(pt);
       // Punkty bliższe niż pół piksela ekranu nie zmieniają kształtu, a niepotrzebnie wydłużają lasso (podgląd, wypełnianie, łączenie wielokątów)
-      setLassoPoints((prev) => {
+      {
+        const prev = lassoPointsRef.current;
         const last = prev[prev.length - 1];
-        if (last && Math.hypot(pt.x - last.x, pt.y - last.y) * zoom < 0.5) return prev;
-        return [...prev, pt];
-      });
+        if (!(last && Math.hypot(pt.x - last.x, pt.y - last.y) * zoom < 0.5)) setLassoPts([...prev, pt]);
+      }
       return;
     }
 
@@ -4429,6 +5086,8 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       return;
     }
 
+    if (penPointerUp()) return;
+
     if (textDragRef.current) {
       textDragRef.current = null;
       focusTextInput();
@@ -4447,6 +5106,30 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
 
     // ZAKOŃCZENIE TRANSFORMACJI ZAZNACZENIA
     if (isTransformTool && transformActiveHandle) {
+      const downPos = transformDownScreenRef.current;
+      const wasClick = !!downPos && Math.hypot(e.clientX - downPos.x, e.clientY - downPos.y) < 4;
+      if (
+        activeTool === 'transform-content' &&
+        wasClick &&
+        (transformActiveHandle === 'move' || transformActiveHandle === 'pmove') &&
+        engine.transformContentSession
+      ) {
+        // Pojedyncze kliknięcie na zaznaczeniu przełącza tryb perspektywy <-> zwykła ramka
+        const init = transformInitialStateRef.current;
+        if (engine.perspectiveActive) {
+          engine.exitPerspective();
+        } else {
+          if (init) {
+            engine.selectionManager.updateTransformSelection({ pos: { ...init.pos }, pivot: { ...init.pivot } });
+          }
+          engine.enterPerspective();
+        }
+        setTransformActiveHandleSynced(null);
+        lastTransformPtRef.current = null;
+        transformDownScreenRef.current = null;
+        onCanvasModified();
+        return;
+      }
       setTransformActiveHandleSynced(null);
       lastTransformPtRef.current = null;
       if (activeTool === 'transform-selection' && transformInitialHistorySnapshotRef.current) {
@@ -4463,14 +5146,15 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
 
     if (isDraggingWandHandle) {
       setIsDraggingWandHandle(false);
-      if (wandDragInitialSnapshotRef.current) {
-        const finalSnapshot = engine.selectionManager.getMaskSnapshot();
-        engine.pushSelectionAction(
-          wandDragInitialSnapshotRef.current,
-          finalSnapshot,
-          'Przeniesienie punktu różdżki'
-        );
-        wandDragInitialSnapshotRef.current = null;
+      runWandRefresh(); // wyślij ostatnie oczekujące odświeżenie
+      const initialSnapshot = wandDragInitialSnapshotRef.current;
+      wandDragInitialSnapshotRef.current = null;
+      if (initialSnapshot) {
+        // Stan do historii zapisujemy dopiero po zakończeniu liczenia w tle
+        void engine.whenWandIdle().then(() => {
+          const finalSnapshot = engine.selectionManager.getMaskSnapshot();
+          engine.pushSelectionAction(initialSnapshot, finalSnapshot, 'Przeniesienie punktu różdżki');
+        });
       }
       return;
     }
@@ -4576,6 +5260,17 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       return;
     }
 
+    // LASSO PUNKT PO PUNKCIE: puszczenie przycisku nie kończy sesji; zwykłe kliknięcie dodaje odcinek prosty
+    if (activeTool === 'select-lasso' && lassoMultiRef.current) {
+      const pr = lassoPressRef.current;
+      lassoPressRef.current = null;
+      if (pr && !pr.moved && !pr.first && true) {
+        const p = getDocPoint(e);
+        if (p) setLassoPts([...lassoPointsRef.current, p]);
+      }
+      return;
+    }
+
     // TEKST: zwykłe kliknięcie (bez przeciągania) tworzy domyślną ramkę z automatyczną wysokością
     if (activeTool === 'text' && isDrawingRef.current && !activeTextSession && dragStartPointRef.current) {
       createDefaultTextSession(dragStartPointRef.current);
@@ -4631,7 +5326,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       onCanvasModified();
       setDragStartPointSynced(null);
       setCurrentDragPoint(null);
-      setLassoPoints([]);
+      setLassoPts([]);
       return;
     }
 
@@ -4735,6 +5430,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
           layerIndex: engine.activeLayerIndex,
           before: endResult.before,
           after: endResult.after,
+          other: endResult.other,
         });
 
         if (canvasRef.current) {
@@ -4779,7 +5475,8 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     }
     if (isTransformTool) {
       const h = transformActiveHandle || transformHoverHandle;
-      if (h === 'pivot' || h === 'move') return 'move';
+      if (h === 'pivot' || h === 'move' || h === 'pmove') return 'move';
+      if (h === 'p0' || h === 'p1' || h === 'p2' || h === 'p3') return 'crosshair';
       if (h === 'rotate') {
         const boxAngleDeg = Math.round(
           ((engine.selectionManager.transformState?.angle || 0) * 180) / Math.PI
@@ -4836,8 +5533,10 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   const screenCenterY = cHeight / 2 + panOffset.y;
   const screenWidth = engine.width * zoom;
   const screenHeight = engine.height * zoom;
-  const screenLeft = screenCenterX - screenWidth / 2;
-  const screenTop = screenCenterY - screenHeight / 2;
+  // Lewy górny róg przyciągnięty do pikseli urządzenia: płótno dokumentu i płótno kafelków mają ten sam układ współrzędnych
+  const devDpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
+  const screenLeft = Math.round((screenCenterX - screenWidth / 2) * devDpr) / devDpr;
+  const screenTop = Math.round((screenCenterY - screenHeight / 2) * devDpr) / devDpr;
 
   return (
     <div
@@ -4910,6 +5609,72 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         className="absolute inset-0 pointer-events-none z-30"
       />
 
+      {/* Menu rodzaju węzła krzywej (po kliknięciu węzła) */}
+      {penMenu && activeVectorBezierSession && activeVectorBezierSession.nodes[penMenu.index] && (() => {
+        const sess = activeVectorBezierSession;
+        const nd = sess.nodes[penMenu.index];
+        const sp = docToScreen(nd);
+        const cw = containerSize.width || containerRef.current?.clientWidth || 0;
+        const ch = containerSize.height || containerRef.current?.clientHeight || 0;
+        const left = Math.max(4, Math.min(sp.x + 14, cw - 200));
+        const top = Math.max(4, Math.min(sp.y + 14, ch - 140));
+        const cur = penNodeMode(nd);
+        return (
+          <div
+            className="absolute z-40 w-48 bg-[#1e1e1e] border border-[#454545] rounded shadow-2xl py-1 text-xs text-[#ddd]"
+            style={{ left, top }}
+            onPointerDown={(e) => e.stopPropagation()}
+            onPointerUp={(e) => e.stopPropagation()}
+            onContextMenu={(e) => e.preventDefault()}
+          >
+            {PEN_MODES.map((m) => {
+              const ok = penModeAvailable(sess.nodes, penMenu.index, sess.closed, m.id);
+              return (
+                <button
+                  key={m.id}
+                  type="button"
+                  disabled={!ok}
+                  title={m.hint}
+                  onClick={() => penChooseMode(m.id)}
+                  className={`w-full flex items-center gap-2 px-2 py-1 text-left ${
+                    cur === m.id ? 'bg-[#094771] text-white' : 'hover:bg-[#2a2d2e]'
+                  } ${ok ? 'cursor-pointer' : 'opacity-35 cursor-default'}`}
+                >
+                  <PenModeIcon mode={m.id} />
+                  <span>{m.label}</span>
+                </button>
+              );
+            })}
+            <div className="my-1 border-t border-[#333]" />
+            {sess.closed && sess.nodes.length >= 3 && (
+              <button
+                type="button"
+                title="Otwiera krzywą w tym węźle: staje się on początkiem, a poprzedni węzeł końcem"
+                onClick={() => penOpenAt(penMenu.index)}
+                className="w-full flex items-center gap-2 px-2 py-1 text-left cursor-pointer hover:bg-[#2a2d2e]"
+              >
+                <span className="w-4 text-center shrink-0">✂</span>
+                <span>Otwórz krzywą tutaj</span>
+              </button>
+            )}
+            <button
+              type="button"
+              disabled={sess.nodes.length <= 2}
+              title="Usuń węzeł (Delete)"
+              onClick={() => penDeleteNode(penMenu.index)}
+              className={`w-full flex items-center gap-2 px-2 py-1 text-left ${
+                sess.nodes.length > 2 ? 'cursor-pointer hover:bg-[#2a2d2e] text-[#f0a0a0]' : 'opacity-35 cursor-default'
+              }`}
+            >
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" className="shrink-0">
+                <path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8h5.8l.6-8M6.8 7v3.5M9.2 7v3.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+              <span>Usuń węzeł</span>
+            </button>
+          </div>
+        );
+      })()}
+
       {/* Ukryte pole wejściowe edytora tekstu (klawiatura, IME, schowek) */}
       <textarea
         ref={textInputRef}
@@ -4947,6 +5712,23 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         }}
       />
     </div>
+  );
+};
+
+const PenModeIcon: React.FC<{ mode: PenMode }> = ({ mode }) => {
+  const d =
+    mode === 'sharp'
+      ? 'M2 13 L8 4 L14 13'
+      : mode === 'before'
+      ? 'M2 13 Q4 4 8 4 L14 4'
+      : mode === 'after'
+      ? 'M2 4 L8 4 Q12 4 14 13'
+      : 'M2 13 C4 7 6 4 8 4 C10 4 12 7 14 13';
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" className="shrink-0">
+      <path d={d} stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+      <rect x="6.3" y="2.3" width="3.4" height="3.4" fill="#1e1e1e" stroke="currentColor" strokeWidth="1.2" />
+    </svg>
   );
 };
 

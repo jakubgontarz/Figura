@@ -157,6 +157,7 @@ export default function App() {
     wandMode: 'contiguous',
     sampleSource: 'image',
     interpolation: 'bilinear',
+    lassoMode: 'freehand',
   });
 
   const handleUpdateSelectionSettings = (newSettings: Partial<SelectionSettings>) => {
@@ -252,6 +253,11 @@ export default function App() {
     antiAliasing: true,
     hardness: 100,
     blendMode: 'SrcOver',
+    lineCap: 'round',
+    cornerJoin: 'round',
+    fillMode: 'none',
+    fillColor: { r: 255, g: 255, b: 255, a: 255 },
+    strokeAlignment: 'center',
   });
 
   const handleUpdateLineAndCurveSettings = (newSettings: Partial<LineAndCurveSettings>) => {
@@ -268,6 +274,7 @@ export default function App() {
     setLineAndCurveSettings((prev) => ({
       ...prev,
       strokeColor: primaryColor,
+      fillColor: secondaryColor,
     }));
     setTextSettings((prev) => ({
       ...prev,
@@ -280,6 +287,8 @@ export default function App() {
   const [isLiveVectorSessionActive, setIsLiveVectorSessionActive] = useState(false);
   const [liveVectorCommitTrigger, setLiveVectorCommitTrigger] = useState(0);
   const [liveVectorCancelTrigger, setLiveVectorCancelTrigger] = useState(0);
+  const [penCloseToggleTrigger, setPenCloseToggleTrigger] = useState(0);
+  const [penInfo, setPenInfo] = useState({ active: false, closed: false, count: 0 });
 
   // Narzędzia
   const [activeTool, setActiveTool] = useState<ToolType>('brush');
@@ -550,6 +559,9 @@ export default function App() {
     return () => window.removeEventListener('paste', handleGlobalPaste);
   }, [engine, pasteImageBlob, bumpEngineRevision]);
 
+  const isLiveVectorSessionActiveRef = useRef(false);
+  isLiveVectorSessionActiveRef.current = isLiveVectorSessionActive;
+
   // Skróty klawiszowe
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -674,7 +686,8 @@ export default function App() {
         } else if (activeTool === 'deform') {
           setDeformSettings((prev) => ({ ...prev, size: Math.max(1, Math.min(2000, prev.size + delta)) }));
         }
-      } else if (e.key === 'Delete') {
+      } else if (e.key === 'Delete' && !isLiveVectorSessionActiveRef.current) {
+        // Przy aktywnej sesji (np. krzywa) Delete należy do sesji (usuwa węzeł), a nie czyści warstwy
         const mask = engine.selectionManager.hasActiveSelection ? engine.selectionManager.maskCanvas : null;
         engine.getActiveLayer()?.clear(mask);
         bumpEngineRevision();
@@ -856,6 +869,8 @@ export default function App() {
         isLiveVectorSessionActive={isLiveVectorSessionActive}
         onCommitLiveVectorSession={() => setLiveVectorCommitTrigger((c) => c + 1)}
         onCancelLiveVectorSession={() => setLiveVectorCancelTrigger((c) => c + 1)}
+        penInfo={penInfo}
+        onTogglePenClosed={() => setPenCloseToggleTrigger((c) => c + 1)}
       />
 
       {/* 4. Główny obszar roboczy */}
@@ -912,12 +927,13 @@ export default function App() {
               setPrimaryColor(color);
               setBrushSettings((prev) => ({ ...prev, color }));
             }
-            bumpEngineRevision();
           }}
           onCanvasModified={bumpEngineRevision}
           onLiveVectorSessionChange={setIsLiveVectorSessionActive}
           liveVectorCommitTrigger={liveVectorCommitTrigger}
           liveVectorCancelTrigger={liveVectorCancelTrigger}
+          penCloseToggleTrigger={penCloseToggleTrigger}
+          onPenInfoChange={setPenInfo}
           onShowToast={showToast}
         />
 
@@ -926,14 +942,10 @@ export default function App() {
           <ColorPanel
             primaryColor={primaryColor}
             secondaryColor={secondaryColor}
-            onChangePrimaryColor={(c) => {
-              setPrimaryColor(c);
-              bumpEngineRevision();
-            }}
-            onChangeSecondaryColor={(c) => {
-              setSecondaryColor(c);
-              bumpEngineRevision();
-            }}
+            // Sama zmiana koloru nie zmienia pikseli dokumentu, więc nie wymusza ponownego złożenia warstw
+            // (sesje gradientu, wiadra i figur odświeżają się same, bo zależą od koloru)
+            onChangePrimaryColor={setPrimaryColor}
+            onChangeSecondaryColor={setSecondaryColor}
           />
 
           <LayersPanel
@@ -942,9 +954,36 @@ export default function App() {
             onSelectLayer={(idx) => {
               if (engine.bucketSeedPoint) engine.commitPaintBucketSession();
               if (engine.gradientStartPoint) engine.commitGradientSession();
-              engine.activeLayerIndex = idx;
+              // zachowuje cel edycji (piksele / maska) wybranej warstwy; zmiana warstwy kończy podgląd maski
+              engine.setEditTarget(idx, engine.layers[idx]?.editMask ? 'mask' : 'pixels');
               bumpEngineRevision();
             }}
+            onSelectTarget={(idx, target) => {
+              engine.setEditTarget(idx, target);
+              bumpEngineRevision();
+            }}
+            onViewMask={(idx) => {
+              engine.setMaskView(idx);
+              bumpEngineRevision();
+            }}
+            maskViewIndex={engine.maskView ? engine.layers.indexOf(engine.maskView) : null}
+            onAddMask={() => {
+              engine.addLayerMask(engine.selectionManager.hasActiveSelection);
+              bumpEngineRevision();
+            }}
+            onApplyMask={() => {
+              engine.removeLayerMask(true);
+              bumpEngineRevision();
+            }}
+            onToggleMaskEnabled={(idx) => {
+              engine.toggleMaskEnabled(idx);
+              bumpEngineRevision();
+            }}
+            onToggleMaskLink={(idx) => {
+              engine.toggleMaskLink(idx);
+              bumpEngineRevision();
+            }}
+            hasSelection={engine.selectionManager.hasActiveSelection}
             onAddLayer={() => {
               if (engine.bucketSeedPoint) engine.commitPaintBucketSession();
               if (engine.gradientStartPoint) engine.commitGradientSession();
@@ -954,7 +993,14 @@ export default function App() {
             onRemoveLayer={() => {
               if (engine.bucketSeedPoint) engine.commitPaintBucketSession();
               if (engine.gradientStartPoint) engine.commitGradientSession();
-              if (engine.getActiveLayer()?.locked) {
+              const act = engine.getActiveLayer();
+              // zaznaczona maska: usuwa tylko maskę; zaznaczona warstwa: warstwę razem z ewentualną maską
+              if (act?.hasMask && act.editMask) {
+                engine.removeLayerMask(false);
+                bumpEngineRevision();
+                return;
+              }
+              if (act?.locked) {
                 showToast('Nie można usunąć zablokowanej warstwy');
                 return;
               }

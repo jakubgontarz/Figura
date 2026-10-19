@@ -33,10 +33,14 @@ import {
   StrokeAlignment,
   StrokeCornerJoin,
   StrokeDashStyle,
+  StrokeLineCap,
+  PathFillMode,
   VectorShapeSettings,
   TextToolSettings,
 } from '../core/skia/types.ts';
 import { TextOptions } from './TextOptions.tsx';
+
+const isArrowMarker = (m: MarkerType) => m !== 'none' && m !== 'cap-round' && m !== 'cap-square';
 
 interface ToolOptionsBarProps {
   brushSettings: BrushSettings;
@@ -73,6 +77,8 @@ interface ToolOptionsBarProps {
   isLiveVectorSessionActive?: boolean;
   onCommitLiveVectorSession?: () => void;
   onCancelLiveVectorSession?: () => void;
+  penInfo?: { active: boolean; closed: boolean; count: number };
+  onTogglePenClosed?: () => void;
 }
 
 function sliderToSize(val: number): number {
@@ -163,6 +169,8 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
   isLiveVectorSessionActive = false,
   onCommitLiveVectorSession,
   onCancelLiveVectorSession,
+  penInfo,
+  onTogglePenClosed,
 }) => {
   const isSelectionTool =
     activeTool === 'select-rect' ||
@@ -185,13 +193,13 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
             <label className="text-[11px] whitespace-nowrap text-[#aaa]">Grubość:</label>
             <input
               type="number"
-              min="1"
+              min={activeTool === 'bezier' ? 0 : 1}
               max="200"
               value={lineAndCurveSettings.strokeWidth}
               onChange={(e) => {
                 const val = parseInt(e.target.value);
                 if (!isNaN(val)) {
-                  onChangeLineAndCurveSettings({ strokeWidth: Math.max(1, Math.min(200, val)) });
+                  onChangeLineAndCurveSettings({ strokeWidth: Math.max(activeTool === 'bezier' ? 0 : 1, Math.min(200, val)) });
                 }
               }}
               className="w-12 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white focus:outline-none focus:border-[#007acc] font-mono"
@@ -199,13 +207,67 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
             <span className="text-[10px] text-[#888]">px</span>
             <input
               type="range"
-              min="1"
+              min={activeTool === 'bezier' ? 0 : 1}
               max="100"
               value={lineAndCurveSettings.strokeWidth}
               onChange={(e) => onChangeLineAndCurveSettings({ strokeWidth: parseInt(e.target.value) })}
               className="w-16 h-1 bg-[#444] accent-[#007acc] rounded-lg appearance-none cursor-pointer"
             />
           </div>
+
+          {activeTool === 'bezier' && (
+            <>
+              <div className="flex items-center gap-1.5 flex-shrink-0">
+                <label className="text-[11px] whitespace-nowrap text-[#aaa]">Narożnik:</label>
+                <select
+                  value={lineAndCurveSettings.cornerJoin}
+                  onChange={(e) => onChangeLineAndCurveSettings({ cornerJoin: e.target.value as StrokeCornerJoin })}
+                  className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+                >
+                  <option value="miter">Ostry</option>
+                  <option value="round">Zaokrąglony</option>
+                  <option value="bevel">Ścięty</option>
+                </select>
+              </div>
+              <button
+                type="button"
+                disabled={!penInfo?.active || (penInfo?.count ?? 0) < 3}
+                onClick={onTogglePenClosed}
+                title={penInfo?.closed ? 'Otwórz krzywą (usuwa odcinek zamykający). Otwarcie w wybranym węźle: kliknij węzeł.' : 'Zamknij krzywą (łączy ostatni węzeł z pierwszym; można ją wypełnić)'}
+                className={`h-5 px-2 rounded border text-[11px] whitespace-nowrap flex-shrink-0 ${
+                  penInfo?.active && (penInfo?.count ?? 0) >= 3
+                    ? 'bg-[#1e1e1e] border-[#444] text-white hover:bg-[#333] cursor-pointer'
+                    : 'bg-[#1e1e1e] border-[#333] text-[#666] cursor-default'
+                } ${penInfo?.closed ? '!bg-[#094771] !border-[#007acc]' : ''}`}
+              >
+                {penInfo?.closed ? 'Otwórz krzywą' : 'Zamknij krzywą'}
+              </button>
+              <div className="flex items-center gap-1.5 flex-shrink-0">
+                <label className="text-[11px] whitespace-nowrap text-[#aaa]" title="Dotyczy zamkniętej krzywej">Wypełnienie:</label>
+                <select
+                  value={lineAndCurveSettings.fillMode}
+                  onChange={(e) => onChangeLineAndCurveSettings({ fillMode: e.target.value as PathFillMode })}
+                  className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+                >
+                  <option value="none">Brak</option>
+                  <option value="primary">Główny</option>
+                  <option value="secondary">Dodatkowy</option>
+                </select>
+              </div>
+              <div className="flex items-center gap-1.5 flex-shrink-0">
+                <label className="text-[11px] whitespace-nowrap text-[#aaa]" title="Dotyczy zamkniętej krzywej">Wyrównanie:</label>
+                <select
+                  value={lineAndCurveSettings.strokeAlignment}
+                  onChange={(e) => onChangeLineAndCurveSettings({ strokeAlignment: e.target.value as StrokeAlignment })}
+                  className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+                >
+                  <option value="center">Do środka</option>
+                  <option value="inside">Do wewnątrz</option>
+                  <option value="outside">Do zewnątrz</option>
+                </select>
+              </div>
+            </>
+          )}
 
           {/* Kreskowanie */}
           <div className="flex items-center gap-1.5 flex-shrink-0">
@@ -217,11 +279,11 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
               }
               className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
             >
-              <option value="solid">Ciągła ──────</option>
-              <option value="dashed">Kreskowana ── ──</option>
-              <option value="dotted">Kropkowana ••••••</option>
-              <option value="dash-dot">Kreska-kropka ── • ──</option>
-              <option value="long-dash">Długa kreska ──── ────</option>
+              <option value="solid">Ciągła</option>
+              <option value="dashed">Kreskowana</option>
+              <option value="dotted">Kropkowana</option>
+              <option value="dash-dot">Kreska-kropka</option>
+              <option value="long-dash">Długa kreska</option>
             </select>
           </div>
 
@@ -235,7 +297,8 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
               }
               className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
             >
-              <option value="none">Brak</option>
+              <option value="none">Ostry</option>
+              <option value="cap-round">Zaokrąglony</option>
               <option value="arrow">Strzałka</option>
               <option value="stealth-arrow">Grot ostry</option>
               <option value="circle">Koło</option>
@@ -254,7 +317,8 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
               }
               className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
             >
-              <option value="none">Brak</option>
+              <option value="none">Ostry</option>
+              <option value="cap-round">Zaokrąglony</option>
               <option value="arrow">Strzałka</option>
               <option value="stealth-arrow">Grot ostry</option>
               <option value="circle">Koło</option>
@@ -264,7 +328,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
           </div>
 
           {/* Rozmiar znacznika */}
-          {(lineAndCurveSettings.startMarker !== 'none' || lineAndCurveSettings.endMarker !== 'none') && (
+          {(isArrowMarker(lineAndCurveSettings.startMarker) || isArrowMarker(lineAndCurveSettings.endMarker)) && (
             <div className="flex items-center gap-1.5 flex-shrink-0">
               <label className="text-[11px] whitespace-nowrap text-[#aaa]">Grot:</label>
               <select
@@ -675,6 +739,25 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
               <option value="invert">Odwróć zaznaczenie</option>
             </select>
           </div>
+
+          {activeTool === 'select-lasso' && (
+            <div className="flex items-center gap-1.5">
+              <label
+                className="text-[11px] whitespace-nowrap text-[#aaa]"
+                title="Odręczne: jedno pociągnięcie. Punkt po punkcie: klik = odcinek prosty, przeciągnięcie = linia odręczna od ostatniego punktu. Enter lub klik w pierwszy punkt zatwierdza, Backspace cofa punkt, Esc anuluje."
+              >
+                Lasso:
+              </label>
+              <select
+                value={selectionSettings.lassoMode ?? 'freehand'}
+                onChange={(e) => onChangeSelectionSettings({ lassoMode: e.target.value as SelectionSettings['lassoMode'] })}
+                className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+              >
+                <option value="freehand">Odręczne</option>
+                <option value="polygon">Punkt po punkcie</option>
+              </select>
+            </div>
+          )}
 
           {/* Opcje ograniczenia rozmiaru dla zaznaczenia prostokątnego i eliptycznego */}
           {(activeTool === 'select-rect' || activeTool === 'select-ellipse') && (

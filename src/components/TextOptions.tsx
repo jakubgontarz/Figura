@@ -15,6 +15,7 @@ import {
   Superscript,
   Underline,
 } from 'lucide-react';
+import { getAllFontFamilies } from '../core/skia/FontCatalog.ts';
 import {
   BLEND_MODES,
   SKBlendMode,
@@ -23,24 +24,6 @@ import {
   TextToolSettings,
 } from '../core/skia/types.ts';
 
-export const TEXT_FONTS = [
-  'Arial',
-  'Calibri',
-  'Cambria',
-  'Comic Sans MS',
-  'Consolas',
-  'Courier New',
-  'Georgia',
-  'Impact',
-  'Segoe UI',
-  'Tahoma',
-  'Times New Roman',
-  'Trebuchet MS',
-  'Verdana',
-  'serif',
-  'sans-serif',
-  'monospace',
-];
 
 interface TextOptionsProps {
   settings: TextToolSettings;
@@ -126,7 +109,7 @@ export const TextOptions: React.FC<TextOptionsProps> = ({
     { id: 'justify', title: 'Wyjustuj', icon: <AlignJustify size={12} /> },
   ];
 
-  const fontInList = TEXT_FONTS.includes(settings.fontFamily);
+  const fonts = getAllFontFamilies(settings.fontFamily);
 
   return (
     <div className="flex items-center gap-3 flex-1 flex-shrink-0">
@@ -139,11 +122,10 @@ export const TextOptions: React.FC<TextOptionsProps> = ({
             onChange({ fontFamily: e.target.value });
             onRequestFocus?.();
           }}
-          className={`${inputCls} cursor-pointer`}
+          className={`${inputCls} cursor-pointer w-40`}
           style={{ fontFamily: settings.fontFamily }}
         >
-          {!fontInList && <option value={settings.fontFamily}>{settings.fontFamily}</option>}
-          {TEXT_FONTS.map((f) => (
+          {fonts.map((f) => (
             <option key={f} value={f} style={{ fontFamily: f }}>
               {f}
             </option>
