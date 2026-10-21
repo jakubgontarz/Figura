@@ -158,27 +158,41 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
     setDraggedIndex(index);
   };
 
-  const placeFromEvent = (e: React.DragEvent, isGroupRow: boolean): 'before' | 'after' | 'into' => {
+  const canAcceptInto = (targetLayer: Layer): boolean => {
+    if (draggedIndex === null) return false;
+    const dragged = layers[draggedIndex];
+    if (!dragged) return false;
+    if (targetLayer === dragged) return false;
+    if (targetLayer.isGroup) {
+      return !dragged.isGroup;
+    }
+    // Zwykła warstwa może przyjąć inną warstwę jako maskę, jeśli sama nie ma jeszcze maski
+    return !targetLayer.hasMask && !dragged.isGroup;
+  };
+
+  const placeFromEvent = (e: React.DragEvent, canInto: boolean): 'before' | 'after' | 'into' => {
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
     const f = (e.clientY - rect.top) / Math.max(1, rect.height);
-    if (isGroupRow) return f < 0.28 ? 'before' : f > 0.72 ? 'after' : 'into';
+    if (canInto) return f < 0.28 ? 'before' : f > 0.72 ? 'after' : 'into';
     return f < 0.5 ? 'before' : 'after';
   };
 
-  const handleDragOver = (e: React.DragEvent, index: number, isGroupRow: boolean) => {
+  const handleDragOver = (e: React.DragEvent, targetLayer: Layer, index: number) => {
     e.preventDefault();
     if (editingIndex !== null) return;
     e.dataTransfer.dropEffect = 'move';
-    const place = placeFromEvent(e, isGroupRow);
+    const canInto = canAcceptInto(targetLayer);
+    const place = placeFromEvent(e, canInto);
     if (!dragOver || dragOver.index !== index || dragOver.place !== place) {
       setDragOver({ index, place });
     }
   };
 
-  const handleDrop = (e: React.DragEvent, targetIndex: number, isGroupRow: boolean) => {
+  const handleDrop = (e: React.DragEvent, targetLayer: Layer, targetIndex: number) => {
     e.preventDefault();
     if (editingIndex !== null) return;
-    const place = placeFromEvent(e, isGroupRow);
+    const canInto = canAcceptInto(targetLayer);
+    const place = placeFromEvent(e, canInto);
     if (draggedIndex !== null && draggedIndex !== targetIndex) {
       onMoveLayerTo(draggedIndex, targetIndex, place);
     }
@@ -324,8 +338,8 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
               key={layer.id}
               draggable={editingIndex === null}
               onDragStart={(e) => handleDragStart(e, index)}
-              onDragOver={(e) => handleDragOver(e, index, isGroup)}
-              onDrop={(e) => handleDrop(e, index, isGroup)}
+              onDragOver={(e) => handleDragOver(e, layer, index)}
+              onDrop={(e) => handleDrop(e, layer, index)}
               onDragEnd={handleDragEnd}
               onClick={() => onSelectLayer(index)}
               style={isChild ? { marginLeft: 14 } : undefined}
@@ -337,41 +351,49 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                 dropHere === 'after' ? 'border-b-2 border-b-[#00ffcc]' : ''
               } ${dropHere === 'into' ? 'ring-2 ring-[#00ffcc]' : ''}`}
             >
-              {/* Miniatura Warstwy po lewej z nakładką (Oko + Kłódka); dla grupy ikona folderu */}
+              {/* Miniatura Warstwy: slot 35x35 bez szarej ramki i czarnego tła; ramka tylko wokół samej miniaturki */}
               <div
                 onClick={(e) => {
                   e.stopPropagation();
                   onSelectTarget(index, 'pixels');
                 }}
                 title={layer.hasMask ? 'Edytuj piksele warstwy (przywraca zwykły widok)' : undefined}
-                className={`relative rounded-xs border overflow-hidden flex-shrink-0 shadow-inner group ${
-                  isSelected && !layer.editMask && layer.hasMask ? 'border-[#00e5ff] ring-1 ring-[#00e5ff]' : 'border-[#444]'
-                } ${dimmed ? 'opacity-60' : ''}`}
-                style={
-                  isGroup
-                    ? { width: 48, height: 38, background: '#262626' }
-                    : {
-                        width: layer.thumbW + 2,
-                        height: layer.thumbH + 2,
-                        backgroundImage: `repeating-conic-gradient(#e4e4e4 0% 25%, #ffffff 0% 50%)`,
-                        backgroundSize: '8px 8px',
-                      }
-                }
+                className={`relative w-[35px] h-[35px] min-w-[35px] min-h-[35px] max-w-[35px] max-h-[35px] flex items-center justify-center flex-shrink-0 cursor-pointer ${
+                  dimmed ? 'opacity-60' : ''
+                }`}
               >
                 {isGroup ? (
-                  <div className="w-full h-full flex items-start justify-center pt-1 text-[#e0b84a]">
-                    {layer.expanded ? <FolderOpen size={20} strokeWidth={1.6} /> : <Folder size={20} strokeWidth={1.6} />}
+                  <div
+                    className={`w-[35px] h-[35px] rounded-xs border overflow-hidden flex items-center justify-center text-[#e0b84a] pb-2 ${
+                      isSelected && !layer.editMask && layer.hasMask
+                        ? 'border-[#00e5ff] ring-1 ring-[#00e5ff]'
+                        : 'border-[#444] bg-[#242424]'
+                    }`}
+                  >
+                    {layer.expanded ? <FolderOpen size={18} strokeWidth={1.6} /> : <Folder size={18} strokeWidth={1.6} />}
                   </div>
                 ) : (
-                  <img
-                    src={layer.getThumbnailDataUrl()}
-                    alt=""
-                    className="w-full h-full object-contain"
-                  />
+                  <div
+                    style={{
+                      width: layer.thumbW,
+                      height: layer.thumbH,
+                    }}
+                    className={`relative rounded-xs border overflow-hidden shadow-xs flex items-center justify-center box-border ${
+                      isSelected && !layer.editMask && layer.hasMask
+                        ? 'border-[#00e5ff] ring-1 ring-[#00e5ff]'
+                        : 'border-[#555]'
+                    }`}
+                  >
+                    <img
+                      src={layer.getThumbnailDataUrl()}
+                      alt=""
+                      className="w-full h-full object-contain"
+                    />
+                  </div>
                 )}
 
-                {/* Nakładka przycisków w lewym dolnym rogu miniaturek */}
-                <div className="absolute bottom-0.5 left-0.5 flex items-center gap-0.5 z-10">
+                {/* Nakładka przycisków w lewym dolnym rogu kwadracika 35x35 */}
+                <div className="absolute bottom-0.5 left-0.5 flex items-center gap-0.5 z-10 pointer-events-auto">
                   {/* Przycisk Widoczności (Oko) */}
                   <button
                     type="button"
@@ -384,9 +406,9 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                         ? layer.ownVisible ? 'Ukryj grupę' : 'Pokaż grupę'
                         : layer.ownVisible ? 'Ukryj warstwę' : 'Pokaż warstwę'
                     }
-                    className={`p-0.5 rounded transition-colors cursor-pointer ${
+                    className={`p-0.5 rounded transition-colors cursor-pointer shadow-xs ${
                       layer.ownVisible
-                        ? 'bg-black/60 hover:bg-black/80 text-white'
+                        ? 'bg-black/70 hover:bg-black/90 text-white'
                         : 'bg-black/85 text-[#ff6666]'
                     }`}
                   >
@@ -409,12 +431,12 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                         ? layer.ownLocked ? 'Odblokuj grupę' : 'Zablokuj grupę (blokuje wszystkie jej warstwy)'
                         : layer.ownLocked ? 'Odblokuj warstwę' : 'Zablokuj warstwę'
                     }
-                    className={`p-0.5 rounded transition-colors cursor-pointer ${
+                    className={`p-0.5 rounded transition-colors cursor-pointer shadow-xs ${
                       layer.ownLocked
-                        ? 'bg-amber-600/90 text-white shadow-xs'
+                        ? 'bg-amber-600/90 text-white'
                         : layer.groupLocked
                           ? 'bg-amber-900/70 text-[#e8c46a]'
-                          : 'bg-black/50 hover:bg-black/80 text-[#ccc]'
+                          : 'bg-black/60 hover:bg-black/90 text-[#ccc]'
                     }`}
                   >
                     {layer.ownLocked || layer.groupLocked ? (
@@ -426,64 +448,75 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                 </div>
               </div>
 
-              {/* Maska: przełącznik powiązania + miniatura maski */}
+              {/* Maska: slot 35x35 bez szarej ramki i czarnego tła; ramka tylko wokół samej miniaturki */}
               {layer.hasMask && (
-                <>
+                <div
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onSelectTarget(index, 'mask');
+                  }}
+                  onDoubleClick={(e) => {
+                    e.stopPropagation();
+                    onViewMask(maskViewIndex === index ? null : index);
+                  }}
+                  title="Kliknij: edytuj maskę. Dwukrotne kliknięcie: pokaż maskę w skali szarości na płótnie"
+                  className="relative w-[35px] h-[35px] min-w-[35px] min-h-[35px] max-w-[35px] max-h-[35px] flex items-center justify-center flex-shrink-0 cursor-pointer"
+                >
                   <div
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onSelectTarget(index, 'mask');
+                    style={{
+                      width: layer.thumbW,
+                      height: layer.thumbH,
                     }}
-                    onDoubleClick={(e) => {
-                      e.stopPropagation();
-                      onViewMask(maskViewIndex === index ? null : index);
-                    }}
-                    title="Kliknij: edytuj maskę. Dwukrotne kliknięcie: pokaż maskę w skali szarości na płótnie"
-                    style={isGroup ? { width: 48, height: 38 } : { width: layer.thumbW + 2, height: layer.thumbH + 2 }}
-                    className={`relative rounded-xs border overflow-hidden flex-shrink-0 bg-black ${
-                      isSelected && layer.editMask ? 'border-[#00e5ff] ring-1 ring-[#00e5ff]' : 'border-[#444]'
+                    className={`relative rounded-xs border overflow-hidden shadow-xs bg-black flex items-center justify-center box-border ${
+                      isSelected && layer.editMask
+                        ? 'border-[#00e5ff] ring-1 ring-[#00e5ff]'
+                        : 'border-[#555]'
                     }`}
                   >
-                    <img src={layer.getMaskThumbnailDataUrl() ?? ''} alt="" className="w-full h-full object-contain" />
-                    {maskViewIndex === index && (
-                      <span className="absolute top-0 right-0 bg-[#00e5ff] text-black text-[7px] font-bold px-0.5 leading-tight">
-                        MASKA
-                      </span>
-                    )}
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onToggleMaskEnabled(index);
-                      }}
-                      onDoubleClick={(e) => e.stopPropagation()}
-                      title={layer.maskEnabled ? 'Wyłącz maskę (pokaż warstwę bez maski)' : 'Włącz maskę'}
-                      className={`absolute bottom-0.5 left-0.5 p-0.5 rounded cursor-pointer ${
-                        layer.maskEnabled ? 'bg-black/60 hover:bg-black/80 text-white' : 'bg-black/85 text-[#ff6666]'
-                      }`}
-                    >
-                      {layer.maskEnabled ? <Eye size={10} strokeWidth={2.2} /> : <EyeOff size={10} strokeWidth={2.2} />}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onToggleMaskLink(index);
-                      }}
-                      onDoubleClick={(e) => e.stopPropagation()}
-                      title={
-                        layer.maskLinked
-                          ? 'Powiązana: przekształcenia zawartości zaznaczenia obejmują piksele i maskę (kliknij, aby rozłączyć)'
-                          : 'Rozłączona: przekształcenia dotyczą tylko edytowanego elementu (kliknij, aby powiązać)'
-                      }
-                      className={`absolute bottom-0.5 right-0.5 p-0.5 rounded cursor-pointer bg-black/60 hover:bg-black/80 ${
-                        layer.maskLinked ? 'text-[#9cdcfe]' : 'text-[#999]'
-                      }`}
-                    >
-                      {layer.maskLinked ? <Link2 size={10} strokeWidth={2.2} /> : <Link2Off size={10} strokeWidth={2.2} />}
-                    </button>
+                    <img
+                      src={layer.getMaskThumbnailDataUrl() ?? ''}
+                      alt=""
+                      className="w-full h-full object-contain"
+                    />
                   </div>
-                </>
+                  {maskViewIndex === index && (
+                    <span className="absolute top-0 right-0 bg-[#00e5ff] text-black text-[7px] font-bold px-0.5 leading-tight z-10 rounded-xs shadow-xs pointer-events-none">
+                      MASKA
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onToggleMaskEnabled(index);
+                    }}
+                    onDoubleClick={(e) => e.stopPropagation()}
+                    title={layer.maskEnabled ? 'Wyłącz maskę (pokaż warstwę bez maski)' : 'Włącz maskę'}
+                    className={`absolute bottom-0.5 left-0.5 p-0.5 rounded cursor-pointer z-10 shadow-xs ${
+                      layer.maskEnabled ? 'bg-black/70 hover:bg-black/90 text-white' : 'bg-black/85 text-[#ff6666]'
+                    }`}
+                  >
+                    {layer.maskEnabled ? <Eye size={10} strokeWidth={2.2} /> : <EyeOff size={10} strokeWidth={2.2} />}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onToggleMaskLink(index);
+                    }}
+                    onDoubleClick={(e) => e.stopPropagation()}
+                    title={
+                      layer.maskLinked
+                        ? 'Powiązana: przekształcenia zawartości zaznaczenia obejmują piksele i maskę (kliknij, aby rozłączyć)'
+                        : 'Rozłączona: przekształcenia dotyczą tylko edytowanego elementu (kliknij, aby powiązać)'
+                    }
+                    className={`absolute bottom-0.5 right-0.5 p-0.5 rounded cursor-pointer z-10 shadow-xs bg-black/70 hover:bg-black/90 ${
+                      layer.maskLinked ? 'text-[#9cdcfe]' : 'text-[#999]'
+                    }`}
+                  >
+                    {layer.maskLinked ? <Link2 size={10} strokeWidth={2.2} /> : <Link2Off size={10} strokeWidth={2.2} />}
+                  </button>
+                </div>
               )}
 
               {/* Nazwa Warstwy */}
@@ -522,6 +555,13 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                     </span>
                   )}
                 </div>
+              )}
+
+              {/* Etykieta operacji Upuść w środek */}
+              {dropHere === 'into' && (
+                <span className="absolute right-2 text-[9.5px] font-bold text-[#00ffcc] bg-black/90 border border-[#00ffcc]/50 px-1.5 py-0.5 rounded shadow-md pointer-events-none z-20">
+                  {isGroup ? '+ Do grupy' : '+ Jako maska'}
+                </span>
               )}
 
               {/* Rozwiń / zwiń grupę: prawy dolny róg wiersza, tuż pod nazwą */}

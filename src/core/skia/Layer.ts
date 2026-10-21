@@ -11,8 +11,8 @@ import { SKBlendMode, SKColor } from './types.ts';
 // --- Odroczone odświeżanie miniatur ---
 // Miniatura nie jest potrzebna w trakcie edycji, więc odświeżanie jest scalane (debounce), wykonywane
 // po jednej warstwie na zadanie i wstrzymywane, gdy czeka zdarzenie wejścia. Panel warstw dostaje powiadomienie.
-const THUMB_MAX_W = 46;
-const THUMB_MAX_H = 36;
+const THUMB_MAX_W = 35;
+const THUMB_MAX_H = 35;
 const THUMB_DEBOUNCE_MS = 150;
 const THUMB_MAX_WAIT_MS = 900;
 const pendingThumbs = new Set<Layer>();
@@ -190,8 +190,8 @@ export class Layer {
     return this.maskGrid !== null;
   }
   public thumbnailCanvas: HTMLCanvasElement;
-  public thumbW: number = 44;
-  public thumbH: number = 30;
+  public thumbW: number = 35;
+  public thumbH: number = 35;
   public thumbnailCtx: CanvasRenderingContext2D | null;
   public maskThumbnailCanvas: HTMLCanvasElement;
   private maskThumbDataUrl: string | null = null;
@@ -215,8 +215,8 @@ export class Layer {
     this.thumbnailCanvas = document.createElement('canvas');
     // Miniatura zachowuje proporcje płótna (w ramce THUMB_MAX_W x THUMB_MAX_H)
     const ratio = width / Math.max(1, height);
-    this.thumbW = Math.max(8, Math.min(THUMB_MAX_W, Math.round(ratio >= THUMB_MAX_W / THUMB_MAX_H ? THUMB_MAX_W : THUMB_MAX_H * ratio)));
-    this.thumbH = Math.max(8, Math.min(THUMB_MAX_H, Math.round(ratio >= THUMB_MAX_W / THUMB_MAX_H ? THUMB_MAX_W / ratio : THUMB_MAX_H)));
+    this.thumbW = Math.max(6, Math.min(THUMB_MAX_W, Math.round(ratio >= THUMB_MAX_W / THUMB_MAX_H ? THUMB_MAX_W : THUMB_MAX_H * ratio)));
+    this.thumbH = Math.max(6, Math.min(THUMB_MAX_H, Math.round(ratio >= THUMB_MAX_W / THUMB_MAX_H ? THUMB_MAX_W / ratio : THUMB_MAX_H)));
     this.thumbnailCanvas.width = this.thumbW;
     this.thumbnailCanvas.height = this.thumbH;
     this.thumbnailCtx = this.thumbnailCanvas.getContext('2d');
@@ -330,7 +330,12 @@ export class Layer {
     copy.maskGrid = this.maskGrid ? this.maskGrid.clone() : null;
     copy.editMask = this.editMask;
     copy.maskEnabled = this.maskEnabled;
-    copy.maskLinked = this.maskLinked;
+    copy.thumbW = this.thumbW;
+    copy.thumbH = this.thumbH;
+    copy.thumbnailCanvas.width = this.thumbW;
+    copy.thumbnailCanvas.height = this.thumbH;
+    copy.maskThumbnailCanvas.width = this.thumbW;
+    copy.maskThumbnailCanvas.height = this.thumbH;
     // Kopia dostaje gotową miniaturę zamiast pełnego przeliczania; jeśli źródło jest nieaktualne, kopia też się odświeży
     if (this.thumbDirty || !copy.thumbnailCtx || this.maskGrid) {
       copy.updateThumbnail();
@@ -351,7 +356,19 @@ export class Layer {
    */
   public createMask(selection?: HTMLCanvasElement | null, docW?: number, docH?: number): void {
     // nagłówek grupy ma 1x1 pikseli własnych, a maska grupy musi mieć rozmiar dokumentu (docW/docH)
-    const g = new TileGrid(docW ?? this.pixelGrid.width, docH ?? this.pixelGrid.height, this.pixelGrid.tileSize);
+    const mw = docW ?? this.pixelGrid.width;
+    const mh = docH ?? this.pixelGrid.height;
+    const g = new TileGrid(mw, mh, this.pixelGrid.tileSize);
+
+    // Miniatura maski (i grupy) musi odzwierciedlać proporcje dokumentu/maski
+    const ratio = mw / Math.max(1, mh);
+    this.thumbW = Math.max(6, Math.min(THUMB_MAX_W, Math.round(ratio >= THUMB_MAX_W / THUMB_MAX_H ? THUMB_MAX_W : THUMB_MAX_H * ratio)));
+    this.thumbH = Math.max(6, Math.min(THUMB_MAX_H, Math.round(ratio >= THUMB_MAX_W / THUMB_MAX_H ? THUMB_MAX_W / ratio : THUMB_MAX_H)));
+    this.thumbnailCanvas.width = this.thumbW;
+    this.thumbnailCanvas.height = this.thumbH;
+    this.maskThumbnailCanvas.width = this.thumbW;
+    this.maskThumbnailCanvas.height = this.thumbH;
+
     let white: HTMLCanvasElement | null = null;
     if (selection) {
       white = document.createElement('canvas');
@@ -379,6 +396,68 @@ export class Layer {
     this.maskGrid = g;
     this.maskEnabled = true;
     this.editMask = true;
+    this.updateThumbnail(true);
+  }
+
+  /**
+   * Tworzy maskę z innej warstwy: konwertuje piksele warstwy źródłowej do skali szarości.
+   */
+  public setMaskFromLayer(sourceLayer: Layer): void {
+    const mw = this.pixelGrid.width;
+    const mh = this.pixelGrid.height;
+    const g = new TileGrid(mw, mh, this.pixelGrid.tileSize);
+
+    const ratio = mw / Math.max(1, mh);
+    this.thumbW = Math.max(6, Math.min(THUMB_MAX_W, Math.round(ratio >= THUMB_MAX_W / THUMB_MAX_H ? THUMB_MAX_W : THUMB_MAX_H * ratio)));
+    this.thumbH = Math.max(6, Math.min(THUMB_MAX_H, Math.round(ratio >= THUMB_MAX_W / THUMB_MAX_H ? THUMB_MAX_W / ratio : THUMB_MAX_H)));
+    this.thumbnailCanvas.width = this.thumbW;
+    this.thumbnailCanvas.height = this.thumbH;
+    this.maskThumbnailCanvas.width = this.thumbW;
+    this.maskThumbnailCanvas.height = this.thumbH;
+
+    for (let ty = 0; ty < g.rows; ty++) {
+      for (let tx = 0; tx < g.cols; tx++) {
+        const destTile = g.tiles[ty][tx];
+        // Przezroczysty kolor traktujemy jako biały (w pełni widoczny w masce)
+        destTile.ctx.fillStyle = '#ffffff';
+        destTile.ctx.fillRect(0, 0, destTile.width, destTile.height);
+
+        const srcTile = sourceLayer.pixelGrid.tiles[ty]?.[tx];
+        if (srcTile && srcTile.hasContent) {
+          const renderedCanvas = sourceLayer.renderCanvas(srcTile) ?? srcTile.canvas;
+          const rctx = renderedCanvas.getContext('2d', { willReadFrequently: true });
+          if (rctx) {
+            const img = rctx.getImageData(0, 0, srcTile.width, srcTile.height);
+            const d = img.data;
+            for (let i = 0; i < d.length; i += 4) {
+              const a = d[i + 3];
+              if (a === 0) {
+                d[i] = 255;
+                d[i + 1] = 255;
+                d[i + 2] = 255;
+                d[i + 3] = 255;
+              } else {
+                const lum = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+                // Mieszanie luminancji z białym tłem (alfa-blending z bielą)
+                const v = Math.round(lum * (a / 255) + 255 * (1 - a / 255));
+                d[i] = v;
+                d[i + 1] = v;
+                d[i + 2] = v;
+                d[i + 3] = 255;
+              }
+            }
+            destTile.ctx.putImageData(img, 0, 0);
+          }
+        }
+        destTile.hasContent = true;
+        destTile.isDirty = true;
+      }
+    }
+
+    this.maskGrid = g;
+    this.maskEnabled = true;
+    this.editMask = true;
+    this.maskLinked = true;
     this.updateThumbnail(true);
   }
 

@@ -1512,7 +1512,7 @@ export class GraphicEngine {
   }
 
   private makeGroupLayer(name: string): Layer {
-    const g = new Layer(`group_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`, name, 1, 1, this.tileSize);
+    const g = new Layer(`group_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`, name, this.width, this.height, this.tileSize);
     g.isGroup = true;
     g.blendMode = 'PassThrough';
     return g;
@@ -1726,6 +1726,21 @@ export class GraphicEngine {
     if (!src || !tgt || src === tgt) return false;
     if (src.isGroup && tgt.groupId === src.id) return false;
     this.finishOpenSessions();
+
+    // Jeśli upuszczamy warstwę na inną warstwę (bez maski), to przenoszona warstwa staje się w skali szarości i staje się maską tej warstwy
+    if (place === 'into' && !tgt.isGroup && !tgt.hasMask && !src.isGroup) {
+      if (tgt.locked || src.locked) return false;
+      this.saveFullSnapshot('Utworzenie maski z warstwy');
+      tgt.setMaskFromLayer(src);
+      if (this.maskView === src) this.maskView = null;
+      this.layers.splice(srcIndex, 1);
+      this.activeLayerIndex = this.layers.indexOf(tgt);
+      this.normalizeLayers(tgt);
+      this.markAllLayersDirty();
+      this.invalidateComposite();
+      return true;
+    }
+
     const sigBefore = this.layers.map((l) => `${l.id}:${l.groupId}`).join('|');
     this.saveFullSnapshot('Zmiana kolejności warstw');
 
@@ -4116,8 +4131,8 @@ export class GraphicEngine {
         const layer = new Layer(
           lData.id || `layer_${Date.now()}`,
           lData.name || (isGroupData ? 'Grupa' : 'Warstwa'),
-          isGroupData ? 1 : this.width,
-          isGroupData ? 1 : this.height,
+          this.width,
+          this.height,
           this.tileSize
         );
         layer.isGroup = isGroupData;
