@@ -34,7 +34,7 @@ function drain(): void {
     try {
       if (it.type === 'wand') {
         const r = solver.wand(it.job as WandJob);
-        scope.postMessage(r, r.status === 'ok' ? r.rings.map((x) => x.buffer as ArrayBuffer) : []);
+        scope.postMessage(r, r.status === 'ok' ? [...(r.crop ? [r.crop.data.buffer as ArrayBuffer] : []), ...(r.geom ? r.geom.flat().map((x) => x.buffer as ArrayBuffer) : [])] : []);
       } else {
         const r = solver.bucket(it.job as BucketJob);
         scope.postMessage(r, r.status === 'ok' && r.res ? [r.res.alpha.buffer as ArrayBuffer] : []);

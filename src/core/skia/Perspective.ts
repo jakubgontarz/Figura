@@ -287,3 +287,40 @@ export function warpPerspectiveExact(
   octx.putImageData(oimg, 0, 0);
   return { canvas: out, left, top };
 }
+
+export interface PerspectivePreview {
+  canvas: HTMLCanvasElement;
+  /** Położenie lewego-górnego rogu i skala (podgląd bywa liczony w zmniejszonej rozdzielczości) */
+  left: number;
+  top: number;
+  scale: number;
+}
+
+/**
+ * Podgląd bez szwów: to samo odwrotne mapowanie piksel po pikselu co przy zatwierdzaniu,
+ * ale w razie dużej obwiedni liczone w zmniejszonej rozdzielczości (rysować z `drawPerspectivePreview`).
+ */
+export function warpPerspectivePreview(
+  src: HTMLCanvasElement,
+  quad: Quad,
+  docW: number,
+  docH: number,
+  nearest: boolean,
+  maxPixels: number = 1_500_000
+): PerspectivePreview | null {
+  const qb = quadBounds(quad);
+  const bw = Math.max(1, Math.min(docW, qb.maxX) - Math.max(0, qb.minX));
+  const bh = Math.max(1, Math.min(docH, qb.maxY) - Math.max(0, qb.minY));
+  const scale = Math.min(1, Math.sqrt(maxPixels / (bw * bh)));
+  const sq = quad.map((p) => ({ x: p.x * scale, y: p.y * scale })) as Quad;
+  const r = warpPerspectiveExact(src, sq, Math.ceil(docW * scale), Math.ceil(docH * scale), nearest);
+  if (!r) return null;
+  return { canvas: r.canvas, left: r.left, top: r.top, scale };
+}
+
+export function drawPerspectivePreview(ctx: CanvasRenderingContext2D, pv: PerspectivePreview, smooth: boolean): void {
+  ctx.save();
+  ctx.imageSmoothingEnabled = smooth;
+  ctx.drawImage(pv.canvas, pv.left / pv.scale, pv.top / pv.scale, pv.canvas.width / pv.scale, pv.canvas.height / pv.scale);
+  ctx.restore();
+}

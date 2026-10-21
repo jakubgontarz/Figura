@@ -37,46 +37,6 @@ export function ringsToPathString(rings: Float64Array[]): string {
 }
 
 
-/**
- * Usuwa punkty prawie współliniowe z sąsiadami (odległość od prostej prev-next <= eps). Odpowiednik dawnego
- * simplifyCollinearLoop na tablicach par, ale na płaskich tablicach liczb; wynik jest taki sam.
- */
-export function simplifyFlatRing(pts: Float64Array, eps: number): Float64Array {
-  let count = pts.length >> 1;
-  if (count < 3) return pts;
-  const closed = pts[0] === pts[pts.length - 2] && pts[1] === pts[pts.length - 1];
-  if (closed) count--;
-  if (count < 3) return pts;
-  const keep = new Uint8Array(count);
-  let kept = 0;
-  for (let i = 0; i < count; i++) {
-    const pi = (i - 1 + count) % count;
-    const ni = (i + 1) % count;
-    const dx = pts[2 * ni] - pts[2 * pi];
-    const dy = pts[2 * ni + 1] - pts[2 * pi + 1];
-    const lenSq = dx * dx + dy * dy;
-    if (lenSq < 0.00001) continue;
-    const cross = Math.abs((pts[2 * i + 1] - pts[2 * pi + 1]) * dx - (pts[2 * i] - pts[2 * pi]) * dy);
-    if (cross / Math.sqrt(lenSq) > eps) {
-      keep[i] = 1;
-      kept++;
-    }
-  }
-  if (kept < 3) return pts;
-  const out = new Float64Array((kept + 1) * 2);
-  let o = 0;
-  for (let i = 0; i < count; i++) {
-    if (keep[i]) {
-      out[o++] = pts[2 * i];
-      out[o++] = pts[2 * i + 1];
-    }
-  }
-  out[o++] = out[0];
-  out[o++] = out[1];
-  return out;
-}
-
-
 // Tablice przejść marching squares: segmenty każdego z 16 przypadków jako (krawędź wejścia -> krawędź wyjścia).
 // Krawędzie: 0 góra, 1 prawa, 2 dół, 3 lewa. Bity przypadku: 1 = lewy górny, 2 = prawy górny, 4 = prawy dolny, 8 = lewy dolny.
 /** Margines (w pikselach) po bokach maski różdżki; wielokrotność 4, żeby kolumna x leżała na granicy słowa 32-bitowego. */
@@ -183,76 +143,6 @@ export function traceCells(
     }
   }
   return rings;
-}
-
-/**
- * Marching squares na masce różdżki (0/1/2/255, układ z marginesem - patrz WAND_PAD); klasyfikacja komórek omija
- * jednolite obszary po 4 piksele naraz (kontur to zwykle drobny ułamek obszaru). Zwraca pierścienie w układzie dokumentu.
- */
-export function traceBinaryMask(
-  mask: Uint8Array,
-  ms: number,
-  w: number,
-  h: number,
-  left: number,
-  top: number,
-  right: number,
-  bottom: number
-): Float64Array[] {
-  const minX = Math.max(-1, Math.floor(left) - 4);
-  const minY = Math.max(-1, Math.floor(top) - 4);
-  // Komórki x = w i y = h nie mają krawędzi (wszystkie ich piksele leżą poza płótnem), więc ich pomijamy
-  const maxX = Math.min(w - 1, Math.ceil(right) + 4);
-  const maxY = Math.min(h - 1, Math.ceil(bottom) + 4);
-  const cw = maxX - minX + 1;
-  const ch = maxY - minY + 1;
-  if (cw <= 0 || ch <= 0) return [];
-
-  const cm = new Uint8Array((cw * ch + 3) & ~3);
-  const m32 = new Uint32Array(mask.buffer, mask.byteOffset, mask.length >> 2);
-  const HI = 0x80808080;
-  for (let cy = 0; cy < ch; cy++) {
-    const y = minY + cy;
-    const r0 = (y + 1) * ms + WAND_PAD; // wiersz y (y = -1 i y = h to puste wiersze)
-    const r1 = r0 + ms; // wiersz y + 1
-    const o = cy * cw;
-    let xi = 0;
-    const cell = (x: number): void => {
-      const c =
-        (mask[r0 + x] >> 7) |
-        ((mask[r0 + x + 1] >> 7) << 1) |
-        ((mask[r1 + x + 1] >> 7) << 2) |
-        ((mask[r1 + x] >> 7) << 3);
-      cm[o + x - minX] = c === 15 ? 0 : c;
-    };
-    // początek: do granicy słowa
-    while (xi < cw && ((minX + xi) & 3) !== 0) cell(minX + xi++);
-    // środek: po 4 komórki; słowo wiersza + pierwszy bajt następnego słowa pokrywają piksele x..x+4
-    for (; xi + 3 < cw; xi += 4) {
-      const x = minX + xi;
-      const k0 = (r0 + x) >> 2;
-      const k1 = (r1 + x) >> 2;
-      const a = m32[k0];
-      const a1 = m32[k0 + 1];
-      const b = m32[k1];
-      const b1 = m32[k1 + 1];
-      if (((a | a1 | b | b1) & HI) === 0) continue; // same piksele spoza obszaru
-      if (((a & a1 & b & b1) & HI) === HI) continue; // same piksele z obszaru
-      cell(x);
-      cell(x + 1);
-      cell(x + 2);
-      cell(x + 3);
-    }
-    while (xi < cw) cell(minX + xi++);
-  }
-
-  const pxy = (x: number, y: number, e: number, out: Float64Array): void => {
-    if (e === 0) { out[0] = x + 1; out[1] = y + 0.5; }
-    else if (e === 1) { out[0] = x + 1.5; out[1] = y + 1; }
-    else if (e === 2) { out[0] = x + 1; out[1] = y + 1.5; }
-    else { out[0] = x + 0.5; out[1] = y + 1; }
-  };
-  return traceCells(cm, cw, ch, minX, minY, pxy);
 }
 
 export interface FloodResult {
@@ -389,16 +279,124 @@ export function floodSelect(
 }
 
 /** Kontury obszaru z maski flood: pierścienie po uproszczeniu (jak w zaznaczeniu różdżką), każdy >= 3 punkty. */
-export function ringsOfFlood(f: FloodResult, w: number, h: number): Float64Array[] {
-  if (f.bMaxX < f.bMinX || f.bMaxY < f.bMinY) return [];
-  const raw = traceBinaryMask(f.mask, f.ms, w, h, f.bMinX, f.bMinY, f.bMaxX + 1, f.bMaxY + 1);
-  const out: Float64Array[] = [];
-  for (const ring of raw) {
-    if (ring.length < 6) continue;
-    const simple = simplifyFlatRing(ring, 0.15);
-    if (simple.length >= 6) out.push(simple);
+export interface WandCrop {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /** 255 = piksel zaznaczony, 0 = nie; w x h, bez marginesu */
+  data: Uint8Array;
+}
+
+/** Dokładna (piksel w piksel) maska obszaru różdżki w prostokącie opisanym; null gdy nic nie wybrano. */
+export function cropOfFlood(f: FloodResult): WandCrop | null {
+  if (f.bMaxX < f.bMinX || f.bMaxY < f.bMinY) return null;
+  const w = f.bMaxX - f.bMinX + 1;
+  const h = f.bMaxY - f.bMinY + 1;
+  const data = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) {
+    const src = (f.bMinY + y + 1) * f.ms + WAND_PAD + f.bMinX;
+    for (let x = 0; x < w; x++) if (f.mask[src + x] === 255) data[y * w + x] = 255;
   }
-  return out;
+  return { x: f.bMinX, y: f.bMinY, w, h, data };
+}
+
+/**
+ * Kontur obszaru różdżki jako wielokąty biegnące dokładnie po krawędziach pikseli (jak suma wielu prostokątów):
+ * wielokąty = [pierścień zewnętrzny, ...otwory], współrzędne całkowite w układzie dokumentu. Bez upraszczania i bez
+ * ścinania narożników, więc rasteryzacja daje dokładnie te same piksele. Zwraca null, gdy kontur jest zbyt złożony
+ * (wtedy wywołujący używa dokładnej maski rastrowej).
+ */
+export function pixelGeomOfCrop(crop: WandCrop, maxEdges = 600000): Float64Array[][] | null {
+  const { w, h, data, x: ox, y: oy } = crop;
+  const W = w + 1;
+  // bity wyjścia z wierzchołka: 1 = w prawo, 2 = w dół, 4 = w lewo, 8 = w górę (wnętrze po prawej stronie ruchu)
+  const out = new Uint8Array(W * (h + 1));
+  let edges = 0;
+  const on = (x: number, y: number): boolean => x >= 0 && y >= 0 && x < w && y < h && data[y * w + x] === 255;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (data[y * w + x] !== 255) continue;
+      if (!on(x, y - 1)) { out[y * W + x] |= 1; edges++; }
+      if (!on(x + 1, y)) { out[y * W + x + 1] |= 2; edges++; }
+      if (!on(x, y + 1)) { out[(y + 1) * W + x + 1] |= 4; edges++; }
+      if (!on(x - 1, y)) { out[(y + 1) * W + x] |= 8; edges++; }
+    }
+    if (edges > maxEdges) return null;
+  }
+  if (edges === 0) return [];
+  const orig = out.slice();
+  const DX = [1, 0, -1, 0];
+  const DY = [0, 1, 0, -1];
+  const outers: { ring: Float64Array; area: number; bx0: number; by0: number; bx1: number; by1: number }[] = [];
+  const holes: { ring: Float64Array; area: number; bx0: number; by0: number; bx1: number; by1: number }[] = [];
+  const pts: number[] = [];
+  for (let v = 0; v < out.length; v++) {
+    while (out[v] !== 0) {
+      const bits = out[v];
+      let d = 0;
+      while (!(bits & (1 << d))) d++;
+      const startV = v;
+      pts.length = 0;
+      let cx = v % W;
+      let cy = (v - cx) / W;
+      let dir = d;
+      for (;;) {
+        out[cy * W + cx] &= ~(1 << dir);
+        cx += DX[dir];
+        cy += DY[dir];
+        const ob = orig[cy * W + cx];
+        // reguła skrętu (prawo, prosto, lewo) rozstrzyga wierzchołki styku narożnikowego jednolicie
+        let nd = (dir + 1) & 3;
+        if (!(ob & (1 << nd))) {
+          nd = dir;
+          if (!(ob & (1 << nd))) nd = (dir + 3) & 3;
+        }
+        if (nd !== dir) pts.push(cx + ox, cy + oy);
+        dir = nd;
+        if (!(out[cy * W + cx] & (1 << dir))) break;
+      }
+      void startV;
+      const ring = Float64Array.from(pts);
+      let area = 0;
+      let bx0 = Infinity, by0 = Infinity, bx1 = -Infinity, by1 = -Infinity;
+      const n = ring.length >> 1;
+      for (let i = 0; i < n; i++) {
+        const j = i + 1 === n ? 0 : i + 1;
+        area += ring[2 * i] * ring[2 * j + 1] - ring[2 * j] * ring[2 * i + 1];
+        if (ring[2 * i] < bx0) bx0 = ring[2 * i];
+        if (ring[2 * i] > bx1) bx1 = ring[2 * i];
+        if (ring[2 * i + 1] < by0) by0 = ring[2 * i + 1];
+        if (ring[2 * i + 1] > by1) by1 = ring[2 * i + 1];
+      }
+      area /= 2;
+      (area > 0 ? outers : holes).push({ ring, area, bx0, by0, bx1, by1 });
+    }
+  }
+  if (holes.length * outers.length > 4e6) return null;
+  outers.sort((a, b) => a.area - b.area);
+  const polys: Float64Array[][] = outers.map((o) => [o.ring]);
+  for (const hole of holes) {
+    // punkt na środku pierwszej krawędzi otworu leży wewnątrz jego rodzica (najmniejszego zewnętrznego pierścienia)
+    const px = (hole.ring[0] + hole.ring[2]) / 2;
+    const py = (hole.ring[1] + hole.ring[3]) / 2;
+    for (let i = 0; i < outers.length; i++) {
+      const o = outers[i];
+      if (px < o.bx0 || px > o.bx1 || py < o.by0 || py > o.by1) continue;
+      const r = o.ring;
+      const n = r.length >> 1;
+      let inside = false;
+      for (let a = 0, b = n - 1; a < n; b = a++) {
+        const ax = r[2 * a], ay = r[2 * a + 1], bx = r[2 * b], by = r[2 * b + 1];
+        if ((ay > py) !== (by > py) && px < ((bx - ax) * (py - ay)) / (by - ay) + ax) inside = !inside;
+      }
+      if (inside) {
+        polys[i].push(hole.ring);
+        break;
+      }
+    }
+  }
+  return polys;
 }
 
 export interface BucketAlpha {

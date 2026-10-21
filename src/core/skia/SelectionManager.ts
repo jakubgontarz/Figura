@@ -7,11 +7,12 @@ import polygonClipping, { MultiPolygon, Polygon, Pair } from 'polygon-clipping';
 import { SKPoint, SKRectI, SelectionCombineMode, SelectionSettings } from './types.ts';
 import {
   WAND_PAD,
+  WandCrop,
+  cropOfFlood,
+  pixelGeomOfCrop,
   floodSelect,
   ringToPathString,
   ringsToPathString,
-  simplifyFlatRing,
-  traceBinaryMask,
   traceCells,
 } from './WandCore.ts';
 
@@ -710,6 +711,20 @@ export class SelectionManager {
     this.rebuildFromActiveMultiPoly();
   }
 
+  /** Zaznaczenie prostokątne (czysta geometria wektorowa, więc przekształcenia zostają dokładne, bez schodków pikseli). */
+  public selectRect(x: number, y: number, w: number, h: number): void {
+    this.wandSeedPoint = null;
+    const ring: Pair[] = [
+      [x, y],
+      [x + w, y],
+      [x + w, y + h],
+      [x, y + h],
+      [x, y],
+    ];
+    this.activeMultiPoly = [[ring]];
+    this.rebuildFromActiveMultiPoly();
+  }
+
   public invert(): void {
     this.wandSeedPoint = null;
     const docRing: Pair[] = [
@@ -1121,9 +1136,15 @@ export class SelectionManager {
   }
 
   public snapshotWandBase(): void {
+    // Zaznaczenie wektorowe zapamiętujemy jako geometrię (tablice są niezmienne), rastrowe jako obraz maski
+    this.wandBaseFlat = this.geomPolyCount() > 0 ? this.getFlat() : null;
+    this.wandBaseRasterOnly = this.hasActiveSelection && this.wandBaseFlat === null;
     this.wandBaseMaskCtx.clearRect(0, 0, this.width, this.height);
     this.wandBaseMaskCtx.drawImage(this.maskCanvas, 0, 0);
   }
+
+  private wandBaseFlat: FlatGeom | null = null;
+  private wandBaseRasterOnly = false;
 
   /** Ostatni wynik różdżki policzony w wątku roboczym (sygnatura wejścia + ścieżka zaznaczenia, którą wtedy zostawił). */
   private asyncWandLast: { sig: string; path: Path2D } | null = null;
@@ -1144,16 +1165,57 @@ export class SelectionManager {
     return !!l && l.sig === sig && l.path === this.contourPath;
   }
 
-  /** Zastosowanie wyniku z wątku roboczego: pierścienie są już uproszczone. */
-  public applyWandRings(rings: Float64Array[], settings: SelectionSettings, sig: string): void {
+  /** Zastosowanie wyniku z wątku roboczego (kontur po krawędziach pikseli + dokładna maska jako zapas). */
+  public applyWandCrop(crop: WandCrop | null, geom: FlatGeom | null, settings: SelectionSettings, sig: string): void {
     this.wandLast = null;
-    if (rings.length === 0) {
-      this.setContour([], new Path2D());
-    } else {
-      const geom: FlatGeom = rings.map((r) => [r]);
-      this.combineFlatGeometry(geom, settings.mode);
-    }
+    this.applyWandResult(crop, geom, settings.mode);
     this.asyncWandLast = { sig, path: this.contourPath };
+  }
+
+  /**
+   * Wynik różdżki łączymy z zaznaczeniem jako geometrię wektorową biegnącą po krawędziach pikseli (obrót i skalowanie
+   * zaznaczenia nie zniekształcają wtedy konturu, a kolejne figury łączą się logicznie, bez rastrowania konturów).
+   * Maska rastrowa (dokładna, bez wygładzania) jest używana tylko, gdy kontur jest zbyt złożony albo zaznaczenie bazowe
+   * jest czysto rastrowe (np. z piórkowaniem).
+   */
+  private applyWandResult(crop: WandCrop | null, geom: FlatGeom | null, mode: SelectionCombineMode): void {
+    const baseIsRaster = mode !== 'replace' && this.wandBaseRasterOnly;
+    if (geom === null || baseIsRaster) {
+      this.applyExactWandMask(crop, mode);
+      return;
+    }
+    if (mode !== 'replace') {
+      // odświeżenie z innym parametrem zaczyna od zaznaczenia sprzed różdżki
+      if (this.wandBaseFlat) this.setFlat(this.wandBaseFlat);
+      else this.setFlat([]);
+    }
+    if (geom.length === 0) {
+      if (mode === 'replace' || mode === 'intersect') this.setFlat([]);
+      this.rebuildFromActiveMultiPoly();
+      return;
+    }
+    this.combineFlatGeometry(geom, mode);
+  }
+
+  /** Dokładna maska rastrowa różdżki (bez wygładzania i upraszczania konturu) połączona z zaznaczeniem według trybu. */
+  private applyExactWandMask(crop: WandCrop | null, mode: SelectionCombineMode): void {
+    const cw = crop ? crop.w : 1;
+    const ch = crop ? crop.h : 1;
+    const tempCanvas = document.createElement('canvas');
+    tempCanvas.width = cw;
+    tempCanvas.height = ch;
+    const tctx = tempCanvas.getContext('2d')!;
+    const img = tctx.createImageData(cw, ch);
+    if (crop) {
+      const m32 = new Uint32Array(img.data.buffer);
+      for (let i = 0; i < crop.data.length; i++) if (crop.data[i] === 255) m32[i] = 0xffffffff;
+    }
+    tctx.putImageData(img, 0, 0);
+    this.setFlat([]);
+    this.maskPending = false;
+    this._maskCtx.clearRect(0, 0, this.width, this.height);
+    if (mode !== 'replace') this._maskCtx.drawImage(this.wandBaseMaskCanvas, 0, 0);
+    this.combineTempMask(tempCanvas, mode, crop ? crop.x : 0, crop ? crop.y : 0);
   }
 
   /** Wynik identyczny z poprzednim: zaznaczenie zostaje, zapamiętujemy tylko sygnaturę. */
@@ -1283,31 +1345,8 @@ export class SelectionManager {
       return;
     }
 
-    // Kontury wprost z maski jednobajtowej (bez przejścia przez canvas) i tylko w prostokącie opisanym
-    if (hasPixels) {
-      this.extractContoursBinary(wandMask, ms, {
-        left: bMinX,
-        top: bMinY,
-        right: bMaxX + 1,
-        bottom: bMaxY + 1,
-        width: bMaxX - bMinX + 1,
-        height: bMaxY - bMinY + 1,
-      });
-    } else {
-      this.setContour([], new Path2D());
-    }
-    const rawRings = this.contourRings;
-    if (rawRings.length > 0) {
-      const geom: FlatGeom = [];
-      for (const ring of rawRings) {
-        if (ring.length < 6) continue;
-        const simple = simplifyFlatRing(ring, 0.15);
-        if (simple.length >= 6) geom.push([simple]);
-      }
-      if (geom.length > 0) {
-        this.combineFlatGeometry(geom, settings.mode);
-      }
-    }
+    const crop = cropOfFlood(flood);
+    this.applyWandResult(crop, crop ? pixelGeomOfCrop(crop) : [], settings.mode);
     remember();
   }
 
@@ -1493,15 +1532,6 @@ export class SelectionManager {
       else { out[0] = x + 0.5; out[1] = y + 0.5 + tOf(A(x, y), A(x, y + 1)); }
     };
     const rings = traceCells(cm, cw, ch, minX, minY, edgePoint);
-    this.setContour(rings, new Path2D(ringsToPathString(rings)));
-  }
-
-  /**
-   * Marching squares na masce różdżki (0/1/2/255, układ z marginesem - patrz WAND_PAD): to samo co extractContours,
-   * ale klasyfikacja komórek omija jednolite obszary po 4 piksele naraz (kontur to zwykle drobny ułamek obszaru).
-   */
-  private extractContoursBinary(mask: Uint8Array, ms: number, searchBounds: SKRectI): void {
-    const rings = traceBinaryMask(mask, ms, this.width, this.height, searchBounds.left, searchBounds.top, searchBounds.right, searchBounds.bottom);
     this.setContour(rings, new Path2D(ringsToPathString(rings)));
   }
 }

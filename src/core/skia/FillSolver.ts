@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { BucketAlpha, WAND_PAD, bucketAlphaOfFlood, floodSelect, ringsOfFlood } from './WandCore.ts';
+import { BucketAlpha, WAND_PAD, WandCrop, bucketAlphaOfFlood, cropOfFlood, floodSelect, pixelGeomOfCrop } from './WandCore.ts';
 
 /**
  * Obliczenia różdżki i wiadra z farbą na zapamiętanej kopii pikseli. Działa w wątku roboczym (WandWorker.ts), a gdy
@@ -35,7 +35,7 @@ export interface BucketJob {
 
 export type WandResult =
   | { id: number; kind: 'wand'; status: 'same' | 'stale' }
-  | { id: number; kind: 'wand'; status: 'ok'; rings: Float64Array[]; count: number };
+  | { id: number; kind: 'wand'; status: 'ok'; crop: WandCrop | null; geom: Float64Array[][] | null; count: number };
 
 export type BucketResult =
   | { id: number; kind: 'bucket'; status: 'stale' }
@@ -98,9 +98,10 @@ export class FillSolver {
       last!.id = job.id;
       return { id: job.id, kind: 'wand', status: 'same' };
     }
-    const rings = ringsOfFlood(flood, w, h);
+    const crop = cropOfFlood(flood);
+    const geom = crop ? pixelGeomOfCrop(crop) : [];
     this.last = { id: job.id, key: job.key, global: job.global, color, tol: job.tol, count: flood.count, sx, sy, mask: flood.mask, ms: flood.ms };
-    return { id: job.id, kind: 'wand', status: 'ok', rings, count: flood.count };
+    return { id: job.id, kind: 'wand', status: 'ok', crop, geom, count: flood.count };
   }
 
   public bucket(job: BucketJob): BucketResult {

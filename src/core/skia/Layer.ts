@@ -62,6 +62,44 @@ function pumpThumbs(): void {
   for (const cb of Array.from(thumbListeners)) cb();
 }
 
+/**
+ * Domyka grupę w trybie „Przepuszczanie” z krytem lub maską: kontekst `ctx` w prostokącie (x, y, w, h) zawiera już wynik
+ * rysowania warstw grupy NA tle, `snapshot` to to samo tło sprzed grupy, a `alpha` (w x h) to krycie * maska grupy.
+ * Wynik = tło * (1 - a) + wynik * a (w przestrzeni z mnożeniem alfa, więc także przy półprzezroczystym tle).
+ */
+export function finishPassThrough(
+  ctx: CanvasRenderingContext2D,
+  snapshot: HTMLCanvasElement,
+  alpha: HTMLCanvasElement,
+  x: number,
+  y: number,
+  w: number,
+  h: number
+): void {
+  const cur = document.createElement('canvas');
+  cur.width = w;
+  cur.height = h;
+  const cctx = cur.getContext('2d')!;
+  cctx.drawImage(ctx.canvas, x, y, w, h, 0, 0, w, h);
+  cctx.globalCompositeOperation = 'destination-in';
+  cctx.drawImage(alpha, 0, 0);
+  const bg = document.createElement('canvas');
+  bg.width = w;
+  bg.height = h;
+  const bctx = bg.getContext('2d')!;
+  bctx.drawImage(snapshot, 0, 0);
+  bctx.globalCompositeOperation = 'destination-out';
+  bctx.drawImage(alpha, 0, 0);
+  ctx.save();
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.clearRect(x, y, w, h);
+  ctx.drawImage(bg, x, y);
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.drawImage(cur, x, y);
+  ctx.restore();
+}
+
 /** Zamienia piksele RGBA (maska w skali szarości) na kanał alfa: alfa = luminancja * alfa / 255. */
 export function grayToAlpha(d: Uint8ClampedArray): void {
   for (let i = 0; i < d.length; i += 4) {
@@ -81,8 +119,47 @@ export function grayToAlpha(d: Uint8ClampedArray): void {
 export class Layer {
   public id: string;
   public name: string;
-  public visible: boolean = true;
-  public locked: boolean = false;
+  private _visible: boolean = true;
+  private _locked: boolean = false;
+  /** Grupa warstw: nagłówek grupy (bez pikseli) leży w tablicy ZA (nad) swoimi dziećmi. */
+  public isGroup: boolean = false;
+  /** Id nagłówka grupy, do której należy warstwa (null = poziom główny). */
+  public groupId: string | null = null;
+  /** Grupa rozwinięta (dzieci widoczne na liście). */
+  public expanded: boolean = true;
+  /** Ustawiane przez silnik: grupa nadrzędna jest ukryta / zablokowana. */
+  public groupHidden: boolean = false;
+  public groupLocked: boolean = false;
+
+  /**
+   * Widoczność efektywna (uwzględnia ukrytą grupę). Nagłówek grupy sam nie ma pikseli do narysowania, więc raportuje
+   * „widoczny” tylko wtedy, gdy edytowana jest jego maska (narzędzia sprawdzają `visible` przed rysowaniem po masce).
+   */
+  public get visible(): boolean {
+    if (this.isGroup) return this._visible && this.editMask && !!this.maskGrid;
+    return this._visible && !this.groupHidden;
+  }
+  public set visible(v: boolean) {
+    this._visible = v;
+  }
+  /** Własny przełącznik widoczności (dla grupy: widoczność całej grupy). */
+  public get ownVisible(): boolean {
+    return this._visible;
+  }
+  /**
+   * Blokada efektywna (uwzględnia zablokowaną grupę). Nagłówek grupy nie ma pikseli do edycji: da się go
+   * edytować tylko wtedy, gdy ma maskę i jest ona celem edycji (i grupa nie jest zablokowana).
+   */
+  public get locked(): boolean {
+    if (this.isGroup) return this._locked || !(this.editMask && !!this.maskGrid);
+    return this._locked || this.groupLocked;
+  }
+  public set locked(v: boolean) {
+    this._locked = v;
+  }
+  public get ownLocked(): boolean {
+    return this._locked;
+  }
   public opacity: number = 1.0; // 0.0 .. 1.0
   public blendMode: SKBlendMode = 'SrcOver';
   /** Piksele warstwy (zawsze); `tileGrid` to cel edycji: piksele albo maska (patrz `editMask`). */
@@ -240,8 +317,13 @@ export class Layer {
       this.tileGrid.height,
       this.tileGrid.tileSize
     );
-    copy.visible = this.visible;
-    copy.locked = this.locked;
+    copy._visible = this._visible;
+    copy._locked = this._locked;
+    copy.isGroup = this.isGroup;
+    copy.groupId = this.groupId;
+    copy.expanded = this.expanded;
+    copy.groupHidden = this.groupHidden;
+    copy.groupLocked = this.groupLocked;
     copy.opacity = this.opacity;
     copy.blendMode = this.blendMode;
     copy.pixelGrid = this.pixelGrid.clone();
@@ -267,8 +349,9 @@ export class Layer {
    * Tworzy maskę. Bez `selection`: cała biała (warstwa w pełni widoczna). Z `selection` (kanał alfa płótna zaznaczenia):
    * biel w zaznaczeniu (także częściowa, wg krycia zaznaczenia), czerń poza nim.
    */
-  public createMask(selection?: HTMLCanvasElement | null): void {
-    const g = new TileGrid(this.pixelGrid.width, this.pixelGrid.height, this.pixelGrid.tileSize);
+  public createMask(selection?: HTMLCanvasElement | null, docW?: number, docH?: number): void {
+    // nagłówek grupy ma 1x1 pikseli własnych, a maska grupy musi mieć rozmiar dokumentu (docW/docH)
+    const g = new TileGrid(docW ?? this.pixelGrid.width, docH ?? this.pixelGrid.height, this.pixelGrid.tileSize);
     let white: HTMLCanvasElement | null = null;
     if (selection) {
       white = document.createElement('canvas');
@@ -465,8 +548,14 @@ export class Layer {
 
   /** Nakłada maskę warstwy (jak jest teraz) na podany fragment pikseli (podgląd pędzla na żywo przy edycji pikseli). */
   public applyMaskToRegion(pixels: HTMLCanvasElement, x: number, y: number, w: number, h: number): HTMLCanvasElement {
+    if (!this.maskGrid || !this.maskEnabled || this.editMask) return pixels;
+    return this.maskRegionAlways(pixels, x, y, w, h);
+  }
+
+  /** Jak `applyMaskToRegion`, ale zawsze (także podczas edycji maski): dla kompozycji grup i eksportu. */
+  public maskRegionAlways(pixels: HTMLCanvasElement, x: number, y: number, w: number, h: number): HTMLCanvasElement {
     const mg = this.maskGrid;
-    if (!mg || !this.maskEnabled || this.editMask) return pixels;
+    if (!mg || !this.maskEnabled) return pixels;
     const out = document.createElement('canvas');
     out.width = w;
     out.height = h;

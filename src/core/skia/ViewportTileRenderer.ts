@@ -6,7 +6,7 @@
 import type { GraphicEngine } from './GraphicEngine.ts';
 import { SKBlendMode, SKRectI, getCanvasCompositeOperation } from './types.ts';
 import { markWindowedContext } from './VectorRenderer.ts';
-import { grayToAlpha } from './Layer.ts';
+import { grayToAlpha, finishPassThrough } from './Layer.ts';
 
 /**
  * Szybki, przerywalny renderer podglądu edycji (figury, linie, krzywe, tekst, gradient) dla płótna dowolnej wielkości.
@@ -257,6 +257,8 @@ export class ViewportTileRenderer {
   private readonly raster = makeCanvas();
   private readonly layerBuf = makeCanvas();
   private readonly maskBuf = makeCanvas();
+  /** Bufor dzieci grupy rysowanej izolowanie (grupa z krytem / trybem / maską, w której leży aktywna warstwa). */
+  private readonly groupBuf = makeCanvas();
   private readonly previewBuf = makeCanvas();
   private readonly snap = makeCanvas();
   private readonly lodBuf = makeCanvas();
@@ -349,6 +351,7 @@ export class ViewportTileRenderer {
    */
   public present(view: TileViewState, base: HTMLCanvasElement, dirty: SKRectI | null): void {
     this.base = base;
+    this.overlay = false;
     const prev = this.shownView;
     let full = dirty === null;
     if (this.canvas.width !== view.width || this.canvas.height !== view.height) {
@@ -458,9 +461,14 @@ export class ViewportTileRenderer {
 
   private computeOverlay(pv: TilePreview, zoom: number): boolean {
     if (pv.blendMode !== 'SrcOver') return false;
+    // Duże powiększenie: piksele są wielkimi blokami, więc podgląd i dokument muszą być rysowane tym samym rasterem
+    // (zwykłe płótno pod spodem zaokrągla krawędzie pikseli inaczej niż płótno kafelków - 1 px przesunięcia i szczeliny)
+    if (zoom >= 2) return false;
     const eng = this.engine;
     const act = eng.renderLayers[eng.renderActiveIndex];
     if (!act || !act.visible || act.opacity < 1 || getCanvasCompositeOperation(act.blendMode) !== 'source-over') return false;
+    // aktywna warstwa w grupie z krytem / trybem / maską: podgląd musi przejść przez izolowaną kompozycję grupy
+    if (eng.renderIsolation || eng.renderHasPass) return false;
     // warstwa z maską: podgląd musi przejść przez pełną kompozycję (maskowanie), więc bez trybu nakładki
     if (act.maskGrid && act.maskEnabled) return false;
     for (let i = eng.renderActiveIndex + 1; i < eng.renderLayers.length; i++) {
@@ -500,6 +508,7 @@ export class ViewportTileRenderer {
 
   /** Usuwa podgląd (cały obszar staje się przezroczysty) i przerywa renderowanie. */
   public clear(): void {
+    this.overlay = false;
     this.generation++;
     this.queue = [];
     this.preview = null;
@@ -1774,8 +1783,15 @@ export class ViewportTileRenderer {
       const r = rc.ctx;
       const act = eng.renderActiveIndex;
       // Zoom < 100%: gotowe bufory warstw w skali widoku (kopiowanie 1:1); w pozostałych przypadkach bufory kawałków dokumentu
-      const vgp = this.viewGroupsFor(ox, oy, s, rw, rh);
-      const grouped = vgp ? false : this.prepareLayerGroups();
+      // Aktywna warstwa w izolowanej grupie: wszystkie warstwy rysowane po kolei (bez buforów grup i widoków),
+      // a dzieci grupy trafiają do osobnego bufora nakładanego potem z ustawieniami grupy.
+      const iso = eng.renderIsolation;
+      // Grupy „Przepuszczanie” z krytem / maską: warstwy muszą być rysowane po kolei na tle (bez buforów grup)
+      const hasPass = eng.renderHasPass;
+      const vgp = iso || hasPass ? null : this.viewGroupsFor(ox, oy, s, rw, rh);
+      const grouped = vgp || iso || hasPass ? false : this.prepareLayerGroups();
+      let R: CanvasRenderingContext2D = r;
+      const passSnaps = new Map<string, HTMLCanvasElement>();
 
       if (vgp) {
         if (vgp.below) r.drawImage(vgp.below, vgp.sx, vgp.sy, rw, rh, 0, 0, rw, rh);
@@ -1786,13 +1802,76 @@ export class ViewportTileRenderer {
 
       for (let i = 0; i < eng.renderLayers.length; i++) {
         const layer = eng.renderLayers[i];
+        const psG = hasPass ? eng.renderPassStartAt(i) : undefined;
+        if (psG) {
+          const sc = document.createElement('canvas');
+          sc.width = rw;
+          sc.height = rh;
+          sc.getContext('2d')!.drawImage(r.canvas, 0, 0);
+          passSnaps.set(psG.id, sc);
+        }
+        const peG = hasPass ? eng.renderPassEndAt(i) : undefined;
+        if (peG) {
+          const sn = passSnaps.get(peG.id);
+          if (sn && peG.ownVisible) {
+            const al = document.createElement('canvas');
+            al.width = rw;
+            al.height = rh;
+            const actx = al.getContext('2d')!;
+            if (peG.maskGrid && peG.maskEnabled) {
+              const gm = this.maskBuf;
+              this.sizeBuf(gm, rw, rh);
+              this.drawLayerTiles(gm.ctx, peG, ox, oy, s, rw, rh, undefined, 'mask');
+              const gimg = gm.ctx.getImageData(0, 0, rw, rh);
+              grayToAlpha(gimg.data);
+              gm.ctx.putImageData(gimg, 0, 0);
+              actx.globalAlpha = peG.opacity;
+              actx.drawImage(gm.canvas, 0, 0);
+            } else {
+              actx.globalAlpha = peG.opacity;
+              actx.fillStyle = '#000';
+              actx.fillRect(0, 0, rw, rh);
+            }
+            finishPassThrough(r, sn, al, 0, 0, rw, rh);
+          }
+          continue;
+        }
+        if (iso && i === iso.start) {
+          this.sizeBuf(this.groupBuf, rw, rh);
+          R = this.groupBuf.ctx;
+        }
+        if (iso && i === iso.header) {
+          R = r;
+          const g = iso.group;
+          if (g.ownVisible && g.opacity > 0) {
+            const gb = this.groupBuf;
+            if (g.maskGrid && g.maskEnabled) {
+              const gm = this.maskBuf;
+              this.sizeBuf(gm, rw, rh);
+              this.drawLayerTiles(gm.ctx, g, ox, oy, s, rw, rh, undefined, 'mask');
+              const gimg = gm.ctx.getImageData(0, 0, rw, rh);
+              grayToAlpha(gimg.data);
+              gm.ctx.putImageData(gimg, 0, 0);
+              gb.ctx.save();
+              gb.ctx.globalCompositeOperation = 'destination-in';
+              gb.ctx.drawImage(gm.canvas, 0, 0);
+              gb.ctx.restore();
+            }
+            r.save();
+            r.globalAlpha = g.opacity;
+            r.globalCompositeOperation = getCanvasCompositeOperation(g.blendMode === 'PassThrough' ? 'SrcOver' : g.blendMode);
+            r.drawImage(gb.canvas, 0, 0);
+            r.restore();
+          }
+          continue;
+        }
         if (!layer.visible || layer.opacity <= 0) continue;
 
         if (i !== act) {
           if (vgp) {
             if (i < act) continue;
             if (vgp.aboveOk) {
-              if (i === this.firstVisibleAbove(act) && vgp.above) r.drawImage(vgp.above, vgp.sx, vgp.sy, rw, rh, 0, 0, rw, rh);
+              if (i === this.firstVisibleAbove(act) && vgp.above) R.drawImage(vgp.above, vgp.sx, vgp.sy, rw, rh, 0, 0, rw, rh);
               continue;
             }
           } else {
@@ -1803,11 +1882,11 @@ export class ViewportTileRenderer {
               continue;
             }
           }
-          r.save();
-          r.globalAlpha = layer.opacity;
-          r.globalCompositeOperation = getCanvasCompositeOperation(layer.blendMode);
-          this.drawLayerTiles(r, layer, ox, oy, s, rw, rh);
-          r.restore();
+          R.save();
+          R.globalAlpha = layer.opacity;
+          R.globalCompositeOperation = getCanvasCompositeOperation(layer.blendMode);
+          this.drawLayerTiles(R, layer, ox, oy, s, rw, rh);
+          R.restore();
           continue;
         }
 
@@ -1868,11 +1947,11 @@ export class ViewportTileRenderer {
           lb.ctx.restore();
         }
 
-        r.save();
-        r.globalAlpha = layer.opacity;
-        r.globalCompositeOperation = getCanvasCompositeOperation(layer.blendMode);
-        r.drawImage(lb.canvas, 0, 0);
-        r.restore();
+        R.save();
+        R.globalAlpha = layer.opacity;
+        R.globalCompositeOperation = getCanvasCompositeOperation(layer.blendMode);
+        R.drawImage(lb.canvas, 0, 0);
+        R.restore();
       }
       out = rc.canvas;
     }

@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Quad, pointInQuad } from '../core/skia/Perspective.ts';
+import { Quad, pointInQuad, drawPerspectivePreview } from '../core/skia/Perspective.ts';
 import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react';
 import { GraphicEngine } from '../core/skia/GraphicEngine.ts';
 import { renderGradientPreview } from '../core/skia/GradientRenderer.ts';
@@ -348,6 +348,9 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   const tileRendererRef = useRef<ViewportTileRenderer | null>(null);
   const tileViewRef = useRef<{ zoom: number; left: number; top: number; width: number; height: number } | null>(null);
   const tileSessionRef = useRef(false);
+  /** Płótno kafelków wyświetla dokument także poza sesją podglądu (duże powiększenie) - patrz `presentIdle`. */
+  const tilePresentingRef = useRef(false);
+  const tileWasSessionRef = useRef(false);
   const viewOnlyRef = useRef(false);
   const tileRendererEngineRef = useRef<GraphicEngine | null>(null);
   const baseSigRef = useRef<string | null>(null);
@@ -1266,6 +1269,41 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
 
 
   // REDRAW & COMPOSITE TO VIEWPORT
+  /**
+   * Poza sesją podglądu przy dużym powiększeniu (piksele jako duże bloki) dokument wyświetla płótno kafelków - tym samym
+   * rastrem co podgląd, więc wypełnienia i zaznaczenia pasują do pikseli bez przesunięć o 1 px i szczelin (zwykłe płótno
+   * skalowane przez CSS zaokrągla krawędzie pikseli inaczej). Przy mniejszym powiększeniu płótno kafelków jest puste.
+   */
+  const presentIdle = (dirty: SKRectI | null): void => {
+    const tr = tileRendererRef.current;
+    const cv = canvasRef.current;
+    const tv = tileViewRef.current;
+    if (!tr || !cv || !tv || tileSessionRef.current) return;
+    if (tv.zoom >= 2) {
+      if (tileWasSessionRef.current || !tilePresentingRef.current) {
+        tr.clear();
+        dirty = null;
+      }
+      tileWasSessionRef.current = false;
+      tilePresentingRef.current = true;
+      tr.present(tv, cv, dirty);
+      cv.style.visibility = 'hidden';
+    } else {
+      if (tilePresentingRef.current || tileWasSessionRef.current) tr.clear();
+      tileWasSessionRef.current = false;
+      tilePresentingRef.current = false;
+      cv.style.visibility = '';
+    }
+  };
+
+  useEffect(() => {
+    engine.onViewportComposited = (_target, dirty) => presentIdle(dirty);
+    return () => {
+      engine.onViewportComposited = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [engine]);
+
   const redraw = useCallback(() => {
     if (!canvasRef.current) return;
 
@@ -1342,10 +1380,15 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     const tcs = engine.transformContentSession;
     const tst = engine.selectionManager.transformState;
     const contentSessionActive = !!tcs && !!tst && tcs.sourceLayerIndex === engine.activeLayerIndex && !!tileCanvas;
+    // wycięcie fragmentu z warstwy dopiero po pierwszej zmianie ramki: w stanie początkowym widać nietknięty oryginał
+    if (contentSessionActive) engine.syncContentCut();
+    const contentIdentity = contentSessionActive && engine.contentTransformIsIdentity();
     engine.floatingContentExternal = contentSessionActive;
     const sessionNow = (isAnyVectorSessionActive || !!gradientPreview || !!bucketPreview || contentSessionActive) && !!tileCanvas;
     tileSessionRef.current = sessionNow;
     if (sessionNow) {
+      tilePresentingRef.current = false;
+      tileWasSessionRef.current = true;
       // SZYBKI PODGLĄD EDYCJI: kafelki ekranu renderowane promieniowo od kursora, przerywane przy każdym ruchu.
       const tr = tileRendererRef.current!;
 
@@ -1386,7 +1429,14 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         const ih = st0.initialBounds.height;
         const interp = sess.interpolation;
         const src = sess.previewCanvas ?? sess.sourceContentCanvas;
+        const pq = sess.persp ? (sess.persp.quad.map((p) => ({ x: p.x, y: p.y })) as Quad) : null;
+        const perspPv = pq ? engine.getPerspectivePreview() : null;
         previewRender = (ctx) => {
+          if (contentIdentity) return;
+          if (pq) {
+            if (perspPv) drawPerspectivePreview(ctx, perspPv, interp !== 'nearest-neighbor');
+            return;
+          }
           ctx.save();
           ctx.translate(pos.x, pos.y);
           ctx.rotate(ang);
@@ -1401,9 +1451,21 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
           ctx.restore();
         };
         previewBlend = 'SrcOver';
-        bounds = boundsForRotatedBox(pos, w, h, ang, 4);
-        centerDoc = pos;
-        contentKey = 'tc:' + JSON.stringify([pos, w, h, ang, fx, fy, interp]);
+        if (pq) {
+          const xs = pq.map((p) => p.x);
+          const ys = pq.map((p) => p.y);
+          const l = Math.floor(Math.min(...xs)) - 4;
+          const t = Math.floor(Math.min(...ys)) - 4;
+          const r = Math.ceil(Math.max(...xs)) + 4;
+          const bt = Math.ceil(Math.max(...ys)) + 4;
+          bounds = { left: l, top: t, right: r, bottom: bt, width: r - l, height: bt - t };
+          centerDoc = { x: (l + r) / 2, y: (t + bt) / 2 };
+          contentKey = 'tp:' + JSON.stringify([pq, interp, contentIdentity]);
+        } else {
+          bounds = boundsForRotatedBox(pos, w, h, ang, 4);
+          centerDoc = pos;
+          contentKey = 'tc:' + JSON.stringify([pos, w, h, ang, fx, fy, interp, contentIdentity]);
+        }
       } else if (!isAnyVectorSessionActive && !gradientPreview && bucketPreview) {
         // Wiadro: wypełnienie (maska alfa w prostokącie opisanym na obszarze) rysowane tak samo jak przy zatwierdzaniu;
         // warstwa nietknięta do zatwierdzenia
@@ -1526,7 +1588,10 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       return;
     }
 
-    if (viewOnlyRef.current) return;
+    if (viewOnlyRef.current) {
+      presentIdle(null);
+      return;
+    }
     engine.compositeToViewport(
       canvasRef.current,
       null,
@@ -1538,8 +1603,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       null
     );
     baseSigRef.current = engine.getBaseSignature();
-    tileRendererRef.current?.clear();
-    if (canvasRef.current) canvasRef.current.style.visibility = '';
+    presentIdle(null);
   }, [
     engine,
     activeVectorLineSession,
@@ -3134,8 +3198,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
           oCtx.translate(-engine.width / 2, -engine.height / 2);
 
           // 1. MASZERUJĄCE MRÓWKI DLA ZAZNACZENIA
-          const isTransformingContentActive = activeTool === 'transform-content' && transformActiveHandle !== null;
-          if (engine.selectionManager.hasActiveSelection && !isTransformingContentActive) {
+          if (engine.selectionManager.hasActiveSelection) {
             const time = performance.now();
             const dashOffset = (time / 60) % 8;
 

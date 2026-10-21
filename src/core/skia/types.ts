@@ -37,7 +37,8 @@ export type SKBlendMode =
   | 'SoftLight'   // Łagodne światło
   | 'Difference'  // Różnica
   | 'Exclusion'   // Wykluczenie
-  | 'Clear';      // Czyszczenie / Gumka
+  | 'Clear'       // Czyszczenie / Gumka
+  | 'PassThrough'; // Przepuszczanie (tylko grupy): warstwy grupy mieszają się z tym, co jest pod grupą
 
 export interface BlendModeInfo {
   id: SKBlendMode;
@@ -380,5 +381,10 @@ export interface FiguraProjectFile {
     maskDataUrl?: string;
     maskEnabled?: boolean;
     maskLinked?: boolean;
+    locked?: boolean;
+    /** Grupa warstw: nagłówek (bez pikseli; `dataUrl` puste) i przynależność warstw do grupy */
+    isGroup?: boolean;
+    groupId?: string | null;
+    expanded?: boolean;
   }[];
 }

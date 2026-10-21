@@ -9,10 +9,14 @@ import {
   ArrowUp,
   Component,
   Copy,
+  ChevronDown,
+  ChevronRight,
   Eye,
   EyeOff,
   FilePlus,
   Filter,
+  FolderOpen,
+  Folder,
   FolderPlus,
   GitMerge,
   Link2,
@@ -39,7 +43,10 @@ interface LayersPanelProps {
   onMergeDown: () => void;
   onMoveUp: () => void;
   onMoveDown: () => void;
-  onReorderLayers: (fromIndex: number, toIndex: number) => void;
+  /** Przeciągnij i upuść: `before` = nad celem, `after` = pod celem, `into` = do wnętrza grupy. */
+  onMoveLayerTo: (fromIndex: number, toIndex: number, place: 'before' | 'after' | 'into') => void;
+  onAddGroup: () => void;
+  onToggleExpand: (index: number) => void;
   onToggleVisibility: (index: number) => void;
   onToggleLock?: (index: number) => void;
   onChangeOpacity: (index: number, opacity: number, recordOldValue?: number) => void;
@@ -97,7 +104,9 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
   onMergeDown,
   onMoveUp,
   onMoveDown,
-  onReorderLayers,
+  onMoveLayerTo,
+  onAddGroup,
+  onToggleExpand,
   onToggleVisibility,
   onToggleLock,
   onChangeOpacity,
@@ -115,7 +124,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [editingName, setEditingName] = useState('');
   const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
-  const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
+  const [dragOver, setDragOver] = useState<{ index: number; place: 'before' | 'after' | 'into' } | null>(null);
 
   const startOpacityRef = useRef<number | null>(null);
 
@@ -149,31 +158,45 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
     setDraggedIndex(index);
   };
 
-  const handleDragOver = (e: React.DragEvent, index: number) => {
+  const placeFromEvent = (e: React.DragEvent, isGroupRow: boolean): 'before' | 'after' | 'into' => {
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const f = (e.clientY - rect.top) / Math.max(1, rect.height);
+    if (isGroupRow) return f < 0.28 ? 'before' : f > 0.72 ? 'after' : 'into';
+    return f < 0.5 ? 'before' : 'after';
+  };
+
+  const handleDragOver = (e: React.DragEvent, index: number, isGroupRow: boolean) => {
     e.preventDefault();
     if (editingIndex !== null) return;
     e.dataTransfer.dropEffect = 'move';
-    if (dragOverIndex !== index) {
-      setDragOverIndex(index);
+    const place = placeFromEvent(e, isGroupRow);
+    if (!dragOver || dragOver.index !== index || dragOver.place !== place) {
+      setDragOver({ index, place });
     }
   };
 
-  const handleDrop = (e: React.DragEvent, targetIndex: number) => {
+  const handleDrop = (e: React.DragEvent, targetIndex: number, isGroupRow: boolean) => {
     e.preventDefault();
     if (editingIndex !== null) return;
+    const place = placeFromEvent(e, isGroupRow);
     if (draggedIndex !== null && draggedIndex !== targetIndex) {
-      onReorderLayers(draggedIndex, targetIndex);
+      onMoveLayerTo(draggedIndex, targetIndex, place);
     }
     setDraggedIndex(null);
-    setDragOverIndex(null);
+    setDragOver(null);
   };
 
   const handleDragEnd = () => {
     setDraggedIndex(null);
-    setDragOverIndex(null);
+    setDragOver(null);
   };
 
-  const displayLayers = [...layers].map((layer, index) => ({ layer, index })).reverse();
+  // Widoczne wiersze (od góry): dzieci zwiniętych grup są pomijane
+  const collapsedGroupIds = new Set(layers.filter((l) => l.isGroup && !l.expanded).map((l) => l.id));
+  const displayLayers = [...layers]
+    .map((layer, index) => ({ layer, index }))
+    .reverse()
+    .filter(({ layer }) => !(layer.groupId && collapsedGroupIds.has(layer.groupId)));
 
   return (
     <div className="bg-transparent text-xs select-none flex flex-col flex-1 min-h-0">
@@ -188,15 +211,25 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
       </div>
 
       {/* Opcje aktywnej warstwy: Tryb mieszania i Krycie */}
-      <div className="space-y-1.5 mb-2 bg-[#181818] p-1.5 rounded border border-[#2a2a2a] shrink-0 w-full">
+      <div
+        className="space-y-1.5 mb-2 bg-[#181818] p-1.5 rounded border border-[#2a2a2a] shrink-0 w-full"
+        title={
+          activeLayer?.isGroup
+            ? 'Przepuszczanie: warstwy grupy mieszają się z tym, co pod grupą (krycie i maska grupy dozują wynik). Inny tryb (np. Normalny): grupa jest najpierw składana osobno, potem nakładana tym trybem'
+            : undefined
+        }
+      >
         {/* Tryb Mieszania */}
         <div className="flex items-center justify-between gap-1.5 w-full">
           <label className="text-[10.5px] text-[#aaa] shrink-0">Tryb:</label>
           <select
-            value={activeLayer?.blendMode || 'SrcOver'}
+            value={activeLayer?.blendMode || (activeLayer?.isGroup ? 'PassThrough' : 'SrcOver')}
             onChange={(e) => onChangeBlendMode(activeLayerIndex, e.target.value as SKBlendMode)}
             className="h-5 flex-1 min-w-0 bg-[#222] border border-[#444] rounded px-1.5 text-[10.5px] text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
           >
+            {activeLayer?.isGroup && (
+              <option value="PassThrough">Przepuszczanie</option>
+            )}
             {BLEND_MODES.map((mode) => (
               <option key={mode.id} value={mode.id}>
                 {mode.namePl}
@@ -239,16 +272,20 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
 
       {/* Górny pasek: operacje na aktywnej warstwie */}
       <div className="flex items-center gap-1 mb-1.5 shrink-0 w-full">
-        <IconBtn title="Przesuń w górę" onClick={onMoveUp} disabled={activeLayerIndex >= layers.length - 1}>
+        <IconBtn title="Przesuń w górę" onClick={onMoveUp}>
           <ArrowUp size={12} />
         </IconBtn>
-        <IconBtn title="Przesuń w dół" onClick={onMoveDown} disabled={activeLayerIndex <= 0}>
+        <IconBtn title="Przesuń w dół" onClick={onMoveDown}>
           <ArrowDown size={12} />
         </IconBtn>
-        <IconBtn title="Duplikuj warstwę" onClick={onDuplicateLayer}>
+        <IconBtn title={activeLayer?.isGroup ? 'Duplikuj grupę' : 'Duplikuj warstwę'} onClick={onDuplicateLayer}>
           <Copy size={12} />
         </IconBtn>
-        <IconBtn title="Połącz w dół" onClick={onMergeDown} disabled={activeLayerIndex <= 0}>
+        <IconBtn
+          title={activeLayer?.isGroup ? 'Scal grupę w jedną warstwę' : 'Połącz w dół'}
+          onClick={onMergeDown}
+          disabled={activeLayerIndex <= 0 && !activeLayer?.isGroup}
+        >
           <GitMerge size={12} />
         </IconBtn>
         <IconBtn title="Przekształć warstwę (rasteryzuj / obiekt inteligentny) - wkrótce" placeholder>
@@ -256,9 +293,17 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
         </IconBtn>
         <div className="flex-1" />
         <IconBtn
-          title={maskSelected ? 'Usuń maskę (zaznaczona jest maska)' : activeLayer?.hasMask ? 'Usuń warstwę razem z maską' : 'Usuń warstwę'}
+          title={
+            maskSelected
+              ? 'Usuń maskę (zaznaczona jest maska)'
+              : activeLayer?.isGroup
+                ? 'Usuń grupę razem z jej warstwami'
+                : activeLayer?.hasMask
+                  ? 'Usuń warstwę razem z maską'
+                  : 'Usuń warstwę'
+          }
           onClick={onRemoveLayer}
-          disabled={layers.length <= 1 && !maskSelected}
+          disabled={layers.filter((l) => !l.isGroup).length <= 1 && !maskSelected && !activeLayer?.isGroup}
           danger
         >
           <Trash2 size={12} />
@@ -269,24 +314,30 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
       <div className="flex-1 overflow-y-auto border border-[#2a2a2a] rounded bg-[#141414] p-1 space-y-1 min-h-[120px] w-full">
         {displayLayers.map(({ layer, index }) => {
           const isSelected = index === activeLayerIndex;
-          const isDragOver = dragOverIndex === index;
+          const isGroup = layer.isGroup;
+          const isChild = !!layer.groupId;
+          const dropHere = dragOver && dragOver.index === index && draggedIndex !== null && draggedIndex !== index ? dragOver.place : null;
+          const dimmed = !layer.ownVisible || layer.groupHidden;
 
           return (
             <div
               key={layer.id}
               draggable={editingIndex === null}
               onDragStart={(e) => handleDragStart(e, index)}
-              onDragOver={(e) => handleDragOver(e, index)}
-              onDrop={(e) => handleDrop(e, index)}
+              onDragOver={(e) => handleDragOver(e, index, isGroup)}
+              onDrop={(e) => handleDrop(e, index, isGroup)}
               onDragEnd={handleDragEnd}
               onClick={() => onSelectLayer(index)}
-              className={`flex items-center gap-2 p-1 rounded cursor-pointer border transition-all ${
+              style={isChild ? { marginLeft: 14 } : undefined}
+              className={`relative flex items-center gap-2 p-1 rounded cursor-pointer border transition-all ${
                 isSelected
                   ? 'bg-[#10549c] border-[#2980b9] text-white shadow-sm'
                   : 'bg-[#1e1e1e] hover:bg-[#282828] border-transparent text-[#cccccc]'
-              } ${isDragOver ? 'border-t-2 border-t-[#00ffcc]' : ''}`}
+              } ${dropHere === 'before' ? 'border-t-2 border-t-[#00ffcc]' : ''} ${
+                dropHere === 'after' ? 'border-b-2 border-b-[#00ffcc]' : ''
+              } ${dropHere === 'into' ? 'ring-2 ring-[#00ffcc]' : ''}`}
             >
-              {/* Miniatura Warstwy po lewej z nakładką (Oko + Kłódka) */}
+              {/* Miniatura Warstwy po lewej z nakładką (Oko + Kłódka); dla grupy ikona folderu */}
               <div
                 onClick={(e) => {
                   e.stopPropagation();
@@ -295,19 +346,29 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                 title={layer.hasMask ? 'Edytuj piksele warstwy (przywraca zwykły widok)' : undefined}
                 className={`relative rounded-xs border overflow-hidden flex-shrink-0 shadow-inner group ${
                   isSelected && !layer.editMask && layer.hasMask ? 'border-[#00e5ff] ring-1 ring-[#00e5ff]' : 'border-[#444]'
-                }`}
-                style={{
-                  width: layer.thumbW + 2,
-                  height: layer.thumbH + 2,
-                  backgroundImage: `repeating-conic-gradient(#e4e4e4 0% 25%, #ffffff 0% 50%)`,
-                  backgroundSize: '8px 8px',
-                }}
+                } ${dimmed ? 'opacity-60' : ''}`}
+                style={
+                  isGroup
+                    ? { width: 48, height: 38, background: '#262626' }
+                    : {
+                        width: layer.thumbW + 2,
+                        height: layer.thumbH + 2,
+                        backgroundImage: `repeating-conic-gradient(#e4e4e4 0% 25%, #ffffff 0% 50%)`,
+                        backgroundSize: '8px 8px',
+                      }
+                }
               >
-                <img
-                  src={layer.getThumbnailDataUrl()}
-                  alt=""
-                  className="w-full h-full object-contain"
-                />
+                {isGroup ? (
+                  <div className="w-full h-full flex items-start justify-center pt-1 text-[#e0b84a]">
+                    {layer.expanded ? <FolderOpen size={20} strokeWidth={1.6} /> : <Folder size={20} strokeWidth={1.6} />}
+                  </div>
+                ) : (
+                  <img
+                    src={layer.getThumbnailDataUrl()}
+                    alt=""
+                    className="w-full h-full object-contain"
+                  />
+                )}
 
                 {/* Nakładka przycisków w lewym dolnym rogu miniaturek */}
                 <div className="absolute bottom-0.5 left-0.5 flex items-center gap-0.5 z-10">
@@ -318,14 +379,18 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                       e.stopPropagation();
                       onToggleVisibility(index);
                     }}
-                    title={layer.visible ? 'Ukryj warstwę' : 'Pokaż warstwę'}
+                    title={
+                      isGroup
+                        ? layer.ownVisible ? 'Ukryj grupę' : 'Pokaż grupę'
+                        : layer.ownVisible ? 'Ukryj warstwę' : 'Pokaż warstwę'
+                    }
                     className={`p-0.5 rounded transition-colors cursor-pointer ${
-                      layer.visible
+                      layer.ownVisible
                         ? 'bg-black/60 hover:bg-black/80 text-white'
                         : 'bg-black/85 text-[#ff6666]'
                     }`}
                   >
-                    {layer.visible ? (
+                    {layer.ownVisible ? (
                       <Eye size={10} strokeWidth={2.2} />
                     ) : (
                       <EyeOff size={10} strokeWidth={2.2} />
@@ -339,14 +404,20 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                       e.stopPropagation();
                       onToggleLock?.(index);
                     }}
-                    title={layer.locked ? 'Odblokuj warstwę' : 'Zablokuj warstwę'}
+                    title={
+                      isGroup
+                        ? layer.ownLocked ? 'Odblokuj grupę' : 'Zablokuj grupę (blokuje wszystkie jej warstwy)'
+                        : layer.ownLocked ? 'Odblokuj warstwę' : 'Zablokuj warstwę'
+                    }
                     className={`p-0.5 rounded transition-colors cursor-pointer ${
-                      layer.locked
+                      layer.ownLocked
                         ? 'bg-amber-600/90 text-white shadow-xs'
-                        : 'bg-black/50 hover:bg-black/80 text-[#ccc]'
+                        : layer.groupLocked
+                          ? 'bg-amber-900/70 text-[#e8c46a]'
+                          : 'bg-black/50 hover:bg-black/80 text-[#ccc]'
                     }`}
                   >
-                    {layer.locked ? (
+                    {layer.ownLocked || layer.groupLocked ? (
                       <Lock size={9} strokeWidth={2.2} />
                     ) : (
                       <Unlock size={9} strokeWidth={2} />
@@ -368,7 +439,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                       onViewMask(maskViewIndex === index ? null : index);
                     }}
                     title="Kliknij: edytuj maskę. Dwukrotne kliknięcie: pokaż maskę w skali szarości na płótnie"
-                    style={{ width: layer.thumbW + 2, height: layer.thumbH + 2 }}
+                    style={isGroup ? { width: 48, height: 38 } : { width: layer.thumbW + 2, height: layer.thumbH + 2 }}
                     className={`relative rounded-xs border overflow-hidden flex-shrink-0 bg-black ${
                       isSelected && layer.editMask ? 'border-[#00e5ff] ring-1 ring-[#00e5ff]' : 'border-[#444]'
                     }`}
@@ -416,7 +487,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
               )}
 
               {/* Nazwa Warstwy */}
-              <div className="flex-1 min-w-0">
+              <div className={`flex-1 min-w-0 ${dimmed ? 'opacity-60' : ''}`}>
                 {editingIndex === index ? (
                   <input
                     type="text"
@@ -434,7 +505,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                 ) : (
                   <span
                     onDoubleClick={() => handleStartRename(index, layer.name)}
-                    className="truncate block text-[11px] font-medium select-none"
+                    className={`truncate block text-[11px] select-none ${isGroup ? 'font-semibold' : 'font-medium'}`}
                     title="Kliknij dwukrotnie, aby zmienić nazwę"
                   >
                     {layer.name}
@@ -443,13 +514,31 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
               </div>
 
               {/* Wskaźnik trybu mieszania */}
-              <div className="text-[9px] opacity-75 shrink-0">
-                {layer.blendMode !== 'SrcOver' && (
-                  <span className="bg-[#000]/40 px-1 py-0.5 rounded text-[8.5px] uppercase font-mono">
-                    {layer.blendMode.slice(0, 3)}
-                  </span>
-                )}
-              </div>
+              {(
+                <div className="text-[9px] opacity-75 shrink-0">
+                  {layer.blendMode !== 'SrcOver' && layer.blendMode !== 'PassThrough' && (
+                    <span className="bg-[#000]/40 px-1 py-0.5 rounded text-[8.5px] uppercase font-mono">
+                      {layer.blendMode.slice(0, 3)}
+                    </span>
+                  )}
+                </div>
+              )}
+
+              {/* Rozwiń / zwiń grupę: prawy dolny róg wiersza, tuż pod nazwą */}
+              {isGroup && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onToggleExpand(index);
+                  }}
+                  onDoubleClick={(e) => e.stopPropagation()}
+                  title={layer.expanded ? 'Zwiń grupę' : 'Rozwiń grupę'}
+                  className="absolute right-1 bottom-0.5 p-0.5 rounded bg-black/40 hover:bg-black/70 text-[#ddd] cursor-pointer"
+                >
+                  {layer.expanded ? <ChevronDown size={11} strokeWidth={2.4} /> : <ChevronRight size={11} strokeWidth={2.4} />}
+                </button>
+              )}
             </div>
           );
         })}
@@ -464,17 +553,28 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
         <IconBtn title="Nowa warstwa wektorowa - wkrótce" placeholder>
           <PenTool size={12} />
         </IconBtn>
-        <IconBtn title="Nowa grupa / Grupuj - wkrótce" placeholder>
+        <IconBtn title="Nowa grupa warstw" onClick={onAddGroup}>
           <FolderPlus size={12} />
         </IconBtn>
         <div className="w-px h-4 bg-[#3a3a3a] mx-0.5" />
-        {activeLayer?.hasMask ? (
+        {activeLayer?.isGroup && activeLayer.hasMask ? (
+          <IconBtn
+            title="Maski grupy nie da się wypiec w piksele (dotyczy złożenia warstw grupy). Zaznacz maskę i użyj kosza, aby ją usunąć, albo scal grupę"
+            disabled
+          >
+            <Split size={12} />
+          </IconBtn>
+        ) : activeLayer?.hasMask ? (
           <IconBtn title="Wypiecz maskę (wpieka ją w piksele warstwy i usuwa)" onClick={onApplyMask}>
             <Split size={12} />
           </IconBtn>
         ) : (
           <IconBtn
-            title={hasSelection ? 'Dodaj maskę z zaznaczenia (zaznaczone = widoczne)' : 'Dodaj maskę przezroczystości'}
+            title={
+              activeLayer?.isGroup
+                ? hasSelection ? 'Dodaj maskę grupy z zaznaczenia (zaznaczone = widoczne)' : 'Dodaj maskę przezroczystości grupy'
+                : hasSelection ? 'Dodaj maskę z zaznaczenia (zaznaczone = widoczne)' : 'Dodaj maskę przezroczystości'
+            }
             onClick={onAddMask}
           >
             <SquareDashed size={12} />

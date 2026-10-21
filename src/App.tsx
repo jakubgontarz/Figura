@@ -445,11 +445,7 @@ export default function App() {
     engine.copy();
   }, [engine]);
 
-  const pasteImageBlob = useCallback((file: File | Blob) => {
-    if (engine.getActiveLayer()?.locked) {
-      showToast('Warstwa jest zablokowana');
-      return;
-    }
+  const pasteExternalBlob = useCallback((file: File | Blob) => {
     const img = new Image();
     img.onload = () => {
       const cvs = document.createElement('canvas');
@@ -468,6 +464,22 @@ export default function App() {
     };
     img.src = URL.createObjectURL(file);
   }, [engine, bumpEngineRevision, showToast]);
+
+  const pasteImageBlob = useCallback((file: File | Blob) => {
+    if (engine.getActiveLayer()?.locked) {
+      showToast('Warstwa jest zablokowana');
+      return;
+    }
+    // Własna kopia aplikacji: wklejamy bufor wewnętrzny (dokładne piksele i maska), a nie obraz zdekodowany z PNG
+    engine.isOwnClipboardBlob(file).then((own) => {
+      if (own && engine.paste()) {
+        setActiveTool('transform-content');
+        bumpEngineRevision();
+        return;
+      }
+      pasteExternalBlob(file);
+    });
+  }, [engine, bumpEngineRevision, showToast, pasteExternalBlob]);
 
   const handlePaste = useCallback(() => {
     if (engine.getActiveLayer()?.locked) {
@@ -858,11 +870,14 @@ export default function App() {
         secondaryColor={secondaryColor}
         onChangePrimaryColorAlpha={(a) => setPrimaryColor((prev) => ({ ...prev, a }))}
         activeTool={activeTool}
+        flipDisabled={engine.perspectiveActive}
         onFlipHorizontal={() => {
+          if (engine.perspectiveActive) return;
           engine.selectionManager.flipHorizontal();
           bumpEngineRevision();
         }}
         onFlipVertical={() => {
+          if (engine.perspectiveActive) return;
           engine.selectionManager.flipVertical();
           bumpEngineRevision();
         }}
@@ -984,6 +999,16 @@ export default function App() {
               bumpEngineRevision();
             }}
             hasSelection={engine.selectionManager.hasActiveSelection}
+            onAddGroup={() => {
+              if (engine.bucketSeedPoint) engine.commitPaintBucketSession();
+              if (engine.gradientStartPoint) engine.commitGradientSession();
+              engine.addGroup();
+              bumpEngineRevision();
+            }}
+            onToggleExpand={(idx) => {
+              engine.toggleGroupExpanded(idx);
+              bumpEngineRevision();
+            }}
             onAddLayer={() => {
               if (engine.bucketSeedPoint) engine.commitPaintBucketSession();
               if (engine.gradientStartPoint) engine.commitGradientSession();
@@ -1000,8 +1025,8 @@ export default function App() {
                 bumpEngineRevision();
                 return;
               }
-              if (act?.locked) {
-                showToast('Nie można usunąć zablokowanej warstwy');
+              if (act && (act.isGroup ? act.ownLocked : act.locked)) {
+                showToast(act.isGroup ? 'Nie można usunąć zablokowanej grupy' : 'Nie można usunąć zablokowanej warstwy');
                 return;
               }
               engine.removeActiveLayer();
@@ -1014,13 +1039,10 @@ export default function App() {
               bumpEngineRevision();
             }}
             onMergeDown={() => {
-              const activeL = engine.getActiveLayer();
-              const bottomL = engine.layers[engine.activeLayerIndex - 1];
-              if (activeL?.locked || bottomL?.locked) {
-                showToast('Warstwa jest zablokowana');
+              if (!engine.mergeLayerDown()) {
+                showToast('Nie można scalić: warstwa jest zablokowana albo poniżej jest granica grupy');
                 return;
               }
-              engine.mergeLayerDown();
               bumpEngineRevision();
             }}
             onMoveUp={() => {
@@ -1031,8 +1053,8 @@ export default function App() {
               engine.moveActiveLayerDown();
               bumpEngineRevision();
             }}
-            onReorderLayers={(from, to) => {
-              engine.reorderLayers(from, to);
+            onMoveLayerTo={(from, to, place) => {
+              engine.moveLayerTo(from, to, place);
               bumpEngineRevision();
             }}
             onToggleVisibility={(idx) => {

@@ -4,14 +4,14 @@
  */
 
 import { PenNode, penAllPoints } from './PenPath.ts';
-import { Layer, grayToAlpha } from './Layer.ts';
-import { Quad, drawPerspectiveMesh, isConvexQuad, warpPerspectiveExact, WarpResult } from './Perspective.ts';
+import { Layer, grayToAlpha, finishPassThrough } from './Layer.ts';
+import { Quad, drawPerspectiveMesh, drawPerspectivePreview, isConvexQuad, warpPerspectiveExact, warpPerspectivePreview, PerspectivePreview, WarpResult } from './Perspective.ts';
 import { renderGradientPreview } from './GradientRenderer.ts';
 import { BrushEngine } from './BrushEngine.ts';
 import { SelectionManager, SelectionSnapshot } from './SelectionManager.ts';
-import { getTileEpoch } from './Tile.ts';
+import { getTileEpoch, Tile } from './Tile.ts';
 import { FillClient } from './FillClient.ts';
-import { BucketAlpha, bucketAlphaOfFlood, floodSelect } from './WandCore.ts';
+import { BucketAlpha, WandCrop, bucketAlphaOfFlood, floodSelect } from './WandCore.ts';
 import { DEFAULT_TILE_SIZE, TileGrid, TileSnapshot, trimUnchangedTiles, snapshotBytes } from './TileGrid.ts';
 import {
   BrushSettings,
@@ -52,8 +52,60 @@ export interface TransformContentSession {
   previewCanvas?: HTMLCanvasElement | null;
   /** Maska zaznaczenia w układzie źródła (rozmiar `sourceContentCanvas`); potrzebna w trybie perspektywy. */
   srcMask?: HTMLCanvasElement | null;
+  /** Zawartość niesie własne (ułamkowe) krycie brzegu zaznaczenia, więc przy zatwierdzaniu nie jest przycinana maską drugi raz. */
+  softContent?: boolean;
+  /** Maska wycinania z warstwy (krycie = waga w, ta sama co w pływającym fragmencie): warstwa traci dokładnie to, co fragment dostaje. */
+  cutMask?: HTMLCanvasElement;
+  /** Czy wycięcie zostało już wykonane na warstwie (odroczone do pierwszej zmiany względem stanu początkowego). */
+  cutDone?: boolean;
+  /** Stan warstwy „bez wycięcia” przywracany w stanie początkowym (wklejenie zaraz po wycięciu w tym samym miejscu). */
+  identityTiles?: { tx: number; ty: number; imgData: ImageData; hasContent: boolean }[];
+  /** Zawartość została już raz przeliczona (perspektywa), więc stan ramki nie jest „identycznością” względem warstwy. */
+  contentChanged?: boolean;
   /** Tryb perspektywy: aktualny czworokąt (lewy-górny, prawy-górny, prawy-dolny, lewy-dolny) i jego stan początkowy. */
-  persp?: { quad: Quad; quad0: Quad; changed: boolean } | null;
+  persp?: { quad: Quad; quad0: Quad; changed: boolean; cache?: { key: string; pv: PerspectivePreview | null } } | null;
+}
+
+/** Element drzewa warstw: zwykła warstwa albo grupa (nagłówek + dzieci od dołu do góry). */
+/** Stały numer kafelka (do kluczy pamięci podręcznej pośredników grup: kafelek mógł zostać podmieniony, np. przez cofnięcie). */
+const EMPTY_PASS = new Map<number, Layer>();
+const tileUids = new WeakMap<object, number>();
+let tileUidNext = 1;
+function tileUid(t: Tile): number {
+  let id = tileUids.get(t);
+  if (id === undefined) {
+    id = tileUidNext++;
+    tileUids.set(t, id);
+  }
+  return id;
+}
+
+/** Pośrednik grupy z ustawieniami: zwykła warstwa, której kafelki to spłaszczone dzieci (patrz `getRenderList`). */
+interface GroupProxyEntry {
+  layer: Layer;
+  maskRef: TileGrid | null;
+  keys: string[];
+  epoch: number;
+  listId: number;
+}
+
+interface RenderList {
+  layers: Layer[];
+  /** Indeks rzeczywistej warstwy dla każdej pozycji `layers`. */
+  map: number[];
+  iso: { start: number; header: number; group: Layer } | null;
+  proxies: { entry: GroupProxyEntry; kids: Layer[] }[];
+  /** Grupy „Przepuszczanie” z krytem / maską i warstwami o trybie innym niż Normalny: pozycja pierwszego dziecka -> grupa. */
+  passAtStart: Map<number, Layer>;
+  /** ... pozycja nagłówka -> grupa (tu następuje domknięcie: tło * (1 - a) + wynik * a). */
+  passAtEnd: Map<number, Layer>;
+  id: number;
+}
+
+interface LayerUnit {
+  layer?: Layer;
+  header?: Layer;
+  children?: Layer[];
 }
 
 type TileSnapshotLike = { tx: number; ty: number; imgData: ImageData; hasContent: boolean };
@@ -644,23 +696,11 @@ export class GraphicEngine {
     const mctx = maskClip.getContext('2d')!;
 
     if (this.selectionManager.hasActiveSelection) {
-      // Wyodrębnij piksele bez osłabiania przezroczystości krawędziowej
-      const cleanCutMask = document.createElement('canvas');
-      cleanCutMask.width = this.width;
-      cleanCutMask.height = this.height;
-      const cleanCtx = cleanCutMask.getContext('2d')!;
-      cleanCtx.drawImage(this.selectionManager.maskCanvas, 0, 0);
-
-      const maskImgData = cleanCtx.getImageData(0, 0, this.width, this.height);
-      const mData = maskImgData.data;
-      for (let i = 3; i < mData.length; i += 4) {
-        mData[i] = mData[i] > 0 ? 255 : 0;
-      }
-      cleanCtx.putImageData(maskImgData, 0, 0);
-
-      layer.tileGrid.drawToFlatContext(cctx);
-      cctx.globalCompositeOperation = 'destination-in';
-      cctx.drawImage(cleanCutMask, 0, 0);
+      // To samo miękkie wycięcie co w manipulacji zawartością: fragment = piksel * waga, brzeg z antyaliasingiem
+      const sel = this.selectionManager.getSelectionBounds();
+      if (!sel) return false;
+      const lift = this.liftSoft(layer, sel);
+      cctx.drawImage(lift.content, sel.left, sel.top);
 
       mctx.drawImage(this.selectionManager.maskCanvas, 0, 0);
     } else {
@@ -675,6 +715,7 @@ export class GraphicEngine {
     // Kopiuj do systemowego schowka przeglądarki
     try {
       clip.toBlob((blob) => {
+        this.ownClipboardBlob = blob;
         if (blob && navigator.clipboard && navigator.clipboard.write) {
           const item = new ClipboardItem({ 'image/png': blob });
           navigator.clipboard.write([item]).catch(() => {});
@@ -693,22 +734,15 @@ export class GraphicEngine {
 
     const tilesBefore = layer.tileGrid.getTilesSnapshot();
     const mask = this.selectionManager.hasActiveSelection ? this.selectionManager.maskCanvas : null;
+    let cutMaskUsed: HTMLCanvasElement | null = null;
 
     if (mask) {
-      const cleanCutMask = document.createElement('canvas');
-      cleanCutMask.width = this.width;
-      cleanCutMask.height = this.height;
-      const cctx = cleanCutMask.getContext('2d')!;
-      cctx.drawImage(mask, 0, 0);
-
-      const maskImgData = cctx.getImageData(0, 0, this.width, this.height);
-      const mData = maskImgData.data;
-      for (let i = 3; i < mData.length; i += 4) {
-        mData[i] = mData[i] > 0 ? 255 : 0;
+      // Z warstwy znika dokładnie tyle, ile trafiło do fragmentu (zostaje piksel * (1 - waga))
+      const sel = this.selectionManager.getSelectionBounds();
+      if (sel) {
+        cutMaskUsed = this.liftSoft(layer, sel).cutMask;
+        layer.clear(cutMaskUsed);
       }
-      cctx.putImageData(maskImgData, 0, 0);
-
-      layer.clear(cleanCutMask);
     } else {
       layer.clear();
     }
@@ -722,8 +756,58 @@ export class GraphicEngine {
       after: tilesAfter,
     });
 
+    this.cutOrigin = cutMaskUsed
+      ? { clip: this.clipboardCanvas, layer, cutMask: cutMaskUsed, before: tilesBefore, after: tilesAfter }
+      : null;
+
     this.markAllLayersDirty();
     return true;
+  }
+
+  /** Ostatnie wycięcie: pozwala wkleić fragment w to samo miejsce tak, by zlał się z resztą warstwy bez śladu. */
+  private cutOrigin: {
+    clip: HTMLCanvasElement | null;
+    layer: Layer;
+    cutMask: HTMLCanvasElement;
+    before: TileSnapshotLike[];
+    after: TileSnapshotLike[];
+  } | null = null;
+
+  /** Ostatni PNG zapisany do schowka systemowego przez `copy()` - pozwala rozpoznać własną zawartość schowka. */
+  private ownClipboardBlob: Blob | null = null;
+
+  /** Czy blob ze schowka systemowego to dokładnie ten obraz, który skopiowała aplikacja (wtedy wklejamy bufor wewnętrzny). */
+  public async isOwnClipboardBlob(blob: Blob): Promise<boolean> {
+    const own = this.ownClipboardBlob;
+    const clip = this.clipboardCanvas;
+    if (!own || !clip) return false;
+    if (own.size === blob.size) {
+      const [a, b] = await Promise.all([own.arrayBuffer(), blob.arrayBuffer()]);
+      const x = new Uint8Array(a);
+      const y = new Uint8Array(b);
+      let same = true;
+      for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) { same = false; break; }
+      if (same) return true;
+    }
+    // System mógł zakodować obraz od nowa: porównujemy kanał alfa (musi być identyczny) i kolory pikseli nieprzezroczystych
+    try {
+      const bmp = await createImageBitmap(blob);
+      if (bmp.width !== clip.width || bmp.height !== clip.height) return false;
+      const c = document.createElement('canvas');
+      c.width = bmp.width;
+      c.height = bmp.height;
+      const cx = c.getContext('2d', { willReadFrequently: true })!;
+      cx.drawImage(bmp, 0, 0);
+      const x = cx.getImageData(0, 0, c.width, c.height).data;
+      const y = clip.getContext('2d')!.getImageData(0, 0, c.width, c.height).data;
+      for (let i = 0; i < x.length; i += 4) {
+        if (x[i + 3] !== y[i + 3]) return false;
+        if (y[i + 3] === 255 && (x[i] !== y[i] || x[i + 1] !== y[i + 1] || x[i + 2] !== y[i + 2])) return false;
+      }
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   public pasteCanvas(pastedCanvas: HTMLCanvasElement, customMaskCanvas?: HTMLCanvasElement | null): boolean {
@@ -737,39 +821,14 @@ export class GraphicEngine {
     const initialTilesSnapshot = layer.tileGrid.getTilesSnapshot();
     const initialSelectionSnapshot = this.selectionManager.getMaskSnapshot();
 
-    // 1. Zachowaj/ustaw dokładny kształt maski zaznaczenia dla wklejanego obiektu
+    // 1. Zaznaczenie po wklejeniu to zwykły prostokąt (wektorowy) opisany na wklejonym fragmencie
+    const area = customMaskCanvas ? this.alphaBounds(customMaskCanvas) : this.alphaBounds(pastedCanvas);
     this.selectionManager.clear();
-    const mctx = this.selectionManager.maskCtx;
-
-    if (customMaskCanvas) {
-      mctx.drawImage(customMaskCanvas, 0, 0);
+    if (area) {
+      this.selectionManager.selectRect(area.x, area.y, area.w, area.h);
     } else {
-      const pctx = pastedCanvas.getContext('2d')!;
-      const pData = pctx.getImageData(0, 0, pastedCanvas.width, pastedCanvas.height).data;
-
-      let minX = pastedCanvas.width, minY = pastedCanvas.height, maxX = -1, maxY = -1;
-      for (let y = 0; y < pastedCanvas.height; y++) {
-        for (let x = 0; x < pastedCanvas.width; x++) {
-          if (pData[(y * pastedCanvas.width + x) * 4 + 3] > 0) {
-            if (x < minX) minX = x;
-            if (x > maxX) maxX = x;
-            if (y < minY) minY = y;
-            if (y > maxY) maxY = y;
-          }
-        }
-      }
-
-      if (maxX >= minX && maxY >= minY) {
-        mctx.fillStyle = '#ffffff';
-        mctx.fillRect(minX, minY, maxX - minX + 1, maxY - minY + 1);
-      } else {
-        mctx.fillStyle = '#ffffff';
-        mctx.fillRect(0, 0, pastedCanvas.width, pastedCanvas.height);
-      }
+      this.selectionManager.selectRect(0, 0, pastedCanvas.width, pastedCanvas.height);
     }
-
-    this.selectionManager.hasActiveSelection = true;
-    this.selectionManager.rebuildContoursFromMask();
 
     const bounds = this.selectionManager.getSelectionBounds();
     if (!bounds) return false;
@@ -788,17 +847,39 @@ export class GraphicEngine {
     const pasteSrcMask = document.createElement('canvas');
     pasteSrcMask.width = bounds.width;
     pasteSrcMask.height = bounds.height;
-    pasteSrcMask.getContext('2d')!.drawImage(
+    const psx = pasteSrcMask.getContext('2d')!;
+    psx.drawImage(
       this.selectionManager.maskCanvas,
       bounds.left, bounds.top, bounds.width, bounds.height,
       0, 0, bounds.width, bounds.height
     );
+    const psImg = psx.getImageData(0, 0, bounds.width, bounds.height);
+    for (let i = 0; i < psImg.data.length; i += 4) {
+      const on = psImg.data[i + 3] >= 128;
+      psImg.data[i] = psImg.data[i + 1] = psImg.data[i + 2] = on ? 255 : 0;
+      psImg.data[i + 3] = on ? 255 : 0;
+    }
+    psx.putImageData(psImg, 0, 0);
 
     // 2. Rozpocznij PŁYWAJĄCĄ SESJĘ BEZ ZAPISYWANIA PIKSELI NA WARSTWIE POD SPODEM!
     // Warstwa pod spodem pozostaje w 100% czysta (nic nie zostaje z tyłu przy przenoszeniu)
     this.selectionManager.beginTransformSelection();
 
+    // Wklejenie zaraz po wycięciu (warstwa nietknięta od tego czasu): w stanie początkowym warstwa wraca do oryginału,
+    // a wycięcie następuje dopiero po pierwszej zmianie - jak w manipulacji zawartością (fragment + reszta = oryginał).
+    let cutMask: HTMLCanvasElement | undefined;
+    let identityTiles: TileSnapshotLike[] | undefined;
+    const co = this.cutOrigin;
+    if (co && co.layer === layer && co.clip === pastedCanvas && this.sameTiles(initialTilesSnapshot, co.after)) {
+      cutMask = co.cutMask;
+      identityTiles = co.before as TileSnapshotLike[];
+      this.restoreTiles(layer, identityTiles);
+    }
+
     this.transformContentSession = {
+      cutMask,
+      cutDone: false,
+      identityTiles,
       sourceContentCanvas: croppedSourceCanvas,
       sourceBounds: bounds,
       sourceLayerIndex: this.activeLayerIndex,
@@ -806,10 +887,29 @@ export class GraphicEngine {
       initialSelectionSnapshot,
       interpolation: 'bilinear',
       srcMask: pasteSrcMask,
+      softContent: true,
     };
 
     this.markAllLayersDirty();
     return true;
+  }
+
+  /** Prostokąt opisany na pikselach o niezerowej alfie (null, gdy płótno jest puste). */
+  private alphaBounds(canvas: HTMLCanvasElement): { x: number; y: number; w: number; h: number } | null {
+    const w = canvas.width;
+    const h = canvas.height;
+    const d = canvas.getContext('2d')!.getImageData(0, 0, w, h).data;
+    let minX = w, minY = h, maxX = -1, maxY = -1;
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        if (d[(y * w + x) * 4 + 3] === 0) continue;
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+    return maxX >= minX && maxY >= minY ? { x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1 } : null;
   }
 
   public paste(): boolean {
@@ -865,17 +965,377 @@ export class GraphicEngine {
       }
       this.maskView = null;
     }
-    return this.layers;
+    return this.getRenderList().layers;
   }
 
   /** Indeks aktywnej warstwy w `renderLayers`. */
   public get renderActiveIndex(): number {
-    return this.maskView ? 0 : this.activeLayerIndex;
+    if (this.maskView) return 0;
+    const i = this.getRenderList().map.indexOf(this.activeLayerIndex);
+    return i >= 0 ? i : this.activeLayerIndex;
   }
 
   /** Indeks rzeczywistej warstwy odpowiadającej pozycji `i` w `renderLayers`. */
   public realLayerIndex(i: number): number {
-    return this.maskView ? this.layers.indexOf(this.maskView) : i;
+    if (this.maskView) return this.layers.indexOf(this.maskView);
+    const m = this.getRenderList().map[i];
+    return m === undefined ? i : m;
+  }
+
+  /**
+   * Zakres `renderLayers` (dzieci + nagłówek) grupy z krytem / trybem / maską, w której leży aktywna warstwa.
+   * Taka grupa nie ma pośrednika: kompozytor rysuje jej dzieci do osobnego bufora (z podglądem aktywnej warstwy)
+   * i dopiero ten bufor nakłada z ustawieniami grupy. null = brak takiej grupy.
+   */
+  public get renderIsolation(): { start: number; header: number; group: Layer } | null {
+    if (this.maskView) return null;
+    return this.getRenderList().iso;
+  }
+
+  /** Czy w bieżącej liście są grupy „Przepuszczanie” z krytem / maską, wymagające składania po kolei z tłem. */
+  public get renderHasPass(): boolean {
+    return !this.maskView && this.getRenderList().passAtStart.size > 0;
+  }
+  /** Grupa zaczynająca się na pozycji `i` listy renderowania (pierwsze dziecko) albo undefined. */
+  public renderPassStartAt(i: number): Layer | undefined {
+    return this.maskView ? undefined : this.getRenderList().passAtStart.get(i);
+  }
+  /** Grupa domykana na pozycji `i` listy renderowania (nagłówek) albo undefined. */
+  public renderPassEndAt(i: number): Layer | undefined {
+    return this.maskView ? undefined : this.getRenderList().passAtEnd.get(i);
+  }
+
+  /** Krycie * maska grupy jako kanał alfa płótna (x, y, w, h) w układzie dokumentu. */
+  private groupAlphaCanvas(g: Layer, x: number, y: number, w: number, h: number): HTMLCanvasElement {
+    const white = document.createElement('canvas');
+    white.width = w;
+    white.height = h;
+    const wctx = white.getContext('2d')!;
+    wctx.fillStyle = '#fff';
+    wctx.fillRect(0, 0, w, h);
+    const masked = g.maskRegionAlways(white, x, y, w, h);
+    const out = document.createElement('canvas');
+    out.width = w;
+    out.height = h;
+    const octx = out.getContext('2d')!;
+    octx.globalAlpha = g.opacity;
+    octx.drawImage(masked, 0, 0);
+    return out;
+  }
+
+  private passSnapshot(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number): HTMLCanvasElement {
+    const c = document.createElement('canvas');
+    c.width = w;
+    c.height = h;
+    c.getContext('2d')!.drawImage(ctx.canvas, x, y, w, h, 0, 0, w, h);
+    return c;
+  }
+
+  private passFinish(ctx: CanvasRenderingContext2D, snap: HTMLCanvasElement, g: Layer, x: number, y: number, w: number, h: number): void {
+    finishPassThrough(ctx, snap, this.groupAlphaCanvas(g, x, y, w, h), x, y, w, h);
+  }
+
+  // --- IZOLOWANA KOMPOZYCJA GRUP (krycie, tryb mieszania i maska grupy) ---
+
+  /**
+   * Sposób składania grupy:
+   *  - 'none': zwykłe przepuszczanie bez krycia i maski (warstwy rysowane po kolei, jak bez grupy);
+   *  - 'isolate': dzieci składane osobno (tryb grupy inny niż Przepuszczanie albo same warstwy Normalne), potem
+   *    maska, krycie i tryb grupy (aktywna grupa: bufor w kompozytorze, nieaktywna: pośrednik z cache);
+   *  - 'pass': Przepuszczanie z krytem / maską, a wśród warstw są tryby mieszania inne niż Normalny - warstwy
+   *    mieszają się z tym, co pod grupą, a wynik jest mieszany z tłem wg krycia * maski.
+   */
+  public groupKind(h: Layer): 'none' | 'isolate' | 'pass' {
+    if (!h.isGroup) return 'none';
+    const pass = h.blendMode === 'PassThrough';
+    const effect = h.opacity < 1 || (!!h.maskGrid && h.maskEnabled);
+    if (pass && !effect) return 'none';
+    if (!pass) return 'isolate';
+    // przepuszczanie z krytem/maską: gdy wszystkie warstwy są Normalne, wynik jest taki sam jak przy izolacji (a szybszy)
+    for (const k of this.layers) {
+      if (!k.isGroup && k.groupId === h.id && k.ownVisible && k.opacity > 0 && k.blendMode !== 'SrcOver') return 'pass';
+    }
+    return 'isolate';
+  }
+
+  private groupProxies = new Map<string, GroupProxyEntry>();
+  private rlMemo: { snap: unknown[]; list: RenderList } | null = null;
+  private rlListId = 0;
+  private identityMap: number[] = [];
+  private groupScratch: { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D } | null = null;
+
+  /** Bufor dokumentu (rozmiar płótna) na dzieci grupy rysowanej izolowanie. */
+  public getGroupScratch(): { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D } {
+    let g = this.groupScratch;
+    if (!g || g.canvas.width !== this.width || g.canvas.height !== this.height) {
+      const canvas = document.createElement('canvas');
+      canvas.width = this.width;
+      canvas.height = this.height;
+      g = this.groupScratch = { canvas, ctx: canvas.getContext('2d')! };
+    }
+    return g;
+  }
+
+  private getRenderList(): RenderList {
+    const L = this.layers;
+    let any = false;
+    for (const l of L) {
+      if (l.isGroup && this.groupKind(l) !== 'none') {
+        any = true;
+        break;
+      }
+    }
+    if (!any) {
+      // zwykły przypadek (brak grup z ustawieniami): dokładnie dotychczasowe zachowanie
+      if (this.groupProxies.size) this.groupProxies.clear();
+      this.rlMemo = null;
+      if (this.identityMap.length !== L.length) this.identityMap = L.map((_, i) => i);
+      return { layers: L, map: this.identityMap, iso: null, proxies: [], passAtStart: EMPTY_PASS, passAtEnd: EMPTY_PASS, id: 0 };
+    }
+    const snap: unknown[] = [L, L.length, this.activeLayerIndex, this.width, this.height];
+    for (const l of L) snap.push(l, l.ownVisible, l.opacity, l.blendMode, l.maskGrid, l.maskEnabled, l.editMask, l.groupId, l.isGroup);
+    const m = this.rlMemo;
+    let list: RenderList;
+    if (m && m.snap.length === snap.length && m.snap.every((v, i) => v === snap[i])) {
+      list = m.list;
+    } else {
+      list = this.buildRenderList();
+      this.rlMemo = { snap, list };
+    }
+    const epoch = getTileEpoch();
+    let refreshed = false;
+    for (const p of list.proxies) {
+      if (p.entry.epoch !== epoch || p.entry.listId !== list.id) {
+        this.refreshGroupProxy(p.entry, p.kids);
+        p.entry.listId = list.id;
+        refreshed = true;
+      }
+    }
+    if (list.proxies.length) {
+      // odświeżenie samo podbija licznik kafelków; zapamiętujemy stan po nim, by nie odświeżać w kółko
+      const after = getTileEpoch();
+      for (const p of list.proxies) p.entry.epoch = after;
+    }
+    void refreshed;
+    return list;
+  }
+
+  private buildRenderList(): RenderList {
+    const L = this.layers;
+    const act = L[this.activeLayerIndex];
+    const activeKidGroup = act && !act.isGroup ? act.groupId : null;
+    const headers = new Map<string, Layer>();
+    const kidsOf = new Map<string, Layer[]>();
+    for (const l of L) if (l.isGroup) headers.set(l.id, l);
+    for (const l of L) {
+      if (!l.isGroup && l.groupId && headers.has(l.groupId)) {
+        let a = kidsOf.get(l.groupId);
+        if (!a) kidsOf.set(l.groupId, (a = []));
+        a.push(l);
+      }
+    }
+    const kind = new Map<string, 'none' | 'isolate' | 'pass'>();
+    for (const h of headers.values()) kind.set(h.id, this.groupKind(h));
+    const out: Layer[] = [];
+    const map: number[] = [];
+    const proxies: RenderList['proxies'] = [];
+    const passAtStart = new Map<number, Layer>();
+    const passAtEnd = new Map<number, Layer>();
+    let iso: RenderList['iso'] = null;
+    const live = new Set<string>();
+    for (let i = 0; i < L.length; i++) {
+      const l = L[i];
+      if (!l.isGroup && l.groupId && headers.has(l.groupId)) {
+        const h = headers.get(l.groupId)!;
+        // dzieci grupy składanej izolowanie są zastąpione jej pośrednikiem (rysowanym w miejscu nagłówka)
+        if (kind.get(h.id) === 'isolate' && h.id !== activeKidGroup) continue;
+        if (kind.get(h.id) === 'pass' && !passAtStart.has(out.length) && !Array.from(passAtStart.values()).includes(h)) {
+          passAtStart.set(out.length, h);
+        }
+        out.push(l);
+        map.push(i);
+        continue;
+      }
+      const k = l.isGroup ? kind.get(l.id) : 'none';
+      if (l.isGroup && k === 'isolate') {
+        const kids = kidsOf.get(l.id) ?? [];
+        if (l.id === activeKidGroup) {
+          iso = { start: out.length - kids.length, header: out.length, group: l };
+          out.push(l);
+          map.push(i);
+          continue;
+        }
+        const entry = this.ensureGroupProxy(l, kids, i === this.activeLayerIndex);
+        live.add(l.id);
+        out.push(entry.layer);
+        map.push(i);
+        proxies.push({ entry, kids });
+        continue;
+      }
+      if (l.isGroup && k === 'pass') {
+        // grupa bez dzieci nie ma początku: wtedy nic do domknięcia
+        if (Array.from(passAtStart.values()).includes(l)) passAtEnd.set(out.length, l);
+      }
+      out.push(l);
+      map.push(i);
+    }
+    for (const id of Array.from(this.groupProxies.keys())) if (!live.has(id)) this.groupProxies.delete(id);
+    return { layers: out, map, iso, proxies, passAtStart, passAtEnd, id: ++this.rlListId };
+  }
+
+  private ensureGroupProxy(h: Layer, kids: Layer[], isActive: boolean): GroupProxyEntry {
+    void kids;
+    let e = this.groupProxies.get(h.id);
+    const tg = e?.layer.pixelGrid;
+    if (!e || e.maskRef !== h.maskGrid || !tg || tg.width !== this.width || tg.height !== this.height || tg.tileSize !== this.tileSize) {
+      const px = new Layer(`gp_${h.id}`, h.name, this.width, this.height, this.tileSize);
+      e = { layer: px, maskRef: h.maskGrid, keys: [], epoch: -1, listId: -1 };
+      this.groupProxies.set(h.id, e);
+    }
+    const px = e.layer;
+    px.opacity = h.opacity;
+    px.blendMode = h.blendMode === 'PassThrough' ? 'SrcOver' : h.blendMode;
+    px.visible = h.ownVisible;
+    px.maskGrid = h.maskGrid;
+    px.maskEnabled = h.maskEnabled;
+    px.maskLinked = h.maskLinked;
+    px.editMask = isActive && h.editMask && !!h.maskGrid;
+    return e;
+  }
+
+  /** Składa dzieci grupy w kafelki pośrednika (tylko te, których wejścia się zmieniły). */
+  private refreshGroupProxy(e: GroupProxyEntry, kids: Layer[]): void {
+    const g = e.layer.pixelGrid;
+    const vis = kids.filter((k) => k.ownVisible && k.opacity > 0);
+    for (let ty = 0; ty < g.rows; ty++) {
+      for (let tx = 0; tx < g.cols; tx++) {
+        let key = '';
+        let any = false;
+        for (const k of vis) {
+          const kt = k.pixelGrid.tiles[ty]?.[tx];
+          if (!kt) continue;
+          const mg = k.maskGrid && k.maskEnabled ? k.maskGrid : null;
+          const mt = mg ? mg.tiles[ty]?.[tx] : null;
+          key += `${k.opacity}|${k.blendMode}|${tileUid(kt)}.${kt.version}.${kt.hasContent ? 1 : 0}|${mt ? `${tileUid(mt)}.${mt.version}` : ''};`;
+          if (kt.hasContent) any = true;
+        }
+        const idx = ty * g.cols + tx;
+        if (e.keys[idx] === key) continue;
+        e.keys[idx] = key;
+        const pt = g.tiles[ty][tx];
+        const c = pt.ctx;
+        c.globalAlpha = 1;
+        c.globalCompositeOperation = 'source-over';
+        c.clearRect(0, 0, pt.width, pt.height);
+        if (any) {
+          for (const k of vis) {
+            const kt = k.pixelGrid.tiles[ty]?.[tx];
+            if (!kt || !kt.hasContent) continue;
+            const rc = k.renderCanvas(kt);
+            if (!rc) continue;
+            c.globalAlpha = k.opacity;
+            c.globalCompositeOperation = getCanvasCompositeOperation(k.blendMode);
+            c.drawImage(rc, 0, 0);
+          }
+          c.globalAlpha = 1;
+          c.globalCompositeOperation = 'source-over';
+        }
+        pt.hasContent = any;
+        pt.isDirty = true;
+      }
+    }
+  }
+
+  /**
+   * Kompozycja warstw (z izolowanymi grupami) w prostokącie dokumentu (cropX, cropY, w, h) na kontekście `ctx`;
+   * używana do eksportu, próbkowania kolorów i źródła pieczątki. Dzieci grupy z ustawieniami są składane osobno,
+   * potem maskowane i nakładane z jej krytem i trybem.
+   */
+  private drawLayersCropped(ctx: CanvasRenderingContext2D, cropX: number, cropY: number, w: number, h: number): void {
+    const L = this.layers;
+    const headers = new Map<string, Layer>();
+    const kind = new Map<string, 'none' | 'isolate' | 'pass'>();
+    for (const l of L) {
+      if (l.isGroup) {
+        headers.set(l.id, l);
+        kind.set(l.id, this.groupKind(l));
+      }
+    }
+    const snaps = new Map<string, HTMLCanvasElement>();
+    for (const l of L) {
+      if (!l.isGroup && l.groupId && headers.has(l.groupId)) {
+        const k = kind.get(l.groupId);
+        if (k === 'isolate') continue; // narysuje je nagłówek
+        if (k === 'pass' && !snaps.has(l.groupId)) snaps.set(l.groupId, this.passSnapshot(ctx, 0, 0, w, h));
+      } else if (l.isGroup) {
+        const k = kind.get(l.id);
+        if (k === 'pass') {
+          const snap = snaps.get(l.id);
+          if (snap && l.ownVisible) finishPassThrough(ctx, snap, this.groupAlphaCanvas(l, cropX, cropY, w, h), 0, 0, w, h);
+          continue;
+        }
+        if (k !== 'isolate' || !l.ownVisible || l.opacity <= 0) continue;
+        const buf = document.createElement('canvas');
+        buf.width = w;
+        buf.height = h;
+        const bctx = buf.getContext('2d')!;
+        for (const kid of L) {
+          if (kid.isGroup || kid.groupId !== l.id || !kid.ownVisible || kid.opacity <= 0) continue;
+          bctx.save();
+          bctx.globalAlpha = kid.opacity;
+          bctx.globalCompositeOperation = getCanvasCompositeOperation(kid.blendMode);
+          kid.drawRenderedCropped(bctx, cropX, cropY, w, h);
+          bctx.restore();
+        }
+        const masked = l.maskRegionAlways(buf, cropX, cropY, w, h);
+        ctx.save();
+        ctx.globalAlpha = l.opacity;
+        ctx.globalCompositeOperation = getCanvasCompositeOperation(l.blendMode === 'PassThrough' ? 'SrcOver' : l.blendMode);
+        ctx.drawImage(masked, 0, 0);
+        ctx.restore();
+        continue;
+      }
+      if (l.isGroup || !l.visible || l.opacity <= 0) continue;
+      ctx.save();
+      ctx.globalAlpha = l.opacity;
+      ctx.globalCompositeOperation = getCanvasCompositeOperation(l.blendMode);
+      l.drawRenderedCropped(ctx, cropX, cropY, w, h);
+      ctx.restore();
+    }
+  }
+
+  /**
+   * Zamyka izolowaną grupę w kompozytorze dokumentu: bufor `src` (obszar x,y,w,h dokumentu) maskuje maską grupy
+   * i nakłada na `ctx` z jej krytem i trybem mieszania.
+   */
+  private flushIsolatedGroup(
+    ctx: CanvasRenderingContext2D,
+    group: Layer,
+    src: HTMLCanvasElement,
+    x: number,
+    y: number,
+    w: number,
+    h: number
+  ): void {
+    let region: HTMLCanvasElement = src;
+    if (group.maskGrid && group.maskEnabled) {
+      const reg = document.createElement('canvas');
+      reg.width = w;
+      reg.height = h;
+      reg.getContext('2d')!.drawImage(src, x, y, w, h, 0, 0, w, h);
+      region = group.maskRegionAlways(reg, x, y, w, h);
+      ctx.save();
+      ctx.globalAlpha = group.opacity;
+      ctx.globalCompositeOperation = getCanvasCompositeOperation(group.blendMode === 'PassThrough' ? 'SrcOver' : group.blendMode);
+      ctx.drawImage(region, 0, 0, w, h, x, y, w, h);
+      ctx.restore();
+      return;
+    }
+    ctx.save();
+    ctx.globalAlpha = group.opacity;
+    ctx.globalCompositeOperation = getCanvasCompositeOperation(group.blendMode === 'PassThrough' ? 'SrcOver' : group.blendMode);
+    ctx.drawImage(region, x, y, w, h, x, y, w, h);
+    ctx.restore();
   }
 
   /** Zatwierdza otwarte sesje (przekształcanie, gradient, wiadro), zanim zmieni się cel edycji. */
@@ -889,8 +1349,13 @@ export class GraphicEngine {
     const layer = this.getActiveLayer();
     if (!layer || layer.hasMask) return false;
     this.finishOpenSessions();
-    this.saveFullSnapshot('Dodanie maski');
-    layer.createMask(fromSelection && this.selectionManager.hasActiveSelection ? this.selectionManager.maskCanvas : null);
+    this.saveFullSnapshot(layer.isGroup ? 'Dodanie maski grupy' : 'Dodanie maski');
+    // maska grupy ma rozmiar dokumentu (nagłówek grupy nie ma własnych pikseli)
+    layer.createMask(
+      fromSelection && this.selectionManager.hasActiveSelection ? this.selectionManager.maskCanvas : null,
+      this.width,
+      this.height
+    );
     this.markAllLayersDirty();
     return true;
   }
@@ -900,6 +1365,8 @@ export class GraphicEngine {
     const layer = this.getActiveLayer();
     if (!layer || !layer.hasMask) return false;
     this.finishOpenSessions();
+    // maski grupy nie da się wpiec w piksele (dotyczy złożenia dzieci), więc dla grupy „zastosuj" nie istnieje
+    if (apply && layer.isGroup) return false;
     this.saveFullSnapshot(apply ? 'Zastosowanie maski' : 'Usunięcie maski');
     if (this.maskView === layer) this.maskView = null;
     if (apply) layer.applyMask();
@@ -946,7 +1413,8 @@ export class GraphicEngine {
     if (!layer || !layer.hasMask) return;
     this.pushPropertyAction(index, 'maskEnabled', layer.maskEnabled, !layer.maskEnabled, 'Widoczność maski');
     layer.maskEnabled = !layer.maskEnabled;
-    this.markAllLayersDirty();
+    if (layer.isGroup) this.invalidateComposite();
+    else this.markAllLayersDirty();
   }
 
   public toggleMaskLink(index: number): void {
@@ -956,7 +1424,18 @@ export class GraphicEngine {
     layer.maskLinked = !layer.maskLinked;
   }
 
+  /**
+   * Lekka unieważnienie po zmianie wyglądu GRUPY (krycie / tryb / maska włączona): zawartość kafelków dzieci się
+   * nie zmieniła, więc pośrednicy grup nie muszą składać kafelków od nowa (pełne markAllDirty by to wymusiło).
+   */
+  private invalidateComposite(): void {
+    this.syncGroupFlags();
+    this.pixelVersion++;
+    this.lastDirtyRect = null;
+  }
+
   public markAllLayersDirty(): void {
+    this.syncGroupFlags();
     this.pixelVersion++;
     for (const layer of this.layers) {
       layer.tileGrid.markAllDirty();
@@ -967,9 +1446,106 @@ export class GraphicEngine {
 
   // --- ZARZĄDZANIE WARSTWAMI ---
 
+  // --- GRUPY WARSTW ---
+  // Nagłówek grupy (Layer.isGroup) leży w tablicy NAD swoimi dziećmi (dzieci mają groupId = id nagłówka).
+  // Operacje strukturalne budują drzewo z groupId (`buildUnits`) i układają tablicę z powrotem (`flattenUnits`),
+  // więc kolejność w tablicy zawsze jest spójna: dzieci, a tuż nad nimi ich nagłówek.
+
+  private buildUnits(): LayerUnit[] {
+    const headerIds = new Set<string>();
+    for (const l of this.layers) if (l.isGroup) headerIds.add(l.id);
+    const kids = new Map<string, Layer[]>();
+    for (const l of this.layers) {
+      if (l.isGroup) {
+        l.groupId = null;
+        continue;
+      }
+      if (l.groupId && headerIds.has(l.groupId)) {
+        let arr = kids.get(l.groupId);
+        if (!arr) kids.set(l.groupId, (arr = []));
+        arr.push(l);
+      } else {
+        l.groupId = null;
+      }
+    }
+    const units: LayerUnit[] = [];
+    for (const l of this.layers) {
+      if (l.isGroup) units.push({ header: l, children: kids.get(l.id) || [] });
+      else if (!l.groupId) units.push({ layer: l });
+    }
+    return units;
+  }
+
+  private flattenUnits(units: LayerUnit[]): Layer[] {
+    const out: Layer[] = [];
+    for (const u of units) {
+      if (u.header) {
+        for (const c of u.children!) out.push(c);
+        out.push(u.header);
+      } else out.push(u.layer!);
+    }
+    return out;
+  }
+
+  /** Układa tablicę warstw spójnie z grupami, zachowując wskazaną aktywną warstwę. */
+  private normalizeLayers(active?: Layer): void {
+    const act = active ?? this.layers[this.activeLayerIndex];
+    this.layers = this.flattenUnits(this.buildUnits());
+    const idx = act ? this.layers.indexOf(act) : -1;
+    this.activeLayerIndex = idx >= 0 ? idx : Math.max(0, Math.min(this.activeLayerIndex, this.layers.length - 1));
+  }
+
+  /** Przenosi do dzieci informację o ukryciu / blokadzie grupy. */
+  public syncGroupFlags(): void {
+    const byId = new Map<string, Layer>();
+    for (const l of this.layers) if (l.isGroup) byId.set(l.id, l);
+    for (const l of this.layers) {
+      const g = l.groupId ? byId.get(l.groupId) : undefined;
+      l.groupHidden = !!g && !g.ownVisible;
+      l.groupLocked = !!g && g.ownLocked;
+    }
+  }
+
+  /** Dzieci grupy (od dołu do góry). */
+  public getGroupChildren(header: Layer): Layer[] {
+    return this.layers.filter((l) => !l.isGroup && l.groupId === header.id);
+  }
+
+  private makeGroupLayer(name: string): Layer {
+    const g = new Layer(`group_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`, name, 1, 1, this.tileSize);
+    g.isGroup = true;
+    g.blendMode = 'PassThrough';
+    return g;
+  }
+
+  /** Nowa pusta grupa nad aktywną warstwą (lub nad aktywną grupą). */
+  public addGroup(): Layer {
+    this.finishOpenSessions();
+    this.saveFullSnapshot('Dodanie grupy');
+    const n = this.layers.filter((l) => l.isGroup).length + 1;
+    const g = this.makeGroupLayer(`Grupa ${n}`);
+    const act = this.getActiveLayer();
+    // grupa trafia na poziom główny: nad grupą aktywnej warstwy albo nad nią samą
+    let insertAfter = this.activeLayerIndex;
+    if (act && !act.isGroup && act.groupId) {
+      const hi = this.layers.findIndex((l) => l.isGroup && l.id === act.groupId);
+      if (hi >= 0) insertAfter = hi;
+    }
+    this.layers.splice(insertAfter + 1, 0, g);
+    this.normalizeLayers(g);
+    this.markAllLayersDirty();
+    return g;
+  }
+
+  public toggleGroupExpanded(index: number): void {
+    const g = this.layers[index];
+    if (!g || !g.isGroup) return;
+    g.expanded = !g.expanded;
+  }
+
   public addLayer(name?: string): Layer {
     this.saveFullSnapshot('Dodanie warstwy');
-    const newIdx = this.layers.length + 1;
+    const newIdx = this.layers.filter((l) => !l.isGroup).length + 1;
     const layer = new Layer(
       `layer_${Date.now()}`,
       name || `Warstwa ${newIdx}`,
@@ -978,19 +1554,44 @@ export class GraphicEngine {
       this.tileSize
     );
     layer.updateThumbnail();
-    this.layers.splice(this.activeLayerIndex + 1, 0, layer);
-    this.activeLayerIndex = this.activeLayerIndex + 1;
+    const act = this.getActiveLayer();
+    if (act?.isGroup) {
+      // nowa warstwa na wierzchu aktywnej grupy
+      layer.groupId = act.id;
+      this.layers.splice(this.activeLayerIndex, 0, layer);
+    } else {
+      layer.groupId = act?.groupId ?? null;
+      this.layers.splice(this.activeLayerIndex + 1, 0, layer);
+    }
+    this.normalizeLayers(layer);
     this.markAllLayersDirty();
     return layer;
   }
 
   public removeActiveLayer(): boolean {
-    if (this.layers.length <= 1) return false;
     const active = this.getActiveLayer();
-    if (active?.locked) return false;
+    if (!active) return false;
+    if (active.isGroup) {
+      if (active.ownLocked) return false;
+      const kids = this.getGroupChildren(active);
+      if (this.layers.filter((l) => !l.isGroup).length - kids.length < 1) return false;
+      this.finishOpenSessions();
+      this.saveFullSnapshot('Usunięcie grupy');
+      const keep = new Set(kids);
+      const lowest = this.layers.indexOf(kids[0] ?? active);
+      this.layers = this.layers.filter((l) => l !== active && !keep.has(l));
+      this.maskView = null;
+      this.activeLayerIndex = Math.max(0, Math.min(lowest - 1, this.layers.length - 1));
+      this.normalizeLayers(this.layers[this.activeLayerIndex]);
+      this.markAllLayersDirty();
+      return true;
+    }
+    if (this.layers.filter((l) => !l.isGroup).length <= 1) return false;
+    if (active.locked) return false;
     this.saveFullSnapshot('Usunięcie warstwy');
     this.layers.splice(this.activeLayerIndex, 1);
     this.activeLayerIndex = Math.max(0, this.activeLayerIndex - 1);
+    this.normalizeLayers();
     this.markAllLayersDirty();
     return true;
   }
@@ -998,17 +1599,84 @@ export class GraphicEngine {
   public duplicateActiveLayer(): Layer {
     this.saveFullSnapshot('Duplikowanie warstwy');
     const active = this.getActiveLayer();
+    if (active.isGroup) {
+      const kids = this.getGroupChildren(active);
+      const stamp = Date.now();
+      const gClone = active.clone(`group_${stamp}_${Math.random().toString(36).slice(2, 6)}`, `${active.name} (Kopia)`);
+      const kClones = kids.map((k, i) => {
+        const c = k.clone(`layer_${stamp}_${i}`, k.name);
+        c.groupId = gClone.id;
+        return c;
+      });
+      this.layers.splice(this.activeLayerIndex + 1, 0, ...kClones, gClone);
+      this.normalizeLayers(gClone);
+      this.markAllLayersDirty();
+      return gClone;
+    }
     const cloned = active.clone(`layer_${Date.now()}`, `${active.name} (Kopia)`);
+    cloned.groupId = active.groupId;
     this.layers.splice(this.activeLayerIndex + 1, 0, cloned);
-    this.activeLayerIndex = this.activeLayerIndex + 1;
+    this.normalizeLayers(cloned);
     this.markAllLayersDirty();
     return cloned;
   }
 
+  /** Scala wszystkie warstwy grupy w jedną warstwę rastrową (w miejscu grupy). */
+  private mergeGroup(header: Layer): boolean {
+    const kids = this.getGroupChildren(header);
+    if (kids.length === 0 || header.ownLocked || kids.some((k) => k.ownLocked)) return false;
+    this.finishOpenSessions();
+    this.saveFullSnapshot('Scalenie grupy');
+    this.maskView = null;
+    const canvas = document.createElement('canvas');
+    canvas.width = this.width;
+    canvas.height = this.height;
+    const ctx = canvas.getContext('2d')!;
+    for (const k of kids) {
+      if (!k.ownVisible || k.opacity <= 0) continue;
+      ctx.save();
+      ctx.globalAlpha = k.opacity;
+      ctx.globalCompositeOperation = getCanvasCompositeOperation(k.blendMode);
+      k.drawRenderedToContext(ctx);
+      ctx.restore();
+    }
+    // maska grupy jest wpiekana w złożenie dzieci; krycie i tryb grupy przejmuje scalona warstwa
+    if (header.maskGrid && header.maskEnabled) {
+      const mk = header.maskRegionAlways(canvas, 0, 0, this.width, this.height);
+      if (mk !== canvas) {
+        ctx.clearRect(0, 0, this.width, this.height);
+        ctx.drawImage(mk, 0, 0);
+      }
+    }
+    const merged = new Layer(`layer_${Date.now()}`, header.name, this.width, this.height, this.tileSize);
+    for (const row of merged.tileGrid.tiles) {
+      for (const tile of row) {
+        tile.ctx.drawImage(canvas, tile.pixelX, tile.pixelY, tile.width, tile.height, 0, 0, tile.width, tile.height);
+        tile.hasContent = true;
+        tile.isDirty = true;
+      }
+    }
+    merged.visible = header.ownVisible;
+    merged.opacity = header.opacity;
+    merged.blendMode = header.blendMode;
+    merged.updateThumbnail();
+    const lowest = this.layers.indexOf(kids[0]);
+    const drop = new Set<Layer>([...kids, header]);
+    this.layers = this.layers.filter((l) => !drop.has(l));
+    this.layers.splice(lowest, 0, merged);
+    this.normalizeLayers(merged);
+    this.markAllLayersDirty();
+    return true;
+  }
+
   public mergeLayerDown(): boolean {
+    const active = this.getActiveLayer();
+    if (active?.isGroup) return this.mergeGroup(active);
     if (this.activeLayerIndex <= 0) return false;
     const topLayer = this.layers[this.activeLayerIndex];
     const bottomLayer = this.layers[this.activeLayerIndex - 1];
+    // scalanie tylko w obrębie tego samego kontenera (grupy / poziomu głównego)
+    if (bottomLayer.isGroup || bottomLayer.groupId !== topLayer.groupId) return false;
     if (topLayer?.locked || bottomLayer?.locked) return false;
     this.saveFullSnapshot('Scalenie w dół');
     this.maskView = null;
@@ -1048,33 +1716,123 @@ export class GraphicEngine {
     return true;
   }
 
-  public reorderLayers(fromIndex: number, toIndex: number): void {
-    if (
-      fromIndex === toIndex ||
-      fromIndex < 0 ||
-      fromIndex >= this.layers.length ||
-      toIndex < 0 ||
-      toIndex >= this.layers.length
-    ) {
-      return;
-    }
+  /**
+   * Przenosi warstwę (albo całą grupę, gdy `src` jest nagłówkiem) względem innej: `before` = nad nią (wizualnie),
+   * `after` = pod nią, `into` = do wnętrza grupy (gdy `target` jest nagłówkiem). Grupy nie zagnieżdżają się.
+   */
+  public moveLayerTo(srcIndex: number, targetIndex: number, place: 'before' | 'after' | 'into'): boolean {
+    const src = this.layers[srcIndex];
+    const tgt = this.layers[targetIndex];
+    if (!src || !tgt || src === tgt) return false;
+    if (src.isGroup && tgt.groupId === src.id) return false;
+    this.finishOpenSessions();
+    const sigBefore = this.layers.map((l) => `${l.id}:${l.groupId}`).join('|');
     this.saveFullSnapshot('Zmiana kolejności warstw');
-    const [moved] = this.layers.splice(fromIndex, 1);
-    this.layers.splice(toIndex, 0, moved);
-    this.activeLayerIndex = toIndex;
+
+    const units = this.buildUnits();
+    const unitIndexOf = (l: Layer): number => units.findIndex((u) => u.layer === l || u.header === l || (u.children && u.children.includes(l)));
+
+    // 1. wyjęcie źródła
+    let removed: LayerUnit;
+    if (src.isGroup) {
+      removed = units.splice(unitIndexOf(src), 1)[0];
+    } else {
+      const ui = unitIndexOf(src);
+      const u = units[ui];
+      if (u.children) {
+        u.children.splice(u.children.indexOf(src), 1);
+        removed = { layer: src };
+      } else {
+        removed = units.splice(ui, 1)[0];
+      }
+    }
+
+    // 2. wstawienie względem celu
+    const ti = unitIndexOf(tgt);
+    const tu = units[ti];
+    if (src.isGroup) {
+      units.splice(place === 'after' ? ti : ti + 1, 0, removed);
+    } else if (tu.header === tgt) {
+      if (place === 'before') {
+        src.groupId = null;
+        units.splice(ti + 1, 0, removed);
+      } else if (place === 'into' || tu.header.expanded) {
+        src.groupId = tu.header.id;
+        tu.children!.push(src);
+      } else {
+        src.groupId = null;
+        units.splice(ti, 0, removed);
+      }
+    } else if (tu.children) {
+      const j = tu.children.indexOf(tgt);
+      src.groupId = tu.header!.id;
+      tu.children.splice(place === 'after' ? j : j + 1, 0, src);
+    } else {
+      src.groupId = null;
+      units.splice(place === 'after' ? ti : ti + 1, 0, removed);
+    }
+
+    this.layers = this.flattenUnits(units);
+    this.activeLayerIndex = this.layers.indexOf(src);
+    const sigAfter = this.layers.map((l) => `${l.id}:${l.groupId}`).join('|');
+    if (sigAfter === sigBefore) this.undoStack.pop();
     this.markAllLayersDirty();
+    return true;
+  }
+
+  /** Krok w górę / w dół po wizualnej liście: warstwy wchodzą do rozwiniętych grup i z nich wychodzą. */
+  private stepMove(dir: 1 | -1): boolean {
+    const L = this.getActiveLayer();
+    if (!L) return false;
+    this.finishOpenSessions();
+    const units = this.buildUnits();
+    const u = units.findIndex((x) => x.layer === L || x.header === L || (x.children && x.children.includes(L)));
+    if (u < 0) return false;
+    const unit = units[u];
+
+    // ruch w obrębie grupy albo wyjście z niej jest zawsze możliwy; poza grupą potrzebny jest sąsiad
+    const inGroup = !!unit.children && unit.children.includes(L);
+    if (!inGroup && !(u + dir >= 0 && u + dir < units.length)) return false;
+    this.saveFullSnapshot('Zmiana kolejności warstw');
+
+    if (unit.children && unit.children.includes(L)) {
+      const k = unit.children.indexOf(L);
+      const nk = k + dir;
+      if (nk >= 0 && nk < unit.children.length) {
+        [unit.children[k], unit.children[nk]] = [unit.children[nk], unit.children[k]];
+      } else {
+        unit.children.splice(k, 1);
+        L.groupId = null;
+        units.splice(dir > 0 ? u + 1 : u, 0, { layer: L });
+      }
+    } else if (unit.header === L) {
+      [units[u], units[u + dir]] = [units[u + dir], units[u]];
+    } else {
+      const nu = units[u + dir];
+      if (nu.header && nu.header.expanded) {
+        units.splice(u, 1);
+        const gi = dir > 0 ? u : u - 1;
+        const g = units[gi];
+        L.groupId = g.header!.id;
+        if (dir > 0) g.children!.unshift(L);
+        else g.children!.push(L);
+      } else {
+        [units[u], units[u + dir]] = [units[u + dir], units[u]];
+      }
+    }
+
+    this.layers = this.flattenUnits(units);
+    this.activeLayerIndex = this.layers.indexOf(L);
+    this.markAllLayersDirty();
+    return true;
   }
 
   public moveActiveLayerUp(): boolean {
-    if (this.activeLayerIndex >= this.layers.length - 1) return false;
-    this.reorderLayers(this.activeLayerIndex, this.activeLayerIndex + 1);
-    return true;
+    return this.stepMove(1);
   }
 
   public moveActiveLayerDown(): boolean {
-    if (this.activeLayerIndex <= 0) return false;
-    this.reorderLayers(this.activeLayerIndex, this.activeLayerIndex - 1);
-    return true;
+    return this.stepMove(-1);
   }
 
   public setLayerOpacity(index: number, opacity: number, recordOldValue?: number): void {
@@ -1086,7 +1844,8 @@ export class GraphicEngine {
       }
 
       this.layers[index].opacity = newVal;
-      this.markAllLayersDirty();
+      if (this.layers[index].isGroup) this.invalidateComposite();
+      else this.markAllLayersDirty();
     }
   }
 
@@ -1097,14 +1856,15 @@ export class GraphicEngine {
       if (oldVal !== newVal) {
         this.pushPropertyAction(index, 'blendMode', oldVal, newVal, 'Zmiana trybu mieszania');
         this.layers[index].blendMode = newVal;
-        this.markAllLayersDirty();
+        if (this.layers[index].isGroup) this.invalidateComposite();
+        else this.markAllLayersDirty();
       }
     }
   }
 
   public toggleLayerVisibility(index: number): void {
     if (index >= 0 && index < this.layers.length) {
-      const oldVal = this.layers[index].visible;
+      const oldVal = this.layers[index].ownVisible;
       const newVal = !oldVal;
       this.pushPropertyAction(index, 'visible', oldVal, newVal, 'Zmiana widoczności');
       this.layers[index].visible = newVal;
@@ -1114,7 +1874,7 @@ export class GraphicEngine {
 
   public toggleLayerLock(index: number): void {
     if (index >= 0 && index < this.layers.length) {
-      this.layers[index].locked = !this.layers[index].locked;
+      this.layers[index].locked = !this.layers[index].ownLocked;
       this.markAllLayersDirty();
     }
   }
@@ -1367,7 +2127,7 @@ export class GraphicEngine {
       .then((r) => this.onWandResult(r));
   }
 
-  private onWandResult(r: { id: number; status: string; rings?: Float64Array[] }): void {
+  private onWandResult(r: { id: number; status: string; crop?: WandCrop | null; geom?: Float64Array[][] | null }): void {
     const p = this.wandPending;
     if (!p || p.id !== r.id) return; // wyprzedzone nowszym zadaniem albo już zakończone synchronicznie
     if (r.status !== 'ok' && r.status !== 'same') {
@@ -1375,7 +2135,7 @@ export class GraphicEngine {
       return;
     }
     const sm = this.selectionManager;
-    if (r.status === 'ok') sm.applyWandRings(r.rings!, p.settings, p.sig);
+    if (r.status === 'ok') sm.applyWandCrop(r.crop ?? null, r.geom ?? null, p.settings, p.sig);
     else sm.confirmAsyncWandSame(p.sig);
     this.wandAppliedId = r.id;
     this.completeWand(p);
@@ -1783,6 +2543,62 @@ export class GraphicEngine {
 
   // --- MODYFIKACJA ZAWARTOŚCI ZAZNACZENIA (TRANSFORM CONTENT) ---
 
+  /**
+   * Wycięcie z miękkim brzegiem (wspólne dla manipulacji zawartością, wytnij i kopiuj). Waga w zależy od krycia
+   * zaznaczenia a i alfy piksela al: w = a/255 dla pikseli nieprzezroczystych (zwykły antyaliasing), a dla pikseli
+   * częściowo przezroczystych (niosących już własny miękki brzeg) w = 1, żeby nie zostawała obwódka. Fragment dostaje
+   * piksel * w, a warstwa traci dokładnie tyle samo (zostaje piksel * (1 - w)): fragment + reszta = oryginał.
+   * `content` - fragment w prostokącie bounds, `cutMask` - waga w układzie dokumentu (alfa = w), `shape` - binarny kształt.
+   */
+  private liftSoft(layer: Layer, bounds: SKRectI): { content: HTMLCanvasElement; cutMask: HTMLCanvasElement; shape: HTMLCanvasElement } {
+    const bw = bounds.width;
+    const bh = bounds.height;
+    const content = document.createElement('canvas');
+    content.width = bw;
+    content.height = bh;
+    const sctx = content.getContext('2d', { willReadFrequently: true })!;
+    // Narysuj tylko kafelki przecinające obszar zaznaczenia (100x szybciej niż cała siatka)
+    layer.tileGrid.drawCroppedToContext(sctx, bounds.left, bounds.top, bw, bh);
+    const lImg = sctx.getImageData(0, 0, bw, bh);
+    const selCrop = document.createElement('canvas');
+    selCrop.width = bw;
+    selCrop.height = bh;
+    const selCtx = selCrop.getContext('2d', { willReadFrequently: true })!;
+    selCtx.drawImage(this.selectionManager.maskCanvas, bounds.left, bounds.top, bw, bh, 0, 0, bw, bh);
+    const sImg = selCtx.getImageData(0, 0, bw, bh);
+    const wImg = new ImageData(bw, bh);
+    const shImg = new ImageData(bw, bh);
+    for (let i = 0; i < lImg.data.length; i += 4) {
+      const a = sImg.data[i + 3];
+      if (a === 0) {
+        lImg.data[i + 3] = 0;
+        continue;
+      }
+      const al = lImg.data[i + 3];
+      // piksel częściowo przezroczysty niesie już własny brzeg (antyaliasing): zaznaczony choćby w części jest brany w całości
+      const w = al === 0 ? a / 255 : al < 255 ? 1 : a / 255;
+      const m = Math.round(w * 255);
+      wImg.data[i + 3] = m;
+      lImg.data[i + 3] = Math.round((al * m) / 255);
+      if (a >= 128) {
+        shImg.data[i] = shImg.data[i + 1] = shImg.data[i + 2] = 255;
+        shImg.data[i + 3] = 255;
+      }
+    }
+    sctx.putImageData(lImg, 0, 0);
+    const cutMask = document.createElement('canvas');
+    cutMask.width = this.width;
+    cutMask.height = this.height;
+    cutMask.getContext('2d')!.putImageData(wImg, bounds.left, bounds.top);
+
+    const shape = document.createElement('canvas');
+    shape.width = bw;
+    shape.height = bh;
+    shape.getContext('2d')!.putImageData(shImg, 0, 0);
+
+    return { content, cutMask, shape };
+  }
+
   public beginTransformContent(interpolation: InterpolationMode = 'bilinear'): boolean {
     if (this.transformContentSession) return true;
 
@@ -1810,45 +2626,10 @@ export class GraphicEngine {
     const initialTilesSnapshot = layer.tileGrid.getTilesSnapshot();
     const initialSelectionSnapshot = this.selectionManager.getMaskSnapshot();
 
-    // Utwórz czystą binarną maskę wycinania (gwarantuje w 100% wyczyszczenie warstwy bez zostawiania obramówek/artefaktów na brzegach)
-    const cleanCutMask = document.createElement('canvas');
-    cleanCutMask.width = this.width;
-    cleanCutMask.height = this.height;
-    const cctx = cleanCutMask.getContext('2d')!;
-    cctx.drawImage(this.selectionManager.maskCanvas, 0, 0);
-
-    const maskImgData = cctx.getImageData(0, 0, this.width, this.height);
-    const mData = maskImgData.data;
-    for (let i = 3; i < mData.length; i += 4) {
-      mData[i] = mData[i] > 0 ? 255 : 0;
-    }
-    cctx.putImageData(maskImgData, 0, 0);
-
-    // 2. Wyodrębnij SZYBKA WYCIĘTĄ teksturę zaznaczenia (tylko obszar bounds zamiast pełnego płótna 12MP!)
-    const sourceContentCanvas = document.createElement('canvas');
-    sourceContentCanvas.width = bounds.width;
-    sourceContentCanvas.height = bounds.height;
-    const sctx = sourceContentCanvas.getContext('2d')!;
-
-    // Narysuj tylko kafelki przecinające obszar zaznaczenia (100x szybciej niż cała siatka)
-    layer.tileGrid.drawCroppedToContext(sctx, bounds.left, bounds.top, bounds.width, bounds.height);
-
-    sctx.globalCompositeOperation = 'destination-in';
-    sctx.drawImage(
-      cleanCutMask,
-      bounds.left, bounds.top, bounds.width, bounds.height,
-      0, 0, bounds.width, bounds.height
-    );
-    sctx.globalCompositeOperation = 'source-over';
-
-    const srcMaskCanvas = document.createElement('canvas');
-    srcMaskCanvas.width = bounds.width;
-    srcMaskCanvas.height = bounds.height;
-    srcMaskCanvas.getContext('2d')!.drawImage(
-      cleanCutMask,
-      bounds.left, bounds.top, bounds.width, bounds.height,
-      0, 0, bounds.width, bounds.height
-    );
+    const lift = this.liftSoft(layer, bounds);
+    const sourceContentCanvas = lift.content;
+    const cleanCutMask = lift.cutMask;
+    const srcMaskCanvas = lift.shape;
 
     // 2b. Połączona maska: druga siatka (maska / piksele) przesuwa się razem z pierwszą
     let other: TransformContentSession['other'] = null;
@@ -1883,8 +2664,8 @@ export class GraphicEngine {
       pctx.globalCompositeOperation = 'source-over';
     }
 
-    // 3. Wyczyść wycięty fragment na aktywnej warstwie (otwór pod pływającą zawartością)
-    layer.clear(cleanCutMask);
+    // 3. Wycięcie z warstwy jest odroczone (`syncContentCut`): dopóki ramka jest w stanie początkowym, warstwa pozostaje
+    // nietknięta i widać dokładnie oryginał (miękka suma fragmentu i reszty przy nałożeniu „nad” dałaby wgłębienie na brzegu).
 
     // 4. Uruchom ramkę manipulacji
     this.selectionManager.beginTransformSelection();
@@ -1899,6 +2680,9 @@ export class GraphicEngine {
       other,
       previewCanvas,
       srcMask: srcMaskCanvas,
+      softContent: true,
+      cutMask: cleanCutMask,
+      cutDone: false,
     };
 
     this.markAllLayersDirty();
@@ -1909,6 +2693,18 @@ export class GraphicEngine {
 
   public get perspectiveActive(): boolean {
     return !!this.transformContentSession?.persp;
+  }
+
+  /** Podgląd perspektywy (zapamiętany do czasu zmiany czworokąta). */
+  public getPerspectivePreview(): PerspectivePreview | null {
+    const sess = this.transformContentSession;
+    if (!sess?.persp) return null;
+    const key = JSON.stringify(sess.persp.quad) + sess.interpolation;
+    if (sess.persp.cache && sess.persp.cache.key === key) return sess.persp.cache.pv;
+    const img = sess.previewCanvas ?? sess.sourceContentCanvas;
+    const pv = warpPerspectivePreview(img, sess.persp.quad, this.width, this.height, sess.interpolation === 'nearest-neighbor');
+    sess.persp.cache = { key, pv };
+    return pv;
   }
 
   public getPerspectiveQuad(): Quad | null {
@@ -1957,6 +2753,7 @@ export class GraphicEngine {
     if (!isConvexQuad(q)) return false;
     sess.persp.quad = q.map((p) => ({ x: p.x, y: p.y })) as Quad;
     sess.persp.changed = true;
+    this.syncContentCut();
     const mask = sess.srcMask;
     const quad = sess.persp.quad;
     this.selectionManager.replaceMaskRaster((ctx) => {
@@ -2053,12 +2850,13 @@ export class GraphicEngine {
     }
     sess.sourceBounds = b;
     sess.persp = null;
+    sess.contentChanged = true;
     this.markAllLayersDirty();
     return true;
   }
 
   /** Renderuje przekształcony (przesunięty / przeskalowany / obrócony) fragment do płótna dokumentu, przycięty do maski zaznaczenia. */
-  private renderTransformedContent(src: HTMLCanvasElement, interpolation: InterpolationMode): HTMLCanvasElement {
+  private renderTransformedContent(src: HTMLCanvasElement, interpolation: InterpolationMode, soft = false): HTMLCanvasElement {
     const st = this.selectionManager.transformState!;
     const tempCanvas = document.createElement('canvas');
     tempCanvas.width = this.width;
@@ -2081,10 +2879,12 @@ export class GraphicEngine {
     }
     tctx.drawImage(src, -st.initialBounds.width / 2, -st.initialBounds.height / 2);
     tctx.restore();
-    tctx.save();
-    tctx.globalCompositeOperation = 'destination-in';
-    tctx.drawImage(this.selectionManager.maskCanvas, 0, 0);
-    tctx.restore();
+    if (!soft) {
+      tctx.save();
+      tctx.globalCompositeOperation = 'destination-in';
+      tctx.drawImage(this.selectionManager.maskCanvas, 0, 0);
+      tctx.restore();
+    }
     return tempCanvas;
   }
 
@@ -2105,6 +2905,28 @@ export class GraphicEngine {
     const sess = this.transformContentSession;
     const st = this.selectionManager.transformState;
     const layer = this.layers[sess.sourceLayerIndex];
+
+    // Stan początkowy: nic się nie zmieniło, więc nie ma czego zatwierdzać (warstwa jest nietknięta)
+    if (this.contentTransformIsIdentity()) {
+      if (layer && sess.identityTiles) {
+        // wklejenie w miejsce wycięcia: warstwa wróciła do oryginału, co trzeba zapisać w historii (po „Wytnij”)
+        const selectionAfter = this.selectionManager.getMaskSnapshot();
+        this.pushTileAction({
+          type: 'transformContent',
+          description: 'Wklej',
+          layerIndex: sess.sourceLayerIndex,
+          tilesBefore: sess.initialTilesSnapshot,
+          tilesAfter: layer.tileGrid.getTilesSnapshot(),
+          selectionBefore: sess.initialSelectionSnapshot,
+          selectionAfter,
+        });
+      }
+      this.selectionManager.commitTransformSelection();
+      this.transformContentSession = null;
+      this.markAllLayersDirty();
+      return true;
+    }
+    this.syncContentCut();
 
     if (layer) {
       // Wyrenderuj ostateczny przekształcony fragment z wybranym algorytmem próbkowania
@@ -2141,10 +2963,12 @@ export class GraphicEngine {
 
       // Przycina przekształconą zawartość dokładnie do aktualnej maski zaznaczenia,
       // co uniemożliwia wyciekanie rozmytych pikseli poza krawędzie zaznaczenia.
-      tctx.save();
-      tctx.globalCompositeOperation = 'destination-in';
-      tctx.drawImage(this.selectionManager.maskCanvas, 0, 0);
-      tctx.restore();
+      if (!sess.softContent) {
+        tctx.save();
+        tctx.globalCompositeOperation = 'destination-in';
+        tctx.drawImage(this.selectionManager.maskCanvas, 0, 0);
+        tctx.restore();
+      }
 
       // Wklej wyrenderowany fragment do kafelków warstwy
       for (let ty = 0; ty < layer.tileGrid.rows; ty++) {
@@ -2162,7 +2986,7 @@ export class GraphicEngine {
       let otherHist: { before: TileSnapshotLike[]; after: TileSnapshotLike[] } | undefined;
       if (sess.other) {
         const o = sess.other;
-        const moved = this.renderTransformedContent(o.content, sess.interpolation);
+        const moved = this.renderTransformedContent(o.content, sess.interpolation, !!sess.softContent);
         const vacatedIsMask = o.grid === layer.maskGrid;
         for (const row of o.grid.tiles) {
           for (const tile of row) {
@@ -2216,6 +3040,77 @@ export class GraphicEngine {
     this.transformContentSession = null;
     this.markAllLayersDirty();
     return true;
+  }
+
+  /** Czy ramka manipulacji zawartością jest w stanie początkowym (nic nie przesunięto, nie przeskalowano, nie obrócono). */
+  public contentTransformIsIdentity(): boolean {
+    const sess = this.transformContentSession;
+    const st = this.selectionManager.transformState;
+    if (!sess || !st || !sess.cutMask) return false;
+    if (sess.contentChanged || sess.persp?.changed) return false;
+    const e = 1e-6;
+    return (
+      Math.abs(st.pos.x - st.initialCenter.x) < e &&
+      Math.abs(st.pos.y - st.initialCenter.y) < e &&
+      Math.abs(st.width - st.initialBounds.width) < e &&
+      Math.abs(st.height - st.initialBounds.height) < e &&
+      Math.abs(st.angle) < e &&
+      !st.flipX &&
+      !st.flipY
+    );
+  }
+
+  /**
+   * Doprowadza warstwę do stanu zgodnego z ramką: w stanie początkowym warstwa jest nietknięta (podgląd = oryginał),
+   * po pierwszej zmianie następuje wycięcie fragmentu (z miękkim brzegiem), a powrót do stanu początkowego je cofa.
+   */
+  /** Czy dwa zrzuty kafelków mają identyczne piksele (wczesne wyjście przy pierwszej różnicy). */
+  private sameTiles(a: TileSnapshotLike[], b: TileSnapshotLike[]): boolean {
+    const key = (t: TileSnapshotLike) => t.ty * 100000 + t.tx;
+    const mb = new Map<number, TileSnapshotLike>();
+    for (const t of b) mb.set(key(t), t);
+    for (const t of a) {
+      const o = mb.get(key(t));
+      if (!o || t.hasContent !== o.hasContent) return false;
+      if (!t.hasContent) continue;
+      const x = t.imgData.data;
+      const y = o.imgData.data;
+      if (x.length !== y.length) return false;
+      for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return false;
+    }
+    return true;
+  }
+
+  private restoreTiles(layer: Layer, snap: { tx: number; ty: number; imgData: ImageData; hasContent: boolean }[]): void {
+    for (const t of snap) {
+      const tile = layer.tileGrid.getTile(t.tx, t.ty);
+      if (tile) {
+        tile.ctx.putImageData(t.imgData, 0, 0);
+        tile.hasContent = t.hasContent;
+        tile.isDirty = true;
+      }
+    }
+    layer.updateThumbnail();
+  }
+
+  public syncContentCut(): boolean {
+    const sess = this.transformContentSession;
+    if (!sess || !sess.cutMask) return false;
+    const layer = this.layers[sess.sourceLayerIndex];
+    if (!layer) return false;
+    const identity = this.contentTransformIsIdentity();
+    if (!identity && !sess.cutDone) {
+      layer.clear(sess.cutMask);
+      sess.cutDone = true;
+      this.markAllLayersDirty();
+      return true;
+    } else if (identity && sess.cutDone) {
+      this.restoreTiles(layer, sess.identityTiles ?? sess.initialTilesSnapshot);
+      sess.cutDone = false;
+      this.markAllLayersDirty();
+      return true;
+    }
+    return false;
   }
 
   public cancelTransformContent(): boolean {
@@ -2292,6 +3187,9 @@ export class GraphicEngine {
       dirtyRect = null;
     }
 
+    // wycięcie fragmentu z warstwy następuje dopiero po pierwszej zmianie ramki (patrz syncContentCut)
+    if (this.transformContentSession && this.syncContentCut()) dirtyRect = null;
+
     if (customPreviewRenderer) {
       dirtyRect = null;
     }
@@ -2317,25 +3215,50 @@ export class GraphicEngine {
 
         const rLayers = this.renderLayers;
         const rActive = this.renderActiveIndex;
+        const iso = this.renderIsolation;
+        // cel rysowania: płótno dokumentu albo (w izolowanej grupie) jej osobny bufor
+        let tgt: CanvasRenderingContext2D = ctx;
+        const passSnaps = new Map<string, HTMLCanvasElement>();
         for (let i = 0; i < rLayers.length; i++) {
           const layer = rLayers[i];
+          // grupa „Przepuszczanie” z krytem / maską: tło przed grupą i domknięcie po jej warstwach
+          const psG = this.renderPassStartAt(i);
+          if (psG) passSnaps.set(psG.id, this.passSnapshot(ctx, clipLeft, clipTop, clipW, clipH));
+          const peG = this.renderPassEndAt(i);
+          if (peG) {
+            const sn = passSnaps.get(peG.id);
+            if (sn && peG.ownVisible) this.passFinish(ctx, sn, peG, clipLeft, clipTop, clipW, clipH);
+            continue;
+          }
+          if (iso && i === iso.start) {
+            const gs = this.getGroupScratch();
+            gs.ctx.clearRect(clipLeft, clipTop, clipW, clipH);
+            tgt = gs.ctx;
+          }
+          if (iso && i === iso.header) {
+            tgt = ctx;
+            if (iso.group.ownVisible && iso.group.opacity > 0) {
+              this.flushIsolatedGroup(ctx, iso.group, this.getGroupScratch().canvas, clipLeft, clipTop, clipW, clipH);
+            }
+            continue;
+          }
           if (!layer.visible || layer.opacity <= 0) continue;
 
           const affectedTiles = layer.pixelGrid.getTilesIntersectingRect(dirtyRect);
           if (affectedTiles.length === 0) continue;
 
           if (i !== rActive || !isDrawingLive) {
-            ctx.save();
-            ctx.globalAlpha = layer.opacity;
-            ctx.globalCompositeOperation = getCanvasCompositeOperation(layer.blendMode);
+            tgt.save();
+            tgt.globalAlpha = layer.opacity;
+            tgt.globalCompositeOperation = getCanvasCompositeOperation(layer.blendMode);
 
             for (const tile of affectedTiles) {
               if (tile.hasContent || layer.grayView) {
                 const rc = layer.renderCanvas(tile);
-                if (rc) ctx.drawImage(rc, tile.pixelX, tile.pixelY);
+                if (rc) tgt.drawImage(rc, tile.pixelX, tile.pixelY);
               }
             }
-            ctx.restore();
+            tgt.restore();
           } else {
             // Aktywna warstwa podczas rysowania pędzlem na żywo
             const { canvas: scratch, ctx: sctx } = this.getDirtyScratch(clipW, clipH);
@@ -2400,11 +3323,11 @@ export class GraphicEngine {
               : (layer.maskGrid && !layer.editMask && !layer.grayView
                 ? layer.applyMaskToRegion(scratch, clipLeft, clipTop, clipW, clipH)
                 : scratch);
-            ctx.save();
-            ctx.globalAlpha = layer.opacity;
-            ctx.globalCompositeOperation = getCanvasCompositeOperation(layer.blendMode);
-            ctx.drawImage(liveSrc, 0, 0, clipW, clipH, clipLeft, clipTop, clipW, clipH);
-            ctx.restore();
+            tgt.save();
+            tgt.globalAlpha = layer.opacity;
+            tgt.globalCompositeOperation = getCanvasCompositeOperation(layer.blendMode);
+            tgt.drawImage(liveSrc, 0, 0, clipW, clipH, clipLeft, clipTop, clipW, clipH);
+            tgt.restore();
           }
         }
 
@@ -2420,19 +3343,43 @@ export class GraphicEngine {
 
     const rLayersF = this.renderLayers;
     const rActiveF = this.renderActiveIndex;
+    const isoF = this.renderIsolation;
+    // cel rysowania: płótno dokumentu albo (w izolowanej grupie) jej osobny bufor
+    let tgt: CanvasRenderingContext2D = ctx;
+    const passSnapsF = new Map<string, HTMLCanvasElement>();
     for (let i = 0; i < rLayersF.length; i++) {
       const layer = rLayersF[i];
+      const psF = this.renderPassStartAt(i);
+      if (psF) passSnapsF.set(psF.id, this.passSnapshot(ctx, 0, 0, this.width, this.height));
+      const peF = this.renderPassEndAt(i);
+      if (peF) {
+        const sn = passSnapsF.get(peF.id);
+        if (sn && peF.ownVisible) this.passFinish(ctx, sn, peF, 0, 0, this.width, this.height);
+        continue;
+      }
+      if (isoF && i === isoF.start) {
+        const gs = this.getGroupScratch();
+        gs.ctx.clearRect(0, 0, this.width, this.height);
+        tgt = gs.ctx;
+      }
+      if (isoF && i === isoF.header) {
+        tgt = ctx;
+        if (isoF.group.ownVisible && isoF.group.opacity > 0) {
+          this.flushIsolatedGroup(ctx, isoF.group, this.getGroupScratch().canvas, 0, 0, this.width, this.height);
+        }
+        continue;
+      }
       if (!layer.visible || layer.opacity <= 0) continue;
 
       const isLiveBrushActive = (i === rActiveF && isDrawingLive && (!!this.brushEngine.activeBrushSettings || !!this.brushEngine.activeStampSettings));
       const isCustomPreviewActive = (i === rActiveF && !!customPreviewRenderer);
 
       if (!isLiveBrushActive && !isCustomPreviewActive) {
-        ctx.save();
-        ctx.globalAlpha = layer.opacity;
-        ctx.globalCompositeOperation = getCanvasCompositeOperation(layer.blendMode);
-        layer.drawRenderedToContext(ctx);
-        ctx.restore();
+        tgt.save();
+        tgt.globalAlpha = layer.opacity;
+        tgt.globalCompositeOperation = getCanvasCompositeOperation(layer.blendMode);
+        layer.drawRenderedToContext(tgt);
+        tgt.restore();
       } else if (isLiveBrushActive) {
         // Aktywna warstwa podczas aktywnego rysowania na żywo w pełnym przerysowaniu
         const activeFlat = layer.tileGrid.compositeToFlatCanvas();
@@ -2475,11 +3422,11 @@ export class GraphicEngine {
           : (layer.maskGrid && !layer.editMask && !layer.grayView
             ? layer.applyMaskToRegion(activeFlat, 0, 0, this.width, this.height)
             : activeFlat);
-        ctx.save();
-        ctx.globalAlpha = layer.opacity;
-        ctx.globalCompositeOperation = getCanvasCompositeOperation(layer.blendMode);
-        ctx.drawImage(liveFlat, 0, 0);
-        ctx.restore();
+        tgt.save();
+        tgt.globalAlpha = layer.opacity;
+        tgt.globalCompositeOperation = getCanvasCompositeOperation(layer.blendMode);
+        tgt.drawImage(liveFlat, 0, 0);
+        tgt.restore();
       } else if (isCustomPreviewActive) {
         // Aktywna warstwa podczas podglądu narzędzi wektorowych (linie, krzywe, figury)
         const activeFlat = layer.tileGrid.compositeToFlatCanvas();
@@ -2510,16 +3457,17 @@ export class GraphicEngine {
         const customFlat = layer.editMask && layer.maskGrid && !layer.grayView
           ? layer.composeWithMaskRegion(activeFlat, 0, 0, this.width, this.height)
           : activeFlat;
-        ctx.save();
-        ctx.globalAlpha = layer.opacity;
-        ctx.globalCompositeOperation = getCanvasCompositeOperation(layer.blendMode);
-        ctx.drawImage(customFlat, 0, 0);
-        ctx.restore();
+        tgt.save();
+        tgt.globalAlpha = layer.opacity;
+        tgt.globalCompositeOperation = getCanvasCompositeOperation(layer.blendMode);
+        tgt.drawImage(customFlat, 0, 0);
+        tgt.restore();
       }
 
       // Pływająca zawartość podczas aktywnej sesji przekształcania zawartości (SZYBKIE HARDWARE-ACCELERATED RENDEROWANIE CROP TEXTURE)
       if (
         !this.floatingContentExternal &&
+        !this.contentTransformIsIdentity() &&
         this.transformContentSession &&
         this.transformContentSession.sourceLayerIndex === this.realLayerIndex(i) &&
         this.selectionManager.transformState
@@ -2528,40 +3476,36 @@ export class GraphicEngine {
         const sess = this.transformContentSession;
 
         if (sess.persp) {
-          const img = sess.previewCanvas ?? sess.sourceContentCanvas;
-          ctx.save();
-          ctx.imageSmoothingEnabled = sess.interpolation !== 'nearest-neighbor';
-          ctx.imageSmoothingQuality = 'medium';
-          drawPerspectiveMesh(ctx, img, img.width, img.height, sess.persp.quad);
-          ctx.restore();
+          const pv = this.getPerspectivePreview();
+          if (pv) drawPerspectivePreview(tgt, pv, sess.interpolation !== 'nearest-neighbor');
           continue;
         }
 
-        ctx.save();
-        ctx.translate(st.pos.x, st.pos.y);
-        ctx.rotate(st.angle);
+        tgt.save();
+        tgt.translate(st.pos.x, st.pos.y);
+        tgt.rotate(st.angle);
         const scaleXMult = st.flipX ? -1 : 1;
         const scaleYMult = st.flipY ? -1 : 1;
         const sx = (st.width / Math.max(1, st.initialBounds.width)) * scaleXMult;
         const sy = (st.height / Math.max(1, st.initialBounds.height)) * scaleYMult;
-        ctx.scale(sx, sy);
+        tgt.scale(sx, sy);
 
         if (sess.interpolation === 'nearest-neighbor') {
-          ctx.imageSmoothingEnabled = false;
+          tgt.imageSmoothingEnabled = false;
         } else if (sess.interpolation === 'bilinear') {
-          ctx.imageSmoothingEnabled = true;
-          ctx.imageSmoothingQuality = 'medium';
+          tgt.imageSmoothingEnabled = true;
+          tgt.imageSmoothingQuality = 'medium';
         } else {
-          ctx.imageSmoothingEnabled = true;
-          ctx.imageSmoothingQuality = 'high';
+          tgt.imageSmoothingEnabled = true;
+          tgt.imageSmoothingQuality = 'high';
         }
 
-        ctx.drawImage(
+        tgt.drawImage(
           sess.previewCanvas ?? sess.sourceContentCanvas,
           -st.initialBounds.width / 2,
           -st.initialBounds.height / 2
         );
-        ctx.restore();
+        tgt.restore();
       }
     }
 
@@ -2969,14 +3913,7 @@ export class GraphicEngine {
         ctx.restore();
       }
     } else {
-      for (const layer of this.layers) {
-        if (!layer.visible || layer.opacity <= 0) continue;
-        ctx.save();
-        ctx.globalAlpha = layer.opacity;
-        ctx.globalCompositeOperation = getCanvasCompositeOperation(layer.blendMode);
-        layer.drawRenderedCropped(ctx, cropX, cropY, cropWidth, cropHeight);
-        ctx.restore();
-      }
+      this.drawLayersCropped(ctx, cropX, cropY, cropWidth, cropHeight);
     }
   }
 
@@ -3014,14 +3951,7 @@ export class GraphicEngine {
         ctx.restore();
       }
     } else {
-      for (const layer of this.layers) {
-        if (!layer.visible || layer.opacity <= 0) continue;
-        ctx.save();
-        ctx.globalAlpha = layer.opacity;
-        ctx.globalCompositeOperation = getCanvasCompositeOperation(layer.blendMode);
-        layer.drawRenderedCropped(ctx, minX, minY, cropW, cropH);
-        ctx.restore();
-      }
+      this.drawLayersCropped(ctx, minX, minY, cropW, cropH);
     }
 
     const imgData = ctx.getImageData(0, 0, cropW, cropH).data;
@@ -3115,14 +4045,7 @@ export class GraphicEngine {
         ctx.restore();
       }
     } else {
-      for (const layer of this.layers) {
-        if (!layer.visible || layer.opacity <= 0) continue;
-        ctx.save();
-        ctx.globalAlpha = layer.opacity;
-        ctx.globalCompositeOperation = getCanvasCompositeOperation(layer.blendMode);
-        layer.drawRenderedCropped(ctx, cropX, cropY, boxSize, boxSize);
-        ctx.restore();
-      }
+      this.drawLayersCropped(ctx, cropX, cropY, boxSize, boxSize);
     }
 
     return canvas;
@@ -3137,16 +4060,7 @@ export class GraphicEngine {
     const ctx = canvas.getContext('2d');
     if (!ctx) return canvas;
 
-    for (const layer of this.layers) {
-      if (!layer.visible || layer.opacity <= 0) continue;
-
-      const layerFlat = layer.renderFlatCanvas();
-      ctx.save();
-      ctx.globalAlpha = layer.opacity;
-      ctx.globalCompositeOperation = getCanvasCompositeOperation(layer.blendMode);
-      ctx.drawImage(layerFlat, 0, 0);
-      ctx.restore();
-    }
+    this.drawLayersCropped(ctx, 0, 0, this.width, this.height);
 
     return canvas;
   }
@@ -3165,10 +4079,14 @@ export class GraphicEngine {
       layers: this.layers.map((l) => ({
         id: l.id,
         name: l.name,
-        visible: l.visible,
+        visible: l.ownVisible,
+        locked: l.ownLocked || undefined,
+        isGroup: l.isGroup || undefined,
+        groupId: l.groupId,
+        expanded: l.isGroup ? l.expanded : undefined,
         opacity: l.opacity,
         blendMode: l.blendMode,
-        dataUrl: l.pixelGrid.compositeToFlatCanvas().toDataURL('image/png'),
+        dataUrl: l.isGroup ? '' : l.pixelGrid.compositeToFlatCanvas().toDataURL('image/png'),
         maskDataUrl: l.maskGrid ? l.maskGrid.compositeToFlatCanvas().toDataURL('image/png') : undefined,
         maskEnabled: l.maskGrid ? l.maskEnabled : undefined,
         maskLinked: l.maskGrid ? l.maskLinked : undefined,
@@ -3194,16 +4112,25 @@ export class GraphicEngine {
       const loadedLayers: Layer[] = [];
 
       for (const lData of data.layers) {
+        const isGroupData = lData.isGroup === true;
         const layer = new Layer(
           lData.id || `layer_${Date.now()}`,
-          lData.name || 'Warstwa',
-          this.width,
-          this.height,
+          lData.name || (isGroupData ? 'Grupa' : 'Warstwa'),
+          isGroupData ? 1 : this.width,
+          isGroupData ? 1 : this.height,
           this.tileSize
         );
+        layer.isGroup = isGroupData;
+        layer.groupId = typeof lData.groupId === 'string' ? lData.groupId : null;
+        layer.expanded = lData.expanded !== false;
+        layer.locked = lData.locked === true;
         layer.visible = lData.visible !== false;
         layer.opacity = typeof lData.opacity === 'number' ? lData.opacity : 1.0;
         layer.blendMode = lData.blendMode || 'SrcOver';
+        // grupy z plików sprzed trybu „Przepuszczanie”: Normalne, bez krycia i maski = zwykłe przepuszczanie
+        if (isGroupData && (!lData.blendMode || (lData.blendMode === 'SrcOver' && layer.opacity >= 1 && !lData.maskDataUrl))) {
+          layer.blendMode = 'PassThrough';
+        }
 
         if (lData.dataUrl) {
           await new Promise<void>((resolve) => {
@@ -3240,7 +4167,7 @@ export class GraphicEngine {
           await new Promise<void>((resolve) => {
             const img = new Image();
             img.onload = () => {
-              layer.createMask(null);
+              layer.createMask(null, this.width, this.height);
               layer.editMask = false;
               const mg = layer.maskGrid!;
               for (const row of mg.tiles) {
@@ -3267,6 +4194,7 @@ export class GraphicEngine {
 
       this.layers = loadedLayers.length > 0 ? loadedLayers : this.layers;
       this.activeLayerIndex = Math.min(data.activeLayerIndex || 0, this.layers.length - 1);
+      this.normalizeLayers(this.layers[this.activeLayerIndex]);
       this.clearHistory();
       this.markAllLayersDirty();
       return true;

@@ -69,6 +69,8 @@ interface ToolOptionsBarProps {
   secondaryColor?: SKColor;
   onChangePrimaryColorAlpha?: (alpha: number) => void;
   activeTool: string;
+  /** Tryb perspektywy: odbicia są niedostępne */
+  flipDisabled?: boolean;
   onFlipHorizontal?: () => void;
   onFlipVertical?: () => void;
   textSettings?: TextToolSettings;
@@ -161,6 +163,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
   secondaryColor,
   onChangePrimaryColorAlpha,
   activeTool,
+  flipDisabled,
   onFlipHorizontal,
   onFlipVertical,
   textSettings,
@@ -703,8 +706,9 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
             <button
               type="button"
               onClick={onFlipHorizontal}
-              title="Odbij poziomo (Lustro w poziomie)"
-              className="flex items-center gap-1 px-2 h-5 bg-[#1e1e1e] hover:bg-[#333] text-[#ddd] hover:text-white rounded border border-[#444] text-[11px] cursor-pointer"
+              disabled={flipDisabled}
+              title={flipDisabled ? 'Niedostępne w trybie perspektywy' : "Odbij poziomo (Lustro w poziomie)"}
+              className={`flex items-center gap-1 px-2 h-5 bg-[#1e1e1e] rounded border border-[#444] text-[11px] ${flipDisabled ? 'opacity-40 cursor-not-allowed text-[#888]' : 'hover:bg-[#333] text-[#ddd] hover:text-white cursor-pointer'}`}
             >
               <FlipHorizontal size={13} />
               <span>Odbij w poziomie</span>
@@ -712,8 +716,9 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
             <button
               type="button"
               onClick={onFlipVertical}
-              title="Odbij pionowo (Lustro w pionie)"
-              className="flex items-center gap-1 px-2 h-5 bg-[#1e1e1e] hover:bg-[#333] text-[#ddd] hover:text-white rounded border border-[#444] text-[11px] cursor-pointer"
+              disabled={flipDisabled}
+              title={flipDisabled ? 'Niedostępne w trybie perspektywy' : "Odbij pionowo (Lustro w pionie)"}
+              className={`flex items-center gap-1 px-2 h-5 bg-[#1e1e1e] rounded border border-[#444] text-[11px] ${flipDisabled ? 'opacity-40 cursor-not-allowed text-[#888]' : 'hover:bg-[#333] text-[#ddd] hover:text-white cursor-pointer'}`}
             >
               <FlipVertical size={13} />
               <span>Odbij w pionie</span>
