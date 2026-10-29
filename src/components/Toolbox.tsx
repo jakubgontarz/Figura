@@ -26,6 +26,10 @@ import {
   Hand,
   ZoomIn,
   Type,
+  MousePointer2,
+  PenLine,
+  ImagePlus,
+  Ruler,
 } from 'lucide-react';
 import { ShapeKind, ToolType } from '../core/skia/types.ts';
 
@@ -34,6 +38,8 @@ interface ToolboxProps {
   onSelectTool: (tool: ToolType) => void;
   activeShapeType?: ShapeKind;
   onSelectShapeType?: (shape: ShapeKind) => void;
+  /** Aktywna warstwa jest wektorowa: pasek narzędzi pokazuje tylko narzędzia obiektów wektorowych. */
+  vectorMode?: boolean;
 }
 
 interface ToolDefinition {
@@ -46,6 +52,7 @@ interface ToolDefinition {
 export const Toolbox: React.FC<ToolboxProps> = ({
   activeTool,
   onSelectTool,
+  vectorMode = false,
 }) => {
   const tools: ToolDefinition[] = [
     {
@@ -175,6 +182,58 @@ export const Toolbox: React.FC<ToolboxProps> = ({
       icon: <ZoomIn size={16} strokeWidth={2.2} />,
     },
   ];
+
+  if (vectorMode) {
+    const byId = (id: ToolType) => tools.find((t) => t.id === id)!;
+    const vtools: (ToolDefinition | { placeholder: string; icon: React.ReactNode })[] = [
+      { id: 'vector-select', name: 'Manipulacja (edycja obiektów wektorowych)', shortcut: 'V', icon: <MousePointer2 size={16} strokeWidth={2.2} /> },
+      { id: 'pen', name: 'Pisak (swobodna krzywa wektorowa)', shortcut: 'N', icon: <PenLine size={16} strokeWidth={2.2} /> },
+      byId('shapes'),
+      byId('line'),
+      byId('bezier'),
+      byId('text'),
+      { placeholder: 'Obiekt inteligentny - wkrótce', icon: <ImagePlus size={16} strokeWidth={2.2} /> },
+      { placeholder: 'Prowadnice - wkrótce', icon: <Ruler size={16} strokeWidth={2.2} /> },
+      byId('pipette'),
+      byId('pan'),
+      byId('zoom'),
+    ];
+    return (
+      <div className="w-12 bg-[#252526] border-r border-[#1a1a1a] p-1.5 flex flex-col items-center gap-1 z-10 select-none shadow-md flex-shrink-0">
+        {vtools.map((tool, i) => {
+          if ('placeholder' in tool) {
+            return (
+              <button
+                key={`ph${i}`}
+                type="button"
+                disabled
+                title={tool.placeholder}
+                className="w-9 h-9 rounded flex items-center justify-center text-[#666] border border-transparent opacity-50 cursor-not-allowed"
+              >
+                {tool.icon}
+              </button>
+            );
+          }
+          const isActive = activeTool === tool.id;
+          return (
+            <button
+              key={tool.id}
+              type="button"
+              onClick={() => onSelectTool(tool.id)}
+              title={`${tool.name} (${tool.shortcut})`}
+              className={`w-9 h-9 rounded flex items-center justify-center transition-all cursor-pointer ${
+                isActive
+                  ? 'bg-[#094771] border border-[#007acc] text-white shadow'
+                  : 'text-[#bbbbbb] hover:bg-[#333333] hover:text-white border border-transparent'
+              }`}
+            >
+              {tool.icon}
+            </button>
+          );
+        })}
+      </div>
+    );
+  }
 
   return (
     <div className="w-12 bg-[#252526] border-r border-[#1a1a1a] p-1.5 flex flex-col items-center gap-1 z-10 select-none shadow-md flex-shrink-0">

@@ -19,7 +19,8 @@ import {
   defaultStyles,
   reviveStyles,
 } from '../core/skia/Styles.ts';
-import { CheckRow, SliderRow } from './CorrectionDialog.tsx';
+import { CheckRow } from './CorrectionDialog.tsx';
+import { ColorSwatchButton, isColorPopoverOpen } from './ColorPicker.tsx';
 
 interface StylesDialogProps {
   layerName: string;
@@ -36,18 +37,79 @@ interface StylesDialogProps {
 // Drobne elementy
 // --------------------------------------------------------------------------------------------------------------
 
+const fmtNum = (v: number, decimals: number): string => (decimals > 0 ? v.toFixed(decimals) : String(Math.round(v)));
+
+/** Kompaktowy suwak: etykieta, suwak i pole liczbowe w jednej linii. */
+const SliderRow: React.FC<{
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+  decimals?: number;
+  unit?: string;
+  defaultValue?: number;
+  onChange: (v: number) => void;
+}> = ({ label, value, min, max, step, decimals = 0, unit, defaultValue, onChange }) => {
+  const [draft, setDraft] = useState<string | null>(null);
+  const clamp = (v: number) => Math.max(min, Math.min(max, v));
+  return (
+    <div className="mb-1.5 flex items-center gap-1.5">
+      <label
+        className="w-[108px] shrink-0 truncate text-[10.5px] text-[#bbb] cursor-default"
+        title={defaultValue !== undefined ? `${label} (dwukrotne kliknięcie przywraca wartość domyślną)` : label}
+        onDoubleClick={() => defaultValue !== undefined && onChange(defaultValue)}
+      >
+        {label}
+      </label>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(e) => onChange(clamp(parseFloat(e.target.value)))}
+        className="flex-1 min-w-0 h-1.5 rounded-lg appearance-none cursor-pointer accent-[#007acc] bg-[#444]"
+      />
+      <input
+        type="text"
+        inputMode="decimal"
+        value={draft ?? fmtNum(value, decimals)}
+        onFocus={(e) => e.currentTarget.select()}
+        onChange={(e) => {
+          setDraft(e.target.value);
+          const v = parseFloat(e.target.value.replace(',', '.'));
+          if (!Number.isNaN(v)) onChange(clamp(v));
+        }}
+        onBlur={() => setDraft(null)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            setDraft(null);
+            (e.target as HTMLInputElement).blur();
+            e.stopPropagation();
+          }
+        }}
+        className="w-11 h-5 bg-[#111] border border-[#3e3e3e] rounded px-1 text-right text-[10.5px] text-white font-mono focus:outline-none focus:border-[#007acc]"
+      />
+      <span className="text-[10px] text-[#888] w-4 shrink-0">{unit?.trim()}</span>
+    </div>
+  );
+};
+
 const SelectRow: React.FC<{
   label: string;
   value: string;
   options: { value: string; label: string }[];
   onChange: (v: string) => void;
-}> = ({ label, value, options, onChange }) => (
-  <div className="mb-2">
-    <label className="block text-[10.5px] text-[#bbb] mb-0.5">{label}</label>
+  /** Etykieta po lewej w tej samej linii (zamiast nad polem) */
+  inline?: boolean;
+}> = ({ label, value, options, onChange, inline }) => (
+  <div className={inline ? 'mb-1.5 flex items-center gap-1.5' : 'mb-1.5 min-w-0'}>
+    <label className={inline ? 'w-[108px] shrink-0 text-[10.5px] text-[#bbb]' : 'block text-[10.5px] text-[#bbb] mb-0.5'}>{label}</label>
     <select
       value={value}
       onChange={(e) => onChange(e.target.value)}
-      className="w-full h-6 bg-[#222] border border-[#444] rounded px-1.5 text-[10.5px] text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+      className={`${inline ? 'flex-1' : 'w-full'} min-w-0 h-6 bg-[#222] border border-[#444] rounded px-1.5 text-[10.5px] text-white focus:outline-none focus:border-[#007acc] cursor-pointer`}
     >
       {options.map((o) => (
         <option key={o.value} value={o.value}>
@@ -58,11 +120,12 @@ const SelectRow: React.FC<{
   </div>
 );
 
-const ColorRow: React.FC<{ label: string; value: string; onChange: (v: string) => void }> = ({ label, value, onChange }) => {
+/** Kolor: pole hex + próbka otwierająca mały panel z wybierakiem koloru programu. `stacked` = etykieta nad polami (do siatki obok trybu). */
+const ColorRow: React.FC<{ label: string; value: string; onChange: (v: string) => void; stacked?: boolean }> = ({ label, value, onChange, stacked }) => {
   const [draft, setDraft] = useState<string | null>(null);
   return (
-    <div className="mb-2 flex items-center justify-between">
-      <label className="text-[10.5px] text-[#bbb]">{label}</label>
+    <div className={stacked ? 'mb-1.5 min-w-0' : 'mb-1.5 flex items-center gap-1.5'}>
+      <label className={stacked ? 'block text-[10.5px] text-[#bbb] mb-0.5' : 'w-[108px] shrink-0 text-[10.5px] text-[#bbb]'}>{label}</label>
       <div className="flex items-center gap-1">
         <input
           type="text"
@@ -80,14 +143,9 @@ const ColorRow: React.FC<{ label: string; value: string; onChange: (v: string) =
               e.stopPropagation();
             }
           }}
-          className="w-[68px] h-5 bg-[#111] border border-[#3e3e3e] rounded px-1 text-[10.5px] text-white font-mono focus:outline-none focus:border-[#007acc]"
+          className="w-[68px] h-6 bg-[#111] border border-[#3e3e3e] rounded px-1 text-[10.5px] text-white font-mono focus:outline-none focus:border-[#007acc]"
         />
-        <input
-          type="color"
-          value={/^#[0-9a-f]{6}$/i.test(value) ? value : '#000000'}
-          onChange={(e) => onChange(e.target.value.toLowerCase())}
-          className="w-7 h-5 p-0 bg-transparent border border-[#3e3e3e] rounded cursor-pointer"
-        />
+        <ColorSwatchButton value={value} onChange={onChange} className="w-8 h-6 p-0 border border-[#3e3e3e] rounded cursor-pointer shrink-0" />
       </div>
     </div>
   );
@@ -97,8 +155,11 @@ const BlendRow: React.FC<{ label?: string; value: StyleBlend; onChange: (v: Styl
   <SelectRow label={label} value={value} options={STYLE_BLEND_OPTIONS} onChange={(v) => onChange(v as StyleBlend)} />
 );
 
+/** Dwa pola obok siebie (np. tryb i kolor). */
+const Pair: React.FC<{ children: React.ReactNode }> = ({ children }) => <div className="grid grid-cols-2 gap-2 items-start">{children}</div>;
+
 const SubTitle: React.FC<{ children: React.ReactNode }> = ({ children }) => (
-  <div className="text-[9.5px] uppercase tracking-wide text-[#777] mt-3 mb-1.5 border-t border-[#333] pt-2">{children}</div>
+  <div className="text-[9.5px] uppercase tracking-wide text-[#777] mt-2 mb-1 border-t border-[#333] pt-1.5">{children}</div>
 );
 
 // --------------------------------------------------------------------------------------------------------------
@@ -172,8 +233,8 @@ const GradientEditor: React.FC<{ stops: GradStop[]; onChange: (s: GradStop[]) =>
           />
         ))}
       </div>
-      <div className="mt-3 flex items-center gap-1.5">
-        <input type="color" value={cur.color} onChange={(e) => onChange(stops.map((x, k) => (k === idx ? { ...x, color: e.target.value.toLowerCase() } : x)))} className="w-7 h-5 p-0 bg-transparent border border-[#3e3e3e] rounded cursor-pointer" />
+      <div className="mt-2.5 flex items-center gap-1.5">
+        <ColorSwatchButton value={cur.color} onChange={(c) => onChange(stops.map((x, k) => (k === idx ? { ...x, color: c } : x)))} />
         <span className="text-[10px] text-[#999]">punkt {idx + 1} z {stops.length}</span>
         <button
           type="button"
@@ -187,7 +248,7 @@ const GradientEditor: React.FC<{ stops: GradStop[]; onChange: (s: GradStop[]) =>
           Usuń punkt
         </button>
       </div>
-      <div className="mt-2">
+      <div className="mt-1.5">
         <SliderRow label="Położenie punktu" value={cur.pos} min={0} max={100} step={1} unit="%" onChange={(v) => onChange(stops.map((x, k) => (k === idx ? { ...x, pos: v } : x)))} />
         <SliderRow label="Krycie punktu" value={cur.alpha} min={0} max={100} step={1} unit="%" onChange={(v) => onChange(stops.map((x, k) => (k === idx ? { ...x, alpha: v } : x)))} />
       </div>
@@ -253,6 +314,7 @@ const StyleEditor: React.FC<{ kind: StyleKind; styles: LayerStyles; set: (fn: (s
           <SliderRow label="Grubość" value={x.width} min={1} max={100} step={1} unit=" px" defaultValue={3} onChange={(v) => u({ width: v })} />
           <SelectRow
             label="Położenie"
+            inline
             value={x.position}
             options={[
               { value: 'outside', label: 'Na zewnątrz' },
@@ -261,9 +323,11 @@ const StyleEditor: React.FC<{ kind: StyleKind; styles: LayerStyles; set: (fn: (s
             ]}
             onChange={(v) => u({ position: v as typeof x.position })}
           />
-          <ColorRow label="Kolor" value={x.color} onChange={(v) => u({ color: v })} />
+          <Pair>
+            <BlendRow value={x.blend} onChange={(v) => u({ blend: v })} />
+            <ColorRow stacked label="Kolor" value={x.color} onChange={(v) => u({ color: v })} />
+          </Pair>
           <SliderRow label="Krycie" value={x.opacity} min={0} max={100} step={1} unit="%" defaultValue={100} onChange={(v) => u({ opacity: v })} />
-          <BlendRow value={x.blend} onChange={(v) => u({ blend: v })} />
         </div>
       );
     }
@@ -284,8 +348,10 @@ const StyleEditor: React.FC<{ kind: StyleKind; styles: LayerStyles; set: (fn: (s
       const u = upd('innerShadow');
       return (
         <div>
-          <BlendRow value={x.blend} onChange={(v) => u({ blend: v })} />
-          <ColorRow label="Kolor" value={x.color} onChange={(v) => u({ color: v })} />
+          <Pair>
+            <BlendRow value={x.blend} onChange={(v) => u({ blend: v })} />
+            <ColorRow stacked label="Kolor" value={x.color} onChange={(v) => u({ color: v })} />
+          </Pair>
           <SliderRow label="Krycie" value={x.opacity} min={0} max={100} step={1} unit="%" defaultValue={75} onChange={(v) => u({ opacity: v })} />
           <LightRow styles={styles} use={x.useGlobalLight} angle={x.angle} onUse={(v) => u({ useGlobalLight: v })} onAngle={(v) => u({ angle: v })} onGlobalAngle={setGlobalAngle} />
           <SliderRow label="Odległość" value={x.distance} min={0} max={150} step={1} unit=" px" defaultValue={5} onChange={(v) => u({ distance: v })} />
@@ -299,11 +365,14 @@ const StyleEditor: React.FC<{ kind: StyleKind; styles: LayerStyles; set: (fn: (s
       const u = upd('innerGlow');
       return (
         <div>
-          <BlendRow value={x.blend} onChange={(v) => u({ blend: v })} />
-          <ColorRow label="Kolor" value={x.color} onChange={(v) => u({ color: v })} />
+          <Pair>
+            <BlendRow value={x.blend} onChange={(v) => u({ blend: v })} />
+            <ColorRow stacked label="Kolor" value={x.color} onChange={(v) => u({ color: v })} />
+          </Pair>
           <SliderRow label="Krycie" value={x.opacity} min={0} max={100} step={1} unit="%" defaultValue={75} onChange={(v) => u({ opacity: v })} />
           <SelectRow
             label="Źródło"
+            inline
             value={x.source}
             options={[
               { value: 'edge', label: 'Od krawędzi' },
@@ -321,6 +390,7 @@ const StyleEditor: React.FC<{ kind: StyleKind; styles: LayerStyles; set: (fn: (s
       const u = upd('bevel');
       return (
         <div>
+          <Pair>
           <SelectRow
             label="Styl"
             value={x.kind}
@@ -341,6 +411,7 @@ const StyleEditor: React.FC<{ kind: StyleKind; styles: LayerStyles; set: (fn: (s
             ]}
             onChange={(v) => u({ direction: v as typeof x.direction })}
           />
+          </Pair>
           <SliderRow label="Rozmiar" value={x.size} min={1} max={80} step={1} unit=" px" defaultValue={6} onChange={(v) => u({ size: v })} />
           <SliderRow label="Zmiękczenie" value={x.soften} min={0} max={16} step={0.5} decimals={1} unit=" px" defaultValue={0} onChange={(v) => u({ soften: v })} />
           <SliderRow label="Głębokość" value={x.depth} min={1} max={300} step={1} unit="%" defaultValue={100} onChange={(v) => u({ depth: v })} />
@@ -356,12 +427,16 @@ const StyleEditor: React.FC<{ kind: StyleKind; styles: LayerStyles; set: (fn: (s
             onChange={(v) => (x.useGlobalLight ? setGlobalAlt(v) : u({ altitude: v }))}
           />
           <SubTitle>Światło</SubTitle>
-          <BlendRow label="Tryb" value={x.highlightBlend} onChange={(v) => u({ highlightBlend: v })} />
-          <ColorRow label="Kolor" value={x.highlightColor} onChange={(v) => u({ highlightColor: v })} />
+          <Pair>
+            <BlendRow label="Tryb" value={x.highlightBlend} onChange={(v) => u({ highlightBlend: v })} />
+            <ColorRow stacked label="Kolor" value={x.highlightColor} onChange={(v) => u({ highlightColor: v })} />
+          </Pair>
           <SliderRow label="Krycie" value={x.highlightOpacity} min={0} max={100} step={1} unit="%" defaultValue={75} onChange={(v) => u({ highlightOpacity: v })} />
           <SubTitle>Cień</SubTitle>
-          <BlendRow label="Tryb" value={x.shadowBlend} onChange={(v) => u({ shadowBlend: v })} />
-          <ColorRow label="Kolor" value={x.shadowColor} onChange={(v) => u({ shadowColor: v })} />
+          <Pair>
+            <BlendRow label="Tryb" value={x.shadowBlend} onChange={(v) => u({ shadowBlend: v })} />
+            <ColorRow stacked label="Kolor" value={x.shadowColor} onChange={(v) => u({ shadowColor: v })} />
+          </Pair>
           <SliderRow label="Krycie" value={x.shadowOpacity} min={0} max={100} step={1} unit="%" defaultValue={75} onChange={(v) => u({ shadowOpacity: v })} />
         </div>
       );
@@ -371,8 +446,10 @@ const StyleEditor: React.FC<{ kind: StyleKind; styles: LayerStyles; set: (fn: (s
       const u = upd('satin');
       return (
         <div>
-          <BlendRow value={x.blend} onChange={(v) => u({ blend: v })} />
-          <ColorRow label="Kolor" value={x.color} onChange={(v) => u({ color: v })} />
+          <Pair>
+            <BlendRow value={x.blend} onChange={(v) => u({ blend: v })} />
+            <ColorRow stacked label="Kolor" value={x.color} onChange={(v) => u({ color: v })} />
+          </Pair>
           <SliderRow label="Krycie" value={x.opacity} min={0} max={100} step={1} unit="%" defaultValue={50} onChange={(v) => u({ opacity: v })} />
           <SliderRow label="Kąt" value={x.angle} min={-180} max={180} step={1} unit="°" defaultValue={19} onChange={(v) => u({ angle: v })} />
           <SliderRow label="Odległość" value={x.distance} min={0} max={100} step={1} unit=" px" defaultValue={11} onChange={(v) => u({ distance: v })} />
@@ -386,8 +463,10 @@ const StyleEditor: React.FC<{ kind: StyleKind; styles: LayerStyles; set: (fn: (s
       const u = upd('colorOverlay');
       return (
         <div>
-          <BlendRow value={x.blend} onChange={(v) => u({ blend: v })} />
-          <ColorRow label="Kolor" value={x.color} onChange={(v) => u({ color: v })} />
+          <Pair>
+            <BlendRow value={x.blend} onChange={(v) => u({ blend: v })} />
+            <ColorRow stacked label="Kolor" value={x.color} onChange={(v) => u({ color: v })} />
+          </Pair>
           <SliderRow label="Krycie" value={x.opacity} min={0} max={100} step={1} unit="%" defaultValue={100} onChange={(v) => u({ opacity: v })} />
         </div>
       );
@@ -401,6 +480,7 @@ const StyleEditor: React.FC<{ kind: StyleKind; styles: LayerStyles; set: (fn: (s
           <SliderRow label="Krycie" value={x.opacity} min={0} max={100} step={1} unit="%" defaultValue={100} onChange={(v) => u({ opacity: v })} />
           <GradientEditor stops={x.stops} onChange={(stops) => u({ stops })} />
           <CheckRow label="Odwróć kolejność" checked={x.reverse} onChange={(v) => u({ reverse: v })} />
+          <Pair>
           <SelectRow
             label="Kształt"
             value={x.shape}
@@ -413,8 +493,6 @@ const StyleEditor: React.FC<{ kind: StyleKind; styles: LayerStyles; set: (fn: (s
             ]}
             onChange={(v) => u({ shape: v as typeof x.shape })}
           />
-          <SliderRow label="Kąt" value={x.angle} min={-180} max={180} step={1} unit="°" defaultValue={90} onChange={(v) => u({ angle: v })} />
-          <SliderRow label="Skala" value={x.scale} min={10} max={300} step={1} unit="%" defaultValue={100} onChange={(v) => u({ scale: v })} />
           <SelectRow
             label="Wyrównaj do"
             value={x.align}
@@ -424,6 +502,9 @@ const StyleEditor: React.FC<{ kind: StyleKind; styles: LayerStyles; set: (fn: (s
             ]}
             onChange={(v) => u({ align: v as typeof x.align })}
           />
+          </Pair>
+          <SliderRow label="Kąt" value={x.angle} min={-180} max={180} step={1} unit="°" defaultValue={90} onChange={(v) => u({ angle: v })} />
+          <SliderRow label="Skala" value={x.scale} min={10} max={300} step={1} unit="%" defaultValue={100} onChange={(v) => u({ scale: v })} />
         </div>
       );
     }
@@ -553,7 +634,7 @@ export const StylesDialog: React.FC<StylesDialogProps> = ({ layerName, initial, 
   previewRef.current = preview;
   const [pos, setPos] = useState(() => ({
     x: Math.max(16, (typeof window !== 'undefined' ? window.innerWidth : 1200) - 224 - 580 - 24),
-    y: 90,
+    y: Math.max(8, Math.min(90, (typeof window !== 'undefined' ? window.innerHeight : 800) - 470)),
   }));
   const dragRef = useRef<{ dx: number; dy: number } | null>(null);
 
@@ -571,6 +652,7 @@ export const StylesDialog: React.FC<StylesDialogProps> = ({ layerName, initial, 
   latest.current = { onOk, onCancel };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (isColorPopoverOpen()) return; // Esc / Enter obsługuje mały panel koloru
       if (e.key === 'Escape') {
         e.preventDefault();
         latest.current.onCancel();
@@ -625,7 +707,7 @@ export const StylesDialog: React.FC<StylesDialogProps> = ({ layerName, initial, 
         </button>
       </div>
 
-      <div className="flex min-h-0 flex-1" style={{ height: 470 }}>
+      <div className="flex min-h-0 flex-1" style={{ height: 'min(430px, calc(100vh - 110px))' }}>
         {/* lewa kolumna: zakładki z polem wyboru i okiem */}
         <div className="w-[196px] shrink-0 border-r border-[#333] p-1.5 overflow-y-auto">
           <button
@@ -680,7 +762,7 @@ export const StylesDialog: React.FC<StylesDialogProps> = ({ layerName, initial, 
         </div>
 
         {/* prawa kolumna: ustawienia */}
-        <div className="flex-1 min-w-0 p-3 overflow-y-auto">
+        <div className="flex-1 min-w-0 px-3 py-2 overflow-y-auto">
           <div className="text-[11px] font-semibold text-white mb-2.5 pb-1.5 border-b border-[#333]">{activeName}</div>
           {tab === 'presets' ? (
             <PresetsPane

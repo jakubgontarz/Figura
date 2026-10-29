@@ -42,8 +42,8 @@ import {
   compileCorrections,
   isFilterType,
 } from './Corrections.ts';
-import { gpuApplyStyles } from './GpuStyles.ts';
-import { gpuPt, gpuReplicate, gpuSessionAbort, gpuSessionBegin, gpuSessionEnd, gpuSessionFailed, gpuSessionActive } from './GpuFx.ts';
+import { gpuApplyStyles, gpuStylesFit, gpuStylesInSession } from './GpuStyles.ts';
+import { gpuPt, gpuReplicate, gpuSessionAbort, gpuSessionFail, gpuSessionBegin, gpuSessionEnd, gpuSessionFailed, gpuSessionActive } from './GpuFx.ts';
 import { gpuFx2, gpuGauss, gpuGlow, gpuLens, gpuMotion, gpuRadial, gpuSharpen, gpuSurface, gpuWarp } from './GpuFx.ts';
 import { LayerStyles, StyleFx, applyLayerStyles, stylesMargin, stylesSpread } from './Styles.ts';
 
@@ -383,7 +383,9 @@ export function runChainOnCanvas(chain: Chain, cv: HTMLCanvasElement, fx: FxCont
     if (seg.k === 'pt') {
       const g = (seg.run as PtFn).gpu;
       if (!g) return false;
-    } else if (!GPU_SESSION_FILTERS.has(seg.c.type)) return false;
+    } else if (!GPU_SESSION_FILTERS.has(seg.c.type)) {
+      if (seg.c.type !== 'layerStyles' || !gpuStylesFit(seg.c.params as LayerStyles, w, h, fx.scale)) return false;
+    }
   }
   if (!gpuSessionBegin(cv)) return false;
   try {
@@ -397,6 +399,32 @@ export function runChainOnCanvas(chain: Chain, cv: HTMLCanvasElement, fx: FxCont
     return false;
   }
   return gpuSessionEnd(cv);
+}
+
+/** Czy cały łańcuch da się wykonać w sesji GPU na oknie w x h (korekcje punktowe z wersją GPU, filtry z listy, stylizacje w zasięgu). */
+export function chainGpuSupported(chain: Chain, w: number, h: number, scale: number): boolean {
+  for (const seg of chain.segs) {
+    if (seg.k === 'pt') {
+      if (!(seg.run as PtFn).gpu) return false;
+    } else if (!GPU_SESSION_FILTERS.has(seg.c.type)) {
+      if (seg.c.type !== 'layerStyles' || !gpuStylesFit(seg.c.params as LayerStyles, w, h, scale)) return false;
+    }
+  }
+  return true;
+}
+
+/** Wykonuje łańcuch w już otwartej sesji GPU (patrz gpuSessionBeginTex). false = coś się nie powiodło, wynik należy odrzucić. */
+export function runChainInSession(chain: Chain, w: number, h: number, fx: FxContext): boolean {
+  try {
+    for (const seg of chain.segs) {
+      if (seg.k === 'pt') gpuPt((seg.run as PtFn).gpu!, w, h);
+      else applyFilter(seg.c, NO_DATA, w, h, fx);
+      if (gpuSessionFailed()) return false;
+    }
+  } catch {
+    return false;
+  }
+  return !gpuSessionFailed();
 }
 
 function applyFilter(c: Correction, d: Uint8ClampedArray, w: number, h: number, fx: FxContext): void {
@@ -455,6 +483,10 @@ function applyFilter(c: Correction, d: Uint8ClampedArray, w: number, h: number, 
       return spherize(d, w, h, c.params as SpherizeParams, fx);
     case 'layerStyles':
       rep(d, w, h, fx);
+      if (gpuSessionActive()) {
+        if (!gpuStylesInSession(c.params as LayerStyles, w, h, fx as StyleFx)) gpuSessionFail();
+        return;
+      }
       if (gpuApplyStyles(d, w, h, c.params as LayerStyles, fx as StyleFx)) return;
       return applyLayerStyles(d, w, h, c.params as LayerStyles, fx as StyleFx);
     default:

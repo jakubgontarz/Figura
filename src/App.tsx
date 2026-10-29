@@ -38,6 +38,10 @@ import { LayerStyles } from './core/skia/Styles.ts';
 import { Correction, CorrectionType, Histogram } from './core/skia/Corrections.ts';
 import type { Layer } from './core/skia/Layer.ts';
 
+/** Narzędzia dostępne na warstwie wektorowej (reszta działa na pikselach). */
+const VECTOR_LAYER_TOOLS = new Set<ToolType>(['vector-select', 'pen', 'shapes', 'line', 'bezier', 'text', 'pipette', 'pan', 'zoom']);
+const VECTOR_ONLY_TOOLS = new Set<ToolType>(['vector-select', 'pen']);
+
 interface DocumentTab {
   id: string;
   title: string;
@@ -430,7 +434,41 @@ export default function App() {
   const [penInfo, setPenInfo] = useState({ active: false, closed: false, count: 0 });
 
   // Narzędzia
-  const [activeTool, setActiveTool] = useState<ToolType>('brush');
+  const [activeTool, setActiveToolRaw] = useState<ToolType>('brush');
+  // Stan edycji obiektu wektorowego z narzędzia Manipulacja: rodzaj otwartej sesji (decyduje o opcjach narzędzia)
+  const [vectorEditKind, setVectorEditKind] = useState<'line' | 'bezier' | 'shapes' | 'text' | null>(null);
+  const activeIsVector = !!engine.getActiveLayer()?.isVector;
+  // Żądanie otwarcia obiektu wektorowego do edycji (kliknięcie wiersza w panelu warstw)
+  const [vectorEditRequest, setVectorEditRequest] = useState<{ n: number; layerIndex: number; id: string } | null>(null);
+  /** Wybór narzędzia z uwzględnieniem rodzaju aktywnej warstwy (wektorowa ma własny zestaw narzędzi). */
+  const setActiveTool = useCallback(
+    (tool: ToolType) => {
+      const vec = !!engine.getActiveLayer()?.isVector;
+      if (vec && !VECTOR_LAYER_TOOLS.has(tool)) {
+        showToast('Warstwa wektorowa: dostępne są tylko narzędzia obiektów wektorowych');
+        return;
+      }
+      if (!vec && VECTOR_ONLY_TOOLS.has(tool)) {
+        showToast('To narzędzie działa tylko na warstwie wektorowej');
+        return;
+      }
+      setActiveToolRaw(tool);
+    },
+    [engine, showToast]
+  );
+  // Zmiana aktywnej warstwy na wektorową / rastrową: narzędzie spoza zestawu zamieniane na domyślne
+  useEffect(() => {
+    if (activeIsVector && !VECTOR_LAYER_TOOLS.has(activeTool)) setActiveToolRaw('vector-select');
+    else if (!activeIsVector && VECTOR_ONLY_TOOLS.has(activeTool)) setActiveToolRaw('brush');
+  }, [activeIsVector, activeTool]);
+
+  // Zaznaczenie obiektów wektorowych istnieje tylko przy narzędziu Manipulacja
+  useEffect(() => {
+    if (activeTool !== 'vector-select' && engine.vec.getSelection()) {
+      engine.vec.clearSelection();
+      bumpEngineRevision();
+    }
+  }, [activeTool, engine, bumpEngineRevision]);
 
   // Widok (Zoom i Pan)
   const [zoom, setZoom] = useState<number>(1.0);
@@ -570,19 +608,43 @@ export default function App() {
     a.click();
   };
 
+  /** Aktywna warstwa wektorowa: jej indeks i zaznaczone obiekty (z otwartą edycją włącznie). */
+  const vectorSelection = useCallback((): { idx: number; ids: string[] } | null => {
+    const l = engine.getActiveLayer();
+    if (!l || !l.isVector) return null;
+    const ids = engine.vec.selectedIds(l);
+    return ids.length > 0 ? { idx: engine.layers.indexOf(l), ids } : null;
+  }, [engine]);
+
   const handleCut = useCallback(() => {
-    if (engine.getActiveLayer()?.locked) {
-      showToast('Warstwa jest zablokowana');
+    if (engine.getActiveLayer()?.isVector) {
+      const vs = vectorSelection();
+      if (!vs) showToast('Zaznacz obiekty wektorowe, aby je wyciąć');
+      else if (!engine.vec.cutObjects(vs.idx, vs.ids)) showToast('Nie można wyciąć: warstwa jest zablokowana');
+      bumpEngineRevision();
       return;
+    }
+    {
+      const why = engine.pixelEditBlockReason();
+      if (why) {
+        showToast(why);
+        return;
+      }
     }
     if (engine.cut()) {
       bumpEngineRevision();
     }
-  }, [engine, bumpEngineRevision, showToast]);
+  }, [engine, bumpEngineRevision, showToast, vectorSelection]);
 
   const handleCopy = useCallback(() => {
+    if (engine.getActiveLayer()?.isVector) {
+      const vs = vectorSelection();
+      if (!vs) showToast('Zaznacz obiekty wektorowe, aby je skopiować');
+      else engine.vec.copyObjects(vs.idx, vs.ids);
+      return;
+    }
     engine.copy();
-  }, [engine]);
+  }, [engine, vectorSelection, showToast]);
 
   const pasteExternalBlob = useCallback((file: File | Blob) => {
     const img = new Image();
@@ -605,9 +667,12 @@ export default function App() {
   }, [engine, bumpEngineRevision, showToast]);
 
   const pasteImageBlob = useCallback((file: File | Blob) => {
-    if (engine.getActiveLayer()?.locked) {
-      showToast('Warstwa jest zablokowana');
-      return;
+    {
+      const why = engine.pixelEditBlockReason();
+      if (why) {
+        showToast(why);
+        return;
+      }
     }
     // Własna kopia aplikacji: wklejamy bufor wewnętrzny (dokładne piksele i maska), a nie obraz zdekodowany z PNG
     engine.isOwnClipboardBlob(file).then((own) => {
@@ -620,10 +685,21 @@ export default function App() {
     });
   }, [engine, bumpEngineRevision, showToast, pasteExternalBlob]);
 
-  const handlePaste = useCallback(() => {
-    if (engine.getActiveLayer()?.locked) {
-      showToast('Warstwa jest zablokowana');
+  const handlePaste = useCallback((inPlace?: boolean) => {
+    if (engine.getActiveLayer()?.isVector) {
+      const idx = engine.layers.indexOf(engine.getActiveLayer()!);
+      if (!engine.vec.hasClipboard) showToast('Schowek obiektów jest pusty: zaznacz obiekty i skopiuj je (Ctrl+C)');
+      else if (engine.vec.pasteObjects(idx, inPlace === true).length === 0) showToast('Nie można wkleić: warstwa jest zablokowana');
+      else setActiveToolRaw('vector-select');
+      bumpEngineRevision();
       return;
+    }
+    {
+      const why = engine.pixelEditBlockReason();
+      if (why) {
+        showToast(why);
+        return;
+      }
     }
     // 1. Najpierw spróbuj odczytać aktualny obraz ze schowka systemowego (zrzuty ekranu, skopiowane obrazy z przeglądarki/OS)
     if (navigator.clipboard && typeof navigator.clipboard.read === 'function') {
@@ -771,7 +847,7 @@ export default function App() {
           return;
         } else if (e.key === 'v' || e.key === 'V') {
           e.preventDefault();
-          handlePaste();
+          handlePaste(e.shiftKey);
           return;
         } else if (e.key === 't' || e.key === 'T') {
           e.preventDefault();
@@ -821,6 +897,9 @@ export default function App() {
       else if (key === 'y') setActiveTool('text');
       else if (key === 'h') setActiveTool('pan');
       else if (key === 'z') setActiveTool('zoom');
+      else if (key === 'v' && engine.getActiveLayer()?.isVector) setActiveTool('vector-select');
+      else if (key === 'n' && engine.getActiveLayer()?.isVector) setActiveTool('pen');
+      else if (key === 'p') setActiveTool('bezier');
       else if (key === 'x') {
         setPrimaryColor(secondaryColor);
         setSecondaryColor(primaryColor);
@@ -837,7 +916,7 @@ export default function App() {
         } else if (activeTool === 'deform') {
           setDeformSettings((prev) => ({ ...prev, size: Math.max(1, Math.min(2000, prev.size + delta)) }));
         }
-      } else if (e.key === 'Delete' && !isLiveVectorSessionActiveRef.current) {
+      } else if (e.key === 'Delete' && !isLiveVectorSessionActiveRef.current && !engine.getActiveLayer()?.isVector) {
         // Przy aktywnej sesji (np. krzywa) Delete należy do sesji (usuwa węzeł), a nie czyści warstwy
         const mask = engine.selectionManager.hasActiveSelection ? engine.selectionManager.maskCanvas : null;
         engine.getActiveLayer()?.clear(mask);
@@ -866,18 +945,28 @@ export default function App() {
     canUndo: engine.canUndo(),
     canRedo: engine.canRedo(),
     onClearLayer: () => {
+      const why = engine.pixelEditBlockReason();
+      if (why) {
+        showToast(why);
+        return;
+      }
       const mask = engine.selectionManager.hasActiveSelection ? engine.selectionManager.maskCanvas : null;
       engine.getActiveLayer()?.clear(mask);
       bumpEngineRevision();
     },
     onFillLayer: () => {
+      const why = engine.pixelEditBlockReason();
+      if (why) {
+        showToast(why);
+        return;
+      }
       const mask = engine.selectionManager.hasActiveSelection ? engine.selectionManager.maskCanvas : null;
       engine.getActiveLayer()?.fill(primaryColor, mask);
       bumpEngineRevision();
     },
     onCut: handleCut,
     onCopy: handleCopy,
-    onPaste: handlePaste,
+    onPaste: () => handlePaste(),
     onSelectAll: () => {
       engine.selectAll();
       bumpEngineRevision();
@@ -903,29 +992,59 @@ export default function App() {
       setPanOffset({ x: 0, y: 0 });
     },
     onFlipHorizontal: () => {
+      const why = engine.pixelEditBlockReason();
+      if (why) {
+        showToast(why);
+        return;
+      }
       engine.getActiveLayer()?.flipHorizontal();
       bumpEngineRevision();
     },
     onFlipVertical: () => {
+      const why = engine.pixelEditBlockReason();
+      if (why) {
+        showToast(why);
+        return;
+      }
       engine.getActiveLayer()?.flipVertical();
       bumpEngineRevision();
     },
     onInvertColors: () => {
+      const why = engine.pixelEditBlockReason();
+      if (why) {
+        showToast(why);
+        return;
+      }
       const mask = engine.selectionManager.hasActiveSelection ? engine.selectionManager.maskCanvas : null;
       engine.getActiveLayer()?.invertColors(mask);
       bumpEngineRevision();
     },
     onGrayscale: () => {
+      const why = engine.pixelEditBlockReason();
+      if (why) {
+        showToast(why);
+        return;
+      }
       const mask = engine.selectionManager.hasActiveSelection ? engine.selectionManager.maskCanvas : null;
       engine.getActiveLayer()?.toGrayscale(mask);
       bumpEngineRevision();
     },
     onBrightnessUp: () => {
+      const why = engine.pixelEditBlockReason();
+      if (why) {
+        showToast(why);
+        return;
+      }
       const mask = engine.selectionManager.hasActiveSelection ? engine.selectionManager.maskCanvas : null;
       engine.getActiveLayer()?.adjustBrightnessContrast(20, 0, mask);
       bumpEngineRevision();
     },
     onContrastUp: () => {
+      const why = engine.pixelEditBlockReason();
+      if (why) {
+        showToast(why);
+        return;
+      }
       const mask = engine.selectionManager.hasActiveSelection ? engine.selectionManager.maskCanvas : null;
       engine.getActiveLayer()?.adjustBrightnessContrast(0, 20, mask);
       bumpEngineRevision();
@@ -1008,7 +1127,7 @@ export default function App() {
         primaryColor={primaryColor}
         secondaryColor={secondaryColor}
         onChangePrimaryColorAlpha={(a) => setPrimaryColor((prev) => ({ ...prev, a }))}
-        activeTool={activeTool}
+        activeTool={activeTool === 'vector-select' ? (vectorEditKind ?? activeTool) : activeTool === 'pen' ? 'bezier' : activeTool}
         flipDisabled={engine.perspectiveActive}
         onFlipHorizontal={() => {
           if (engine.perspectiveActive) return;
@@ -1038,6 +1157,7 @@ export default function App() {
         )}
 
         <Toolbox
+          vectorMode={activeIsVector}
           activeTool={activeTool}
           onSelectTool={setActiveTool}
           activeShapeType={vectorShapeSettings.shapeKind}
@@ -1088,6 +1208,9 @@ export default function App() {
           liveVectorCancelTrigger={liveVectorCancelTrigger}
           penCloseToggleTrigger={penCloseToggleTrigger}
           onPenInfoChange={setPenInfo}
+          onVectorEditKind={setVectorEditKind}
+              onVectorSelectionChange={bumpEngineRevision}
+          vectorEditRequest={vectorEditRequest}
           onShowToast={showToast}
         />
 
@@ -1196,6 +1319,50 @@ export default function App() {
               }
               bumpEngineRevision();
             }}
+            onAddVectorLayer={() => {
+              if (engine.bucketSeedPoint) engine.commitPaintBucketSession();
+              if (engine.gradientStartPoint) engine.commitGradientSession();
+              engine.addVectorLayer();
+              setActiveToolRaw('vector-select');
+              bumpEngineRevision();
+            }}
+            editingVectorObject={engine.vec.editingInfo}
+            selectedVectorObjects={engine.vec.getSelection()}
+            pendingVectorObject={(() => {
+              const act = engine.getActiveLayer();
+              if (!isLiveVectorSessionActive || !act?.isVector || engine.vec.editing) return null;
+              const names: Record<string, string> = { line: 'Linia', bezier: 'Krzywa', shapes: 'Kształt', text: 'Tekst', pen: 'Pisak' };
+              return { layerId: act.id, label: names[activeTool] ?? 'Obiekt' };
+            })()}
+            onSelectVectorObjects={(idx, ids) => {
+              engine.setEditTarget(idx, 'pixels');
+              setActiveToolRaw('vector-select');
+              engine.vec.settle();
+              engine.vec.setSelection(engine.layers[idx]?.id ?? null, ids);
+              bumpEngineRevision();
+            }}
+            onEditVectorObject={(idx, id) => {
+              engine.setEditTarget(idx, 'pixels');
+              setActiveToolRaw('vector-select');
+              setVectorEditRequest((r) => ({ n: (r?.n ?? 0) + 1, layerIndex: idx, id }));
+              bumpEngineRevision();
+            }}
+            onToggleVectorObject={(idx, id, vis) => {
+              engine.vec.setObjectVisible(idx, id, vis);
+              bumpEngineRevision();
+            }}
+            onRemoveVectorObject={(idx, id) => {
+              if (!engine.vec.removeObject(idx, id)) showToast('Nie można usunąć obiektu: warstwa jest zablokowana albo obiekt jest właśnie edytowany');
+              bumpEngineRevision();
+            }}
+            onRenameVectorObject={(idx, id, name) => {
+              engine.vec.renameObject(idx, id, name);
+              bumpEngineRevision();
+            }}
+            onMoveVectorObject={(from, id, to, pos) => {
+              if (!engine.vec.moveObject(from, id, to, pos)) showToast('Nie można przenieść obiektu: warstwa jest zablokowana albo nie jest wektorowa');
+              bumpEngineRevision();
+            }}
             onAddLayer={() => {
               if (engine.bucketSeedPoint) engine.commitPaintBucketSession();
               if (engine.gradientStartPoint) engine.commitGradientSession();
@@ -1203,6 +1370,13 @@ export default function App() {
               bumpEngineRevision();
             }}
             onRemoveLayer={() => {
+              const vs = vectorSelection();
+              if (vs) {
+                // zaznaczone obiekty wektorowe: przycisk usuwa je, a nie całą warstwę
+                if (!engine.vec.deleteObjects(vs.idx, vs.ids)) showToast('Nie można usunąć obiektów: warstwa jest zablokowana');
+                bumpEngineRevision();
+                return;
+              }
               if (engine.bucketSeedPoint) engine.commitPaintBucketSession();
               if (engine.gradientStartPoint) engine.commitGradientSession();
               const act = engine.getActiveLayer();
@@ -1220,6 +1394,13 @@ export default function App() {
               bumpEngineRevision();
             }}
             onDuplicateLayer={() => {
+              const vs = vectorSelection();
+              if (vs) {
+                if (engine.vec.duplicateObjects(vs.idx, vs.ids).length === 0) showToast('Nie można zduplikować obiektów: warstwa jest zablokowana');
+                else setActiveToolRaw('vector-select');
+                bumpEngineRevision();
+                return;
+              }
               if (engine.bucketSeedPoint) engine.commitPaintBucketSession();
               if (engine.gradientStartPoint) engine.commitGradientSession();
               engine.duplicateActiveLayer();
@@ -1246,21 +1427,33 @@ export default function App() {
               // Zaznaczony efekt / warstwa z korekcjami / korekcja w stosie: „Zastosuj efekty” wpieka je w piksele;
               // bez efektów przycisk łączy warstwę w dół
               if (engine.applyEffectsMode !== 'none') {
-                if (!engine.applyEffects()) showToast('Nie można zastosować efektów: warstwa jest zablokowana');
+                if (!engine.applyEffects()) showToast('Nie można zastosować efektów: warstwa jest zablokowana albo pod korekcją leży warstwa wektorowa (jej piksele są wyliczane z obiektów)');
                 bumpEngineRevision();
                 return;
               }
               if (!engine.mergeLayerDown()) {
-                showToast('Nie można scalić: warstwa jest zablokowana albo poniżej jest granica grupy');
+                showToast('Nie można scalić: warstwa jest zablokowana, poniżej jest granica grupy albo warstwa wektorowa');
                 return;
               }
               bumpEngineRevision();
             }}
             onMoveUp={() => {
+              const vs = vectorSelection();
+              if (vs) {
+                engine.vec.shiftObjects(vs.idx, vs.ids, 1);
+                bumpEngineRevision();
+                return;
+              }
               engine.moveActiveLayerUp();
               bumpEngineRevision();
             }}
             onMoveDown={() => {
+              const vs = vectorSelection();
+              if (vs) {
+                engine.vec.shiftObjects(vs.idx, vs.ids, -1);
+                bumpEngineRevision();
+                return;
+              }
               engine.moveActiveLayerDown();
               bumpEngineRevision();
             }}

@@ -1667,6 +1667,11 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
       ) : activeTool === 'pan' || activeTool === 'zoom' ? (
         /* W narzędziu rączka i lupa nic nie ma być w opcjach */
         <div className="flex-1"></div>
+      ) : activeTool === 'vector-select' ? (
+        /* Manipulacja bez otwartego obiektu: podpowiedź zamiast opcji pędzla */
+        <div className="flex items-center flex-1 text-[11px] text-[#9a9a9a]">
+          Kliknij obiekt, aby go edytować. Przeciągnij po pustym miejscu, aby zaznaczyć kilka (Shift / Ctrl dodaje). Delete usuwa, Ctrl+C / Ctrl+V kopiuje.
+        </div>
       ) : (
         /* 8. PASEK OPCJI PĘDZLA I GUMKI */
         <div className="flex items-center gap-3 flex-1 flex-shrink-0">

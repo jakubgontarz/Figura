@@ -8,6 +8,7 @@ import { SKBlendMode, SKRectI, getCanvasCompositeOperation } from './types.ts';
 import { markWindowedContext } from './VectorRenderer.ts';
 import { grayToAlpha, finishPassThrough } from './Layer.ts';
 import type { FxContext } from './Filters.ts';
+import { GpuComposer, type GpuPreviewSource, type GpuWindow } from './GpuCompose.ts';
 
 /**
  * Szybki, przerywalny renderer podglądu edycji (figury, linie, krzywe, tekst, gradient) dla płótna dowolnej wielkości.
@@ -299,6 +300,9 @@ export class ViewportTileRenderer {
    */
   private overlay = false;
   private deferUntil = 0;
+  /** Kompozytor GPU (podgląd składany na karcie graficznej) i informacja, że płótno kafelków pokazuje jego wynik. */
+  private gpu: GpuComposer | null = null;
+  private gpuShown = false;
 
   private selCacheRef: unknown = null;
   private selCacheRect: Rect | null = null;
@@ -339,6 +343,109 @@ export class ViewportTileRenderer {
     this.ctx = canvas.getContext('2d')!;
   }
 
+
+  // ------------------------------------------------------------------------------------------------
+  // Składanie na GPU (patrz GpuCompose)
+  // ------------------------------------------------------------------------------------------------
+
+  /**
+   * Podgląd składany w całości na karcie graficznej: wszystkie warstwy z efektami, maskami i trybami mieszania + podgląd
+   * narzędzia w jednym przebiegu, bez kafelków i bez odczytu z GPU. false = nie dotyczy / nie obsługujemy (działa ścieżka CPU).
+   * Tryb nakładki (podgląd na wierzchu bez efektów) zostaje na CPU: jest tani i nie rusza reszty dokumentu.
+   */
+  private tryGpu(req: TileRequest, exact: boolean): boolean {
+    if (!GpuComposer.available()) return false;
+    const v = req.view;
+    const pv = req.preview;
+    if (this.computeOverlay(pv, v.zoom)) return false;
+    if (!this.computeEffective(pv.bounds, v)) return false;
+    if (!this.gpu) this.gpu = new GpuComposer(this.engine);
+    this.windowApprox = false;
+    const source: GpuPreviewSource = {
+      blendMode: pv.blendMode,
+      bounds: pv.bounds,
+      rasterize: (win, rect) => this.rasterizeForGpu(pv, win, rect),
+    };
+    const glc = this.gpu.compose(v, source);
+    if (!glc) return false;
+    if (this.canvas.width !== v.width || this.canvas.height !== v.height) {
+      this.canvas.width = v.width;
+      this.canvas.height = v.height;
+    }
+    const c = this.ctx;
+    c.setTransform(1, 0, 0, 1, 0, 0);
+    c.globalAlpha = 1;
+    c.globalCompositeOperation = 'copy';
+    c.drawImage(glc, 0, 0);
+    c.globalCompositeOperation = 'source-over';
+    this.queue = [];
+    this.overlay = false;
+    this.view = v;
+    this.preview = pv;
+    this.docMode = v.zoom >= 1;
+    this.shownView = null;
+    this.shownKey = null;
+    this.shownComplete = false;
+    this.prevBlk = null;
+    this.gpuShown = true;
+    (globalThis as { __figuraGpuLast?: unknown }).__figuraGpuLast = { ...this.gpu.lastStats, t: performance.now() };
+    if (this.windowApprox && !exact) this.scheduleRefine();
+    this.flushIdle();
+    return true;
+  }
+
+  /** Wyjście z trybu GPU: płótno kafelków zawiera cały dokument, więc ścieżka CPU zaczyna od pełnego odtworzenia. */
+  private leaveGpu(): void {
+    this.gpuShown = false;
+    this.view = null;
+    this.prevBlk = null;
+    this.shownView = null;
+    this.shownKey = null;
+    this.shownComplete = false;
+    this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+  }
+
+  /** Podgląd narzędzia w oknie rastra GPU (obszar `rect` okna, z maską zaznaczenia): ta sama rasteryzacja co w ścieżce CPU. */
+  private rasterizeForGpu(
+    pv: TilePreview,
+    win: GpuWindow,
+    rect: { x0: number; y0: number; x1: number; y1: number } | null
+  ): { canvas: HTMLCanvasElement; x: number; y: number } | null {
+    const eng = this.engine;
+    const s = win.s;
+    const x0 = rect ? rect.x0 : 0;
+    const y0 = rect ? rect.y0 : 0;
+    const w = rect ? rect.x1 - rect.x0 : win.W;
+    const h = rect ? rect.y1 - rect.y0 : win.H;
+    if (w <= 0 || h <= 0) return null;
+    const pb = this.previewBuf;
+    this.sizeBuf(pb, w, h);
+    // początek bufora w układzie dokumentu
+    const ox = win.ox + x0 / s;
+    const oy = win.oy + y0 / s;
+    const sprite = s === 1 ? this.getDocSprite(pv) : null;
+    if (sprite) {
+      pb.ctx.drawImage(sprite.canvas, sprite.x - ox, sprite.y - oy);
+    } else {
+      markWindowedContext(pb.ctx);
+      pb.ctx.setTransform(s, 0, 0, s, -ox * s, -oy * s);
+      pv.render(pb.ctx);
+      pb.ctx.setTransform(1, 0, 0, 1, 0, 0);
+    }
+    if (eng.selectionAffectsActiveLayer) {
+      const maskCanvas = eng.selectionManager.maskCanvas;
+      pb.ctx.save();
+      pb.ctx.globalCompositeOperation = 'destination-in';
+      pb.ctx.imageSmoothingEnabled = s < 1;
+      const srcW = Math.min(w / s, maskCanvas.width - ox);
+      const srcH = Math.min(h / s, maskCanvas.height - oy);
+      if (srcW > 0 && srcH > 0) pb.ctx.drawImage(maskCanvas, ox, oy, srcW, srcH, 0, 0, srcW * s, srcH * s);
+      else pb.ctx.clearRect(0, 0, w, h);
+      pb.ctx.restore();
+    }
+    return { canvas: pb.canvas, x: x0, y: y0 };
+  }
+
   /** Płótno dokumentu rysowane pod podglądem (null = odsłaniamy płótno dokumentu przezroczystością). */
   public setBase(base: HTMLCanvasElement | null): void {
     this.base = base;
@@ -351,9 +458,13 @@ export class ViewportTileRenderer {
    * podglądu), więc wygląd nie zmienia się przy wejściu w sesję i po jej zatwierdzeniu.
    * dirty = fragment dokumentu do odświeżenia (null = całe płótno).
    */
-  public present(view: TileViewState, base: HTMLCanvasElement, dirty: SKRectI | null): void {
+  /** Świeżo złożone okno dokumentu: częściowe odświeżenie czyta z niego zamiast z ogromnego płótna dokumentu (patrz present). */
+  private srcWin: { canvas: HTMLCanvasElement; left: number; top: number } | null = null;
+
+  public present(view: TileViewState, base: HTMLCanvasElement, dirty: SKRectI | null, win?: { canvas: HTMLCanvasElement; left: number; top: number } | null): void {
     this.base = base;
     this.overlay = false;
+    this.gpuShown = false;
     const prev = this.shownView;
     let full = dirty === null;
     if (this.canvas.width !== view.width || this.canvas.height !== view.height) {
@@ -370,6 +481,9 @@ export class ViewportTileRenderer {
       this.drawBaseRect({ x0: 0, y0: 0, x1: view.width, y1: view.height });
     } else {
       const z = view.zoom;
+      // Źródłem jest małe okno, jeśli zawiera potrzebny fragment: czytanie z całego płótna dokumentu (np. 12 Mpx) wymusza
+      // jego migawkę, a przy następnym rysowaniu kosztowną kopię całego płótna - za każdym ruchem pędzla
+      this.srcWin = win ?? null;
       // margines 2 px: filtr dwuliniowy sięga sąsiednich pikseli dokumentu
       this.drawBaseRect({
         x0: Math.max(0, Math.floor(view.left + (dirty!.left - 2) * z)),
@@ -377,8 +491,15 @@ export class ViewportTileRenderer {
         x1: Math.min(view.width, Math.ceil(view.left + (dirty!.right + 2) * z)),
         y1: Math.min(view.height, Math.ceil(view.top + (dirty!.bottom + 2) * z)),
       });
+      this.srcWin = null;
     }
     this.view = saved;
+  }
+
+  /** Czy płótno kafelków pokazuje już dokument w tym widoku (tryb bez podglądu) - pełne odświeżenie jest wtedy zbędne. */
+  public isShowing(view: TileViewState): boolean {
+    const p = this.shownView;
+    return !!p && !this.overlay && p.left === view.left && p.top === view.top && p.zoom === view.zoom && p.width === view.width && p.height === view.height && this.canvas.width === view.width && this.canvas.height === view.height;
   }
 
   /** Płótno dokumentu zmieniło się (np. cofnięcie w trakcie sesji): przy następnej prośbie narysuj je od nowa. */
@@ -423,10 +544,19 @@ export class ViewportTileRenderer {
     if (sx1 > sx0 && sy1 > sy0) {
       c.imageSmoothingEnabled = z < 2;
       c.imageSmoothingQuality = 'low';
+      let src: HTMLCanvasElement = this.base;
+      let ox = 0;
+      let oy = 0;
+      const sw = this.srcWin;
+      if (sw && sx0 >= sw.left && sy0 >= sw.top && sx1 <= sw.left + sw.canvas.width && sy1 <= sw.top + sw.canvas.height) {
+        src = sw.canvas;
+        ox = sw.left;
+        oy = sw.top;
+      }
       c.drawImage(
-        this.base,
-        sx0,
-        sy0,
+        src,
+        sx0 - ox,
+        sy0 - oy,
         sx1 - sx0,
         sy1 - sy0,
         v.left + TIE_EPS + sx0 * z,
@@ -493,6 +623,9 @@ export class ViewportTileRenderer {
   }
 
   public dispose(): void {
+    this.gpu?.dispose();
+    this.gpu = null;
+    this.gpuShown = false;
     this.generation++;
     this.queue = [];
     this.cancelScheduled();
@@ -512,6 +645,7 @@ export class ViewportTileRenderer {
 
   /** Usuwa podgląd (cały obszar staje się przezroczysty) i przerywa renderowanie. */
   public clear(): void {
+    this.gpuShown = false;
     this.overlay = false;
     this.generation++;
     this.queue = [];
@@ -549,9 +683,11 @@ export class ViewportTileRenderer {
     const exact = !!req.exact;
     this.sliceAllowed = exact || !interacting;
     const v = req.view;
-    const prev = this.view;
     const T = VIEW_TILE_SIZE;
     const z = v.zoom;
+    if (this.tryGpu(req, exact)) return;
+    if (this.gpuShown) this.leaveGpu();
+    const prev = this.view;
 
     const overlay = this.computeOverlay(req.preview, z);
     const modeChanged = overlay !== this.overlay;
@@ -1754,7 +1890,7 @@ export class ViewportTileRenderer {
       bounds: { x0: -ox * s, y0: -oy * s, x1: (eng.width - ox) * s, y1: (eng.height - oy) * s },
     };
     const preview = this.preview!;
-    const hasSel = eng.selectionManager.hasActiveSelection;
+    const hasSel = eng.selectionAffectsActiveLayer;
     // Maska jest odczytywana dopiero, gdy faktycznie jest potrzebna (jej rastrowanie bywa odroczone)
     const overlay = this.overlay;
 

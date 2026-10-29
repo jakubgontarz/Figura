@@ -23,6 +23,8 @@ import {
   kitSrcTex,
   kitUni,
   kitUpload,
+  gpuSessionActive,
+  gpuSessionRun,
 } from './GpuFx.ts';
 import { LayerStyles, StyleBlend, StyleFx, boxRadii, gradientLut, parseColor, styleOn, stylesActive, stylesMargin } from './Styles.ts';
 
@@ -362,6 +364,41 @@ function run(g: GL, d: Uint8ClampedArray, w: number, h: number, st: LayerStyles,
   const src = kitSrcTex(g, w, h);
   const out = kitOutTex(g, w, h);
   kitUpload(g, src, d);
+  runStyles(g, src, out, w, h, st, fx, sc, cap);
+  kitRead(g, out, d);
+}
+
+/**
+ * Stylizacje jako krok sesji GPU (dane zostają na karcie): czyta bieżącą teksturę sesji i zapisuje wynik do drugiej.
+ * false = parametry poza zakresem albo błąd (sesja jest wtedy przerwana, a wynik trzeba policzyć inaczej).
+ */
+export function gpuStylesInSession(st: LayerStyles, w: number, h: number, fx: StyleFx): boolean {
+  if (!gpuSessionActive()) return false;
+  if (!stylesActive(st)) return true;
+  const g = kitGl();
+  if (!g) return false;
+  const sc = fx.scale || 1;
+  if (w * h < 4096 || w > kitMaxTex() || h > kitMaxTex()) return false;
+  const cap = distanceCap(st, sc);
+  if (cap > MAX_CAP) return false;
+  try {
+    kitBegin(g, w, h);
+    return gpuSessionRun(w, h, (gl, src, out) => runStyles(gl, src, out, w, h, st, fx, sc, cap));
+  } catch (e) {
+    console.warn('GpuStyles', e);
+    kitFail();
+    return false;
+  }
+}
+
+/** Czy stylizacje da się policzyć w sesji GPU dla okna o rozmiarze w x h (bez wykonywania). */
+export function gpuStylesFit(st: LayerStyles, w: number, h: number, scale: number): boolean {
+  if (!stylesActive(st)) return true;
+  if (w * h < 4096 || w > kitMaxTex() || h > kitMaxTex()) return false;
+  return distanceCap(st, scale || 1) <= MAX_CAP;
+}
+
+function runStyles(g: GL, src: Tex, out: Tex, w: number, h: number, st: LayerStyles, fx: StyleFx, sc: number, cap: number): void {
   const prPlane = kitProg(g, 'st_plane', FS_PLANE);
   const prE1 = kitProg(g, 'st_edt1', FS_EDT1);
   const prE2 = kitProg(g, 'st_edt2', FS_EDT2);
@@ -685,7 +722,8 @@ function run(g: GL, d: Uint8ClampedArray, w: number, h: number, st: LayerStyles,
     kitBind(g, 3, surf);
     ui(g, prOut, 'uSurf', 3);
   });
-  kitRead(g, out, d);
+  kitRelease(surf);
+  kitRelease(surf2);
 }
 
 function makeLut(g: GL, lut: Float32Array): Tex & { fbo: WebGLFramebuffer } {

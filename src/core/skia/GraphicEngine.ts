@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { PenNode, penAllPoints } from './PenPath.ts';
+import { PenNode, cloneNodes, penAllPoints } from './PenPath.ts';
 import { Layer, grayToAlpha, finishPassThrough } from './Layer.ts';
 import { Quad, drawPerspectiveMesh, drawPerspectivePreview, isConvexQuad, warpPerspectiveExact, warpPerspectivePreview, PerspectivePreview, WarpResult } from './Perspective.ts';
 import { renderGradientPreview } from './GradientRenderer.ts';
@@ -26,6 +26,7 @@ import {
   reviveCorrections,
 } from './Corrections.ts';
 import { MAX_FILTER_MARGIN } from './Filters.ts';
+import type { FxContext } from './Filters.ts';
 import { LayerStyles, cloneStyles, defaultStyles, reviveStyles, stylesCount, stylesEqual } from './Styles.ts';
 import { FillClient } from './FillClient.ts';
 import { BucketAlpha, WandCrop, bucketAlphaOfFlood, floodSelect } from './WandCore.ts';
@@ -54,7 +55,9 @@ import {
   renderVectorLine,
   renderVectorShape,
 } from './VectorRenderer.ts';
-import { RichText, renderVectorText } from './TextEngine.ts';
+import { RichText, pickCharStyle, renderVectorText } from './TextEngine.ts';
+import { VectorLayerOps } from './VectorLayerOps.ts';
+import { VectorObject, cloneVectorObjects, newVectorId, reviveVectorObjects } from './VectorObjects.ts';
 
 /**
  * Rysuje pełny fragment (przekształcony ramką `st`) przycięty konturem zaznaczenia. Wspólne dla podglądu i zatwierdzenia,
@@ -168,6 +171,8 @@ export type HistoryAction =
       other?: { before: TileSnapshotLike[]; after: TileSnapshotLike[] };
       before: { tx: number; ty: number; imgData: ImageData; hasContent: boolean }[];
       after: { tx: number; ty: number; imgData: ImageData; hasContent: boolean }[];
+      /** warstwa wektorowa: lista obiektów przed / po zmianie (wraca razem z pikselami) */
+      vector?: { before: VectorObject[]; after: VectorObject[] };
     }
   | {
       type: 'layerProperty';
@@ -240,6 +245,8 @@ export class GraphicEngine {
 
   public layers: Layer[] = [];
   public activeLayerIndex: number = 0;
+  /** Warstwy wektorowe: lista obiektów, edycja, kolejność (patrz VectorLayerOps). */
+  public vec: VectorLayerOps = new VectorLayerOps(this);
 
   public brushEngine: BrushEngine;
   public selectionManager: SelectionManager;
@@ -568,7 +575,18 @@ export class GraphicEngine {
     }
   }
 
+  /** Haki sesji wektorowych płótna (linia, krzywa, kształt, tekst): cofnięcie zatwierdza otwarty element i od razu go cofa. */
+  private vectorHook: { active: () => boolean; commit: () => void } | null = null;
+  public setVectorSessionHook(h: { active: () => boolean; commit: () => void } | null): void {
+    this.vectorHook = h;
+  }
+  public get hasLiveVectorSession(): boolean {
+    return !!this.vectorHook?.active();
+  }
+
   public undo(): boolean {
+    if (this.vectorHook?.active()) this.vectorHook.commit();
+    this.vec.settle();
     if (this.correctionSession) {
       this.commitCorrectionEdit();
     }
@@ -598,6 +616,7 @@ export class GraphicEngine {
           }
         }
         if (action.other) this.applyOtherSnapshot(layer, action.onMask, action.other.before);
+        if (action.vector) layer.vectorObjects = cloneVectorObjects(action.vector.before);
         layer.updateThumbnail();
       }
       this.redoStack.push(action);
@@ -664,6 +683,9 @@ export class GraphicEngine {
   }
 
   public redo(): boolean {
+    // otwarty element (linia/krzywa/kształt/tekst) nie może skasować stosu ponawiania
+    if (this.vectorHook?.active()) return false;
+    this.vec.settle();
     if (this.correctionSession) {
       this.commitCorrectionEdit();
     }
@@ -693,6 +715,7 @@ export class GraphicEngine {
           }
         }
         if (action.other) this.applyOtherSnapshot(layer, action.onMask, action.other.after);
+        if (action.vector) layer.vectorObjects = cloneVectorObjects(action.vector.after);
         layer.updateThumbnail();
       }
       this.undoStack.push(action);
@@ -807,7 +830,7 @@ export class GraphicEngine {
 
   public cut(): boolean {
     const layer = this.getActiveLayer();
-    if (!layer || layer.locked) return false;
+    if (!layer || layer.locked || layer.isVector) return false;
 
     if (!this.copy()) return false;
 
@@ -891,7 +914,7 @@ export class GraphicEngine {
 
   public pasteCanvas(pastedCanvas: HTMLCanvasElement, customMaskCanvas?: HTMLCanvasElement | null): boolean {
     const layer = this.getActiveLayer();
-    if (!layer || layer.locked) return false;
+    if (!layer || layer.locked || layer.isVector) return false;
 
     if (this.transformContentSession) {
       this.commitTransformContent();
@@ -1557,11 +1580,12 @@ export class GraphicEngine {
   }
 
   /** Zatwierdza otwarte sesje (przekształcanie, gradient, wiadro), zanim zmieni się cel edycji. */
-  private finishOpenSessions(): void {
+  public finishOpenSessions(): void {
     if (this.correctionSession) this.commitCorrectionEdit();
     if (this.transformContentSession) this.commitTransformContent();
     if (this.bucketSeedPoint) this.commitPaintBucketSession();
     if (this.gradientStartPoint) this.commitGradientSession();
+    if (this.vectorHook?.active()) this.vectorHook.commit();
   }
 
   public addLayerMask(fromSelection: boolean): boolean {
@@ -1651,6 +1675,58 @@ export class GraphicEngine {
     this.syncGroupFlags();
     this.pixelVersion++;
     this.lastDirtyRect = null;
+  }
+
+  /**
+   * Po zmianie pikseli w KONKRETNYCH kafelkach (wklejenie, kształt, wypełnienie, gradient): unieważnia kompozyt, ale nie
+   * oznacza wszystkich kafelków wszystkich warstw jako zmienionych - wyniki filtrów i stylizacji niezmienionych kafelków
+   * zostają w pamięci podręcznej, więc dodanie kształtu na dużym płótnie z efektem nie przelicza całej warstwy.
+   */
+  public markPixelsChanged(): void {
+    this.syncGroupFlags();
+    this.pixelVersion++;
+    bumpTileEpoch();
+    this.lastDirtyRect = null;
+  }
+
+  private warmToken = 0;
+
+  /**
+   * Po zakończeniu pociągnięcia na warstwie z efektami: wyniki filtrów kafelków pod pociągnięciem są nieaktualne, a ekran
+   * już pokazuje poprawny obraz (ostatnia klatka na żywo). Zamiast liczyć je od razu (mikro-zacięcie na końcu pociągnięcia),
+   * przeliczamy je w tle, po kawałku i tylko gdy nie trwa rysowanie ani nie czeka zdarzenie wejścia.
+   */
+  public scheduleFilterWarmup(rect: SKRectI): void {
+    const layer = this.getActiveLayer();
+    if (!layer || layer.isGroup || layer.isAdjustment || !layer.hasActiveCorrections || !layer.hasActiveFilters) return;
+    const m = Math.ceil(layer.filterMargin);
+    const g = layer.pixelGrid;
+    const grown: SKRectI = {
+      left: Math.max(0, rect.left - m), top: Math.max(0, rect.top - m),
+      right: Math.min(this.width, rect.right + m), bottom: Math.min(this.height, rect.bottom + m),
+      width: 0, height: 0,
+    };
+    grown.width = grown.right - grown.left;
+    grown.height = grown.bottom - grown.top;
+    if (grown.width <= 0 || grown.height <= 0) return;
+    const tiles = g.getTilesIntersectingRect(grown);
+    const token = ++this.warmToken;
+    let i = 0;
+    const step = (): void => {
+      if (token !== this.warmToken || this.brushEngine.isDrawing) return;
+      const sched = (navigator as unknown as { scheduling?: { isInputPending?: () => boolean } }).scheduling;
+      if (sched?.isInputPending?.()) {
+        setTimeout(step, 30);
+        return;
+      }
+      const t0 = performance.now();
+      while (i < tiles.length && performance.now() - t0 < 6) {
+        const t = tiles[i++];
+        if (layer.tileShown(t)) layer.renderCanvas(t);
+      }
+      if (i < tiles.length) setTimeout(step, 0);
+    };
+    setTimeout(step, 150);
   }
 
   public markAllLayersDirty(): void {
@@ -1792,6 +1868,41 @@ export class GraphicEngine {
     const act = this.getActiveLayer();
     if (act?.isGroup) {
       // nowa warstwa na wierzchu aktywnej grupy
+      layer.groupId = act.id;
+      this.layers.splice(this.activeLayerIndex, 0, layer);
+    } else {
+      layer.groupId = act?.groupId ?? null;
+      this.layers.splice(this.activeLayerIndex + 1, 0, layer);
+    }
+    this.normalizeLayers(layer);
+    this.markAllLayersDirty();
+    return layer;
+  }
+
+  /** Zaznaczenie wpływa na podgląd i rysowanie (nie dotyczy warstw wektorowych: obiekty nie są przycinane do zaznaczenia). */
+  public get selectionAffectsActiveLayer(): boolean {
+    return this.selectionManager.hasActiveSelection && !this.getActiveLayer()?.isVector;
+  }
+
+  /** Powód, dla którego piksele aktywnej warstwy nie mogą być edytowane narzędziami rastrowymi (null = można). */
+  public pixelEditBlockReason(layer: Layer | undefined = this.getActiveLayer()): string | null {
+    if (!layer) return null;
+    if (layer.locked) return 'Warstwa jest zablokowana';
+    if (layer.isVector) return 'Warstwa wektorowa: obiekty edytuje się narzędziem Manipulacja';
+    return null;
+  }
+
+  /** Nowa warstwa wektorowa: piksele pochodzą z listy obiektów, więc narzędzia rastrowe jej nie dotykają. */
+  public addVectorLayer(name?: string): Layer {
+    this.finishOpenSessions();
+    this.saveFullSnapshot('Dodanie warstwy wektorowej');
+    const n = this.layers.filter((l) => l.isVector).length + 1;
+    const layer = new Layer(`layer_${Date.now()}`, name || `Wektor ${n}`, this.width, this.height, this.tileSize);
+    layer.isVector = true;
+    layer.correctionsExpanded = true;
+    layer.updateThumbnail();
+    const act = this.getActiveLayer();
+    if (act?.isGroup) {
       layer.groupId = act.id;
       this.layers.splice(this.activeLayerIndex, 0, layer);
     } else {
@@ -1945,7 +2056,7 @@ export class GraphicEngine {
   /** Wpieka korekcje aktywnej warstwy w jej piksele, bez łączenia z warstwą poniżej. */
   public applyActiveLayerCorrections(): boolean {
     const layer = this.getActiveLayer();
-    if (!layer || layer.isGroup || layer.locked || (layer.corrections.length === 0 && stylesCount(layer.styles) === 0)) return false;
+    if (!layer || layer.isGroup || layer.isVector || layer.locked || (layer.corrections.length === 0 && stylesCount(layer.styles) === 0)) return false;
     this.finishOpenSessions();
     this.saveFullSnapshot('Zastosowanie efektów');
     this.maskView = null;
@@ -1963,7 +2074,7 @@ export class GraphicEngine {
     const topLayer = this.layers[this.activeLayerIndex];
     const bottomLayer = this.layers[this.activeLayerIndex - 1];
     // scalanie tylko w obrębie tego samego kontenera (grupy / poziomu głównego)
-    if (bottomLayer.isGroup || bottomLayer.isAdjustment || topLayer.isAdjustment || bottomLayer.groupId !== topLayer.groupId) return false;
+    if (bottomLayer.isGroup || bottomLayer.isAdjustment || bottomLayer.isVector || topLayer.isAdjustment || bottomLayer.groupId !== topLayer.groupId) return false;
     if (topLayer?.locked || bottomLayer?.locked) return false;
     this.saveFullSnapshot('Scalenie w dół');
     this.maskView = null;
@@ -2590,6 +2701,7 @@ export class GraphicEngine {
     const a = this.getActiveLayer();
     if (!a) return 'none';
     if (a.isAdjustment) return 'stack';
+    if (a.isVector) return 'none';
     const sc = this.selectedCorrection;
     if (sc && sc.layerId === a.id && a.corrections.some((c) => c.id === sc.id)) return 'correction';
     if (!a.isGroup && (a.corrections.length > 0 || stylesCount(a.styles) > 0)) return 'layer';
@@ -2613,7 +2725,7 @@ export class GraphicEngine {
     this.finishOpenSessions();
     if (mode === 'layer') return this.applyActiveLayerCorrections();
     if (mode === 'correction') {
-      if (act.locked) return false;
+      if (act.locked || act.isVector) return false;
       const id = this.selectedCorrection!.id;
       const c = act.corrections.find((x) => x.id === id);
       if (!c) return false;
@@ -2625,6 +2737,7 @@ export class GraphicEngine {
     } else {
       if (act.ownLocked || act.groupLocked) return false;
       const targets = this.adjustmentTargets(act).filter((l) => !l.locked);
+      if (targets.some((l) => l.isVector)) return false; // piksele warstwy wektorowej są pochodne – nie wpiekamy w nie efektów
       this.saveFullSnapshot('Zastosowanie korekcji');
       const list = act.adjustmentActive ? act.activeCorrections : [];
       for (const l of targets) {
@@ -3263,7 +3376,7 @@ export class GraphicEngine {
       const after = layer.tileGrid.getTilesSnapshot(rect);
       this.pushTileAction({ type: 'tiles', description: 'Wypełnienie wiaderkiem', layerIndex, before, after });
       layer.updateThumbnail();
-      this.markAllLayersDirty();
+      this.markPixelsChanged();
     }
     this.resetBucketSession();
   }
@@ -3405,7 +3518,7 @@ export class GraphicEngine {
     }
 
     layer.updateThumbnail();
-    this.markAllLayersDirty();
+    this.markPixelsChanged();
   }
 
   public commitGradientSession(): void {
@@ -3930,17 +4043,33 @@ export class GraphicEngine {
         tctx.restore();
       }
 
-      // Wklej wyrenderowany fragment do kafelków warstwy
-      for (let ty = 0; ty < layer.tileGrid.rows; ty++) {
-        for (let tx = 0; tx < layer.tileGrid.cols; tx++) {
-          const tile = layer.tileGrid.tiles[ty][tx];
-          tile.ctx.drawImage(
-            tempCanvas,
-            tile.pixelX, tile.pixelY, tile.width, tile.height,
-            0, 0, tile.width, tile.height
-          );
-          tile.hasContent = true;
-          tile.isDirty = true;
+      // Wklej wyrenderowany fragment do kafelków warstwy - tylko tam, gdzie leży przekształcony prostokąt
+      // (reszta tempCanvas jest przezroczysta; dotykanie wszystkich kafelków unieważniało efekty całej warstwy)
+      {
+        const cw = st.width / 2, ch = st.height / 2;
+        const cs = Math.cos(st.angle), sn = Math.sin(st.angle);
+        let bx0 = Infinity, by0 = Infinity, bx1 = -Infinity, by1 = -Infinity;
+        for (const [px, py] of [[-cw, -ch], [cw, -ch], [cw, ch], [-cw, ch]]) {
+          const x = st.pos.x + px * cs - py * sn;
+          const y = st.pos.y + px * sn + py * cs;
+          bx0 = Math.min(bx0, x); by0 = Math.min(by0, y); bx1 = Math.max(bx1, x); by1 = Math.max(by1, y);
+        }
+        const pad = 4;
+        const left = Math.max(0, Math.floor(bx0 - pad)), top = Math.max(0, Math.floor(by0 - pad));
+        const right = Math.min(this.width, Math.ceil(bx1 + pad)), bottom = Math.min(this.height, Math.ceil(by1 + pad));
+        const pasteRect: SKRectI = { left, top, right, bottom, width: Math.max(0, right - left), height: Math.max(0, bottom - top) };
+        {
+          const okRect = isFinite(bx0 + by0 + bx1 + by1);
+          const pasteTiles = okRect ? layer.tileGrid.getTilesIntersectingRect(pasteRect) : layer.tileGrid.tiles.flat();
+          for (const tile of pasteTiles) {
+            tile.ctx.drawImage(
+              tempCanvas,
+              tile.pixelX, tile.pixelY, tile.width, tile.height,
+              0, 0, tile.width, tile.height
+            );
+            tile.hasContent = true;
+            tile.isDirty = true;
+          }
         }
       }
       let otherHist: { before: TileSnapshotLike[]; after: TileSnapshotLike[] } | undefined;
@@ -3998,7 +4127,7 @@ export class GraphicEngine {
 
     this.selectionManager.commitTransformSelection();
     this.transformContentSession = null;
-    this.markAllLayersDirty();
+    this.markPixelsChanged();
     return true;
   }
 
@@ -4098,7 +4227,152 @@ export class GraphicEngine {
   // --- SZYBKI PIPELINE KOMPOZYCJI Z DIRTY-RECT ---
 
   /** Wywoływane po każdej kompozycji do płótna widoku (dirty = zmieniony fragment dokumentu albo null = całość). */
-  public onViewportComposited: ((target: HTMLCanvasElement, dirty: SKRectI | null) => void) | null = null;
+  public onViewportComposited: ((target: HTMLCanvasElement, dirty: SKRectI | null, win?: { canvas: HTMLCanvasElement; left: number; top: number } | null) => void) | null = null;
+
+  private winCanvas: HTMLCanvasElement | null = null;
+  private winLive: HTMLCanvasElement | null = null;
+  private winBrush: HTMLCanvasElement | null = null;
+  private static exactCanvas(c: HTMLCanvasElement | null, w: number, h: number): HTMLCanvasElement {
+    const cv = c ?? document.createElement('canvas');
+    if (cv.width !== w) cv.width = w;
+    if (cv.height !== h) cv.height = h;
+    return cv;
+  }
+
+  /**
+   * Plan przerysowania fragmentu przy aktywnych filtrach: U = obszar, który zmiana w `d` może zmienić (d + margines),
+   * W = okno obliczeń (U + margines), żeby wynik w U był taki sam jak przy przetwarzaniu całości.
+   * null = zbyt duże / zbyt złożone (grupy izolowane i „Przepuszczanie”) - wtedy pełne przerysowanie.
+   */
+  private planFilterWindow(d: SKRectI): { U: SKRectI; W: SKRectI } | null {
+    if (d.width <= 0 || d.height <= 0) return null;
+    const rl = this.getRenderList();
+    if (rl.iso) return null;
+    for (let i = 0; i < rl.layers.length; i++) {
+      if (this.renderPassStartAt(i) || this.renderPassEndAt(i)) return null;
+    }
+    const m = Math.ceil(this.renderFilterMargin);
+    if (!isFinite(m) || m > 1200) return null;
+    const A = 32;
+    const grow = (r: SKRectI, by: number): SKRectI => {
+      const left = Math.max(0, Math.floor((r.left - by) / A) * A);
+      const top = Math.max(0, Math.floor((r.top - by) / A) * A);
+      const right = Math.min(this.width, Math.ceil((r.right + by) / A) * A);
+      const bottom = Math.min(this.height, Math.ceil((r.bottom + by) / A) * A);
+      return { left, top, right, bottom, width: right - left, height: bottom - top };
+    };
+    const U = grow(d, m);
+    const W = grow(U, m + 4);
+    if (W.width * W.height > 0.4 * this.width * this.height) return null;
+    return { U, W };
+  }
+
+  /** Składa warstwy w oknie W (bufor o rozmiarze okna) i przenosi na płótno dokumentu tylko fragment U. */
+  private renderFilterWindow(ctx: CanvasRenderingContext2D, U: SKRectI, W: SKRectI, isDrawingLive: boolean): void {
+    const wl = W.left, wt = W.top, ww = W.width, wh = W.height;
+    this.winCanvas = GraphicEngine.exactCanvas(this.winCanvas, ww, wh);
+    const wc = this.winCanvas;
+    const wctx = wc.getContext('2d', { willReadFrequently: true })!;
+    wctx.setTransform(1, 0, 0, 1, 0, 0);
+    wctx.globalAlpha = 1;
+    wctx.globalCompositeOperation = 'source-over';
+    wctx.clearRect(0, 0, ww, wh);
+    const fx: FxContext = {
+      scale: 1, docX0: wl, docY0: wt, docW: this.width, docH: this.height,
+      bounds: { x0: -wl, y0: -wt, x1: this.width - wl, y1: this.height - wt },
+    };
+    const rLayers = this.renderLayers;
+    const rActive = this.renderActiveIndex;
+    for (let i = 0; i < rLayers.length; i++) {
+      const layer = rLayers[i];
+      if (layer.isAdjustment) {
+        if (layer.adjustmentActive) layer.applyCorrectionsToCanvas(wc, ww, wh, 0, 0, fx);
+        continue;
+      }
+      if (!layer.visible || layer.opacity <= 0) continue;
+      const tiles = layer.pixelGrid.getTilesIntersectingRect(W);
+      const live = i === rActive && isDrawingLive;
+      if (!live) {
+        wctx.save();
+        wctx.globalAlpha = layer.opacity;
+        wctx.globalCompositeOperation = getCanvasCompositeOperation(layer.blendMode);
+        for (const tile of tiles) {
+          if (tile.hasContent || layer.grayView || layer.tileShown(tile)) {
+            const rc = layer.renderCanvas(tile);
+            if (rc) wctx.drawImage(rc, tile.pixelX - wl, tile.pixelY - wt);
+          }
+        }
+        wctx.restore();
+        continue;
+      }
+      // aktywna warstwa w trakcie rysowania: piksele + pociągnięcie, potem maska i filtry na całym oknie
+      this.winLive = GraphicEngine.exactCanvas(this.winLive, ww, wh);
+      const scratch = this.winLive;
+      const sctx = scratch.getContext('2d', { willReadFrequently: true })!;
+      sctx.setTransform(1, 0, 0, 1, 0, 0);
+      sctx.globalAlpha = 1;
+      sctx.globalCompositeOperation = 'source-over';
+      sctx.clearRect(0, 0, ww, wh);
+      const editTiles = layer.tileGrid === layer.pixelGrid ? tiles : layer.tileGrid.getTilesIntersectingRect(W);
+      for (const tile of editTiles) {
+        if (tile.hasContent) sctx.drawImage(tile.canvas, tile.pixelX - wl, tile.pixelY - wt);
+      }
+      const isStamp = !!this.brushEngine.activeStampSettings;
+      const bSettings = isStamp ? this.brushEngine.activeStampSettings! : this.brushEngine.activeBrushSettings!;
+      const brushBlend = this.brushEngine.isEraser ? 'Clear' : bSettings.blendMode;
+      const brushAlpha = isStamp ? this.brushEngine.activeStampAlpha : ('color' in bSettings ? bSettings.color.a / 255 : 1.0);
+      let stroke: HTMLCanvasElement = this.brushEngine.strokeCanvas;
+      let sx = wl, sy = wt;
+      if (this.selectionManager.hasActiveSelection) {
+        this.winBrush = GraphicEngine.exactCanvas(this.winBrush, ww, wh);
+        const bctx = this.winBrush.getContext('2d')!;
+        bctx.globalCompositeOperation = 'source-over';
+        bctx.clearRect(0, 0, ww, wh);
+        bctx.drawImage(stroke, wl, wt, ww, wh, 0, 0, ww, wh);
+        bctx.globalCompositeOperation = 'destination-in';
+        bctx.drawImage(this.selectionManager.maskCanvas, wl, wt, ww, wh, 0, 0, ww, wh);
+        bctx.globalCompositeOperation = 'source-over';
+        stroke = this.winBrush;
+        sx = 0; sy = 0;
+      }
+      sctx.save();
+      sctx.globalAlpha = brushAlpha;
+      sctx.globalCompositeOperation = getCanvasCompositeOperation(brushBlend);
+      sctx.drawImage(stroke, sx, sy, ww, wh, 0, 0, ww, wh);
+      sctx.restore();
+      if (layer.grayView) {
+        const imgData = sctx.getImageData(0, 0, ww, wh);
+        const d = imgData.data;
+        for (let j = 0; j < d.length; j += 4) {
+          if (d[j + 3] === 0) continue;
+          const lum = Math.round(0.299 * d[j] + 0.587 * d[j + 1] + 0.114 * d[j + 2]);
+          d[j] = d[j + 1] = d[j + 2] = lum;
+        }
+        sctx.putImageData(imgData, 0, 0);
+      }
+      const liveSrc = this.brushEngine.stampDualCanvas && layer.maskGrid && !layer.grayView
+        ? this.composeLinkedStampLive(layer, wl, wt, ww, wh)
+        : layer.editMask && layer.maskGrid && !layer.grayView
+        ? layer.composeWithMaskRegion(scratch, wl, wt, ww, wh)
+        : (layer.maskGrid && !layer.editMask && !layer.grayView
+          ? layer.applyMaskToRegion(scratch, wl, wt, ww, wh)
+          : scratch);
+      layer.applyCorrectionsToCanvas(liveSrc, ww, wh, 0, 0, fx);
+      wctx.save();
+      wctx.globalAlpha = layer.opacity;
+      wctx.globalCompositeOperation = getCanvasCompositeOperation(layer.blendMode);
+      wctx.drawImage(liveSrc, 0, 0, ww, wh);
+      wctx.restore();
+    }
+    ctx.save();
+    ctx.clearRect(U.left, U.top, U.width, U.height);
+    ctx.drawImage(wc, U.left - wl, U.top - wt, U.width, U.height, U.left, U.top, U.width, U.height);
+    ctx.restore();
+  }
+
+  /** Fragment płótna dokumentu odświeżony ostatnim `compositeToViewport` (null = całe płótno). */
+  private viewportRefreshRect: SKRectI | null = null;
+  private viewportRefreshWin: { canvas: HTMLCanvasElement; left: number; top: number } | null = null;
 
   public compositeToViewport(
     targetCanvas: HTMLCanvasElement,
@@ -4111,6 +4385,8 @@ export class GraphicEngine {
     customPreviewBlendMode?: SKBlendMode | null
   ): void {
     const wasResized = targetCanvas.width !== this.width || targetCanvas.height !== this.height;
+    this.viewportRefreshRect = null;
+    this.viewportRefreshWin = null;
     this.compositeToViewportImpl(
       targetCanvas,
       dirtyRect,
@@ -4123,8 +4399,10 @@ export class GraphicEngine {
     );
     const hook = this.onViewportComposited;
     if (hook) {
-      const partial = !wasResized && !customPreviewRenderer && !!dirtyRect && dirtyRect.width > 0 && dirtyRect.height > 0;
-      hook(targetCanvas, partial ? dirtyRect! : null);
+      // faktycznie odświeżony fragment (przy filtrach okno zmian jest większe od prostokąta pędzla; null = całość)
+      const rr = this.viewportRefreshRect as SKRectI | null;
+      const partial = !wasResized && !customPreviewRenderer && !!rr && rr.width > 0 && rr.height > 0;
+      hook(targetCanvas, partial ? rr : null, partial ? this.viewportRefreshWin : null);
     }
   }
 
@@ -4153,10 +4431,22 @@ export class GraphicEngine {
     if (customPreviewRenderer) {
       dirtyRect = null;
     }
-    // filtry czytają sąsiednie piksele: zmiana w jednym miejscu zmienia wygląd wokół, więc zawsze pełne przerysowanie
-    if (this.renderHasFilters) dirtyRect = null;
-
     const isDrawingLive = this.brushEngine.isDrawing && (!!this.brushEngine.activeBrushSettings || !!this.brushEngine.activeStampSettings);
+
+    // filtry czytają sąsiednie piksele: zmiana w jednym miejscu zmienia wygląd wokół. Mały fragment liczymy w oknie
+    // z marginesem filtrów (koszt zależy od pędzla, nie od rozmiaru płótna); w pozostałych przypadkach pełne przerysowanie.
+    const canWindow = !!dirtyRect && !customPreviewRenderer && !this.transformContentSession;
+    if (canWindow || this.renderHasFilters) {
+      const plan = canWindow ? this.planFilterWindow(dirtyRect!) : null;
+      if (plan) {
+        this.renderFilterWindow(ctx, plan.U, plan.W, isDrawingLive);
+        this.viewportRefreshRect = plan.U;
+        this.viewportRefreshWin = { canvas: this.winCanvas!, left: plan.W.left, top: plan.W.top };
+        this.lastDirtyRect = plan.U;
+        return;
+      }
+      if (this.renderHasFilters) dirtyRect = null;
+    }
 
     // SZYBKI DIRTY-RECT PODCZAS RYSOWANIA
     if (dirtyRect && dirtyRect.width > 0 && dirtyRect.height > 0) {
@@ -4316,6 +4606,7 @@ export class GraphicEngine {
 
         ctx.restore();
         this.lastDirtyRect = dirtyRect;
+        this.viewportRefreshRect = dirtyRect;
         return;
       }
     }
@@ -4440,7 +4731,7 @@ export class GraphicEngine {
         customPreviewRenderer(vsCtx);
 
         // 2. Jeśli aktywne jest zaznaczenie, maskujemy kształt przed nałożeniem na warstwę
-        if (this.selectionManager.hasActiveSelection) {
+        if (this.selectionAffectsActiveLayer) {
           vsCtx.save();
           vsCtx.globalCompositeOperation = 'destination-in';
           vsCtx.drawImage(this.selectionManager.maskCanvas, 0, 0);
@@ -4543,6 +4834,10 @@ export class GraphicEngine {
     p1: SKPoint,
     settings: LineAndCurveSettings
   ): void {
+    if (this.vec.editing || this.vec.targetLayer()) {
+      this.vec.commitObject({ id: newVectorId(), name: null, visible: true, kind: 'line', p0: { ...p0 }, p1: { ...p1 }, settings });
+      return;
+    }
     const layer = this.getActiveLayer();
     if (!layer || !layer.visible) return;
 
@@ -4579,8 +4874,12 @@ export class GraphicEngine {
     this.bakeCanvasToLayer(layer, tempCanvas, dirtyRect, 'Linia', settings.blendMode);
   }
 
-  public commitVectorPath(nodes: PenNode[], closed: boolean, settings: LineAndCurveSettings): void {
+  public commitVectorPath(nodes: PenNode[], closed: boolean, settings: LineAndCurveSettings, freehand = false): void {
     if (nodes.length < 2) return;
+    if (this.vec.editing || this.vec.targetLayer()) {
+      this.vec.commitObject({ id: newVectorId(), name: null, visible: true, kind: 'path', nodes: cloneNodes(nodes), closed, settings, freehand });
+      return;
+    }
     const layer = this.getActiveLayer();
     if (!layer || !layer.visible) return;
 
@@ -4627,6 +4926,10 @@ export class GraphicEngine {
     flipX: boolean = false,
     flipY: boolean = false
   ): void {
+    if (this.vec.editing || this.vec.targetLayer()) {
+      this.vec.commitObject({ id: newVectorId(), name: null, visible: true, kind: 'shape', center: { ...center }, width, height, angle, flipX, flipY, settings });
+      return;
+    }
     const layer = this.getActiveLayer();
     if (!layer || !layer.visible) return;
 
@@ -4671,8 +4974,20 @@ export class GraphicEngine {
     angle: number,
     rt: RichText,
     settings: TextToolSettings,
-    fallbackStyle?: TextCharStyle
+    fallbackStyle?: TextCharStyle,
+    autoHeight = false
   ): void {
+    if (this.vec.editing || this.vec.targetLayer()) {
+      if (rt.length === 0) {
+        if (this.vec.editing) this.vec.deleteEdited();
+        return;
+      }
+      this.vec.commitObject({
+        id: newVectorId(), name: null, visible: true, kind: 'text', center: { ...center }, width, height, angle, autoHeight,
+        runs: rt.runs.map((r) => ({ text: r.text, style: { ...r.style } })), settings, fallback: fallbackStyle ?? pickCharStyle(settings),
+      });
+      return;
+    }
     const layer = this.getActiveLayer();
     if (!layer || !layer.visible) return;
     if (rt.length === 0) return;
@@ -4759,7 +5074,7 @@ export class GraphicEngine {
     });
 
     layer.updateThumbnail();
-    this.markAllLayersDirty();
+    this.markPixelsChanged();
   }
 
   private renderShapePreview(
@@ -5104,6 +5419,8 @@ export class GraphicEngine {
         locked: l.ownLocked || undefined,
         isGroup: l.isGroup || undefined,
         isAdjustment: l.isAdjustment || undefined,
+        isVector: l.isVector || undefined,
+        vectorObjects: l.isVector ? cloneVectorObjects(l.vectorObjects) : undefined,
         groupId: l.groupId,
         expanded: l.isGroup ? l.expanded : undefined,
         opacity: l.opacity,
@@ -5147,6 +5464,8 @@ export class GraphicEngine {
         );
         layer.isGroup = isGroupData;
         layer.isAdjustment = lData.isAdjustment === true && !isGroupData;
+        layer.isVector = lData.isVector === true && !isGroupData && !layer.isAdjustment;
+        if (layer.isVector) layer.vectorObjects = reviveVectorObjects(lData.vectorObjects);
         layer.groupId = typeof lData.groupId === 'string' ? lData.groupId : null;
         layer.expanded = lData.expanded !== false;
         layer.locked = lData.locked === true;

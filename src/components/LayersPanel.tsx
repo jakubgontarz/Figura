@@ -22,7 +22,11 @@ import {
   Link2,
   Link2Off,
   Lock,
+  Minus,
   PenTool,
+  Shapes,
+  Spline,
+  Type,
   SlidersHorizontal,
   Sparkles,
   Split,
@@ -35,12 +39,27 @@ import { Layer, subscribeThumbnails } from '../core/skia/Layer.ts';
 import { BLEND_MODES, SKBlendMode } from '../core/skia/types.ts';
 import { CORRECTION_DEFS, FILTER_DEFS, CorrectionType, correctionName, isFilterType } from '../core/skia/Corrections.ts';
 import { stylesCount } from '../core/skia/Styles.ts';
+import { VectorObject, vectorObjectLabel } from '../core/skia/VectorObjects.ts';
 
 interface LayersPanelProps {
   layers: Layer[];
   activeLayerIndex: number;
   onSelectLayer: (index: number) => void;
   onAddLayer: () => void;
+  /** Nowa warstwa wektorowa (przycisk na dole panelu) */
+  onAddVectorLayer?: () => void;
+  /** Obiekt wektorowy edytowany narzędziem Manipulacja (podświetlenie wiersza) */
+  editingVectorObject?: { layerId: string; id: string } | null;
+  /** Zaznaczone obiekty wektorowe (podświetlenie na liście) i zmiana zaznaczenia (Ctrl / Shift + klik). */
+  selectedVectorObjects?: { layerId: string; ids: string[] } | null;
+  /** Nowy obiekt w trakcie rysowania (jeszcze nie zatwierdzony): wiersz zastępczy na szczycie listy obiektów. */
+  pendingVectorObject?: { layerId: string; label: string } | null;
+  onSelectVectorObjects?: (layerIndex: number, ids: string[]) => void;
+  onEditVectorObject?: (layerIndex: number, id: string) => void;
+  onToggleVectorObject?: (layerIndex: number, id: string, visible: boolean) => void;
+  onRemoveVectorObject?: (layerIndex: number, id: string) => void;
+  onRenameVectorObject?: (layerIndex: number, id: string, name: string) => void;
+  onMoveVectorObject?: (fromLayerIndex: number, id: string, toLayerIndex: number, toPos: number) => void;
   onRemoveLayer: () => void;
   onDuplicateLayer: () => void;
   onMergeDown: () => void;
@@ -148,6 +167,16 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
   activeLayerIndex,
   onSelectLayer,
   onAddLayer,
+  onAddVectorLayer,
+  editingVectorObject,
+  onEditVectorObject,
+  selectedVectorObjects,
+  pendingVectorObject,
+  onSelectVectorObjects,
+  onToggleVectorObject,
+  onRemoveVectorObject,
+  onRenameVectorObject,
+  onMoveVectorObject,
   onRemoveLayer,
   onDuplicateLayer,
   onMergeDown,
@@ -197,6 +226,10 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
   // Korekcje: przeciągana korekcja, cel upuszczenia i menu dodawania
   const [corrDrag, setCorrDrag] = useState<{ layerIndex: number; id: string } | null>(null);
   const [corrOver, setCorrOver] = useState<{ layerIndex: number; id: string | null; place: 'before' | 'after' | 'into' } | null>(null);
+  // Obiekty wektorowe: przeciągany obiekt, cel upuszczenia i zmiana nazwy
+  const [objDrag, setObjDrag] = useState<{ layerIndex: number; id: string } | null>(null);
+  const [objOver, setObjOver] = useState<{ layerIndex: number; id: string | null; place: 'before' | 'after' } | null>(null);
+  const [renamingObj, setRenamingObj] = useState<{ id: string; name: string } | null>(null);
   const [corrOnlyActive, setCorrOnlyActive] = useState(true);
   const [corrMenu, setCorrMenu] = useState<{ left: number; bottom: number; maxHeight: number; kind: 'corr' | 'filter' } | null>(null);
   const corrBtnRef = useRef<HTMLDivElement | null>(null);
@@ -207,6 +240,8 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
   useEffect(() => subscribeThumbnails(() => setThumbTick((t) => t + 1)), []);
 
   const activeLayer = layers[activeLayerIndex] || layers[0];
+  // przyciski paska (góra / dół / duplikuj / usuń) działają na zaznaczonych obiektach wektorowych aktywnej warstwy
+  const objSel = !!selectedVectorObjects && !!activeLayer && selectedVectorObjects.layerId === activeLayer.id && selectedVectorObjects.ids.length > 0;
   const maskSelected = !!activeLayer?.hasMask && activeLayer.editMask;
 
   const handleStartRename = (index: number, currentName: string) => {
@@ -263,6 +298,15 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
   };
 
   const handleDragOver = (e: React.DragEvent, targetLayer: Layer, index: number) => {
+    if (objDrag) {
+      // obiekt wektorowy można upuścić na inną warstwę wektorową (trafia na jej szczyt)
+      if (targetLayer.isVector && index !== objDrag.layerIndex) {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        if (!objOver || objOver.layerIndex !== index || objOver.id !== null) setObjOver({ layerIndex: index, id: null, place: 'before' });
+      }
+      return;
+    }
     if (corrDrag) {
       // przeciągany jest efekt z listy warstwy: środek wiersza = do listy tej warstwy (grupy: na szczyt grupy), brzegi = między warstwy
       e.preventDefault();
@@ -289,6 +333,14 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
 
   const handleDrop = (e: React.DragEvent, targetLayer: Layer, targetIndex: number) => {
     e.preventDefault();
+    if (objDrag) {
+      if (targetLayer.isVector && targetIndex !== objDrag.layerIndex) {
+        onMoveVectorObject?.(objDrag.layerIndex, objDrag.id, targetIndex, Number.MAX_SAFE_INTEGER);
+      }
+      setObjDrag(null);
+      setObjOver(null);
+      return;
+    }
     if (corrDrag) {
       const place = corrPlaceOnLayerRow(e, targetLayer);
       if (place === 'into' && !targetLayer.isGroup && !targetLayer.isAdjustment) {
@@ -316,6 +368,8 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
     setDragOver(null);
     setCorrDrag(null);
     setCorrOver(null);
+    setObjDrag(null);
+    setObjOver(null);
   };
 
   const openCorrMenu = (kind: 'corr' | 'filter' = 'corr') => {
@@ -421,13 +475,13 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
 
       {/* Górny pasek: operacje na aktywnej warstwie */}
       <div className="flex items-center gap-1 mb-1.5 shrink-0 w-full">
-        <IconBtn title="Przesuń w górę" onClick={onMoveUp}>
+        <IconBtn title={objSel ? 'Przesuń zaznaczone obiekty w górę' : 'Przesuń w górę'} onClick={onMoveUp}>
           <ArrowUp size={12} />
         </IconBtn>
-        <IconBtn title="Przesuń w dół" onClick={onMoveDown}>
+        <IconBtn title={objSel ? 'Przesuń zaznaczone obiekty w dół' : 'Przesuń w dół'} onClick={onMoveDown}>
           <ArrowDown size={12} />
         </IconBtn>
-        <IconBtn title={activeLayer?.isGroup ? 'Duplikuj grupę' : 'Duplikuj warstwę'} onClick={onDuplicateLayer}>
+        <IconBtn title={objSel ? 'Duplikuj zaznaczone obiekty' : activeLayer?.isGroup ? 'Duplikuj grupę' : 'Duplikuj warstwę'} onClick={onDuplicateLayer}>
           <Copy size={12} />
         </IconBtn>
         <IconBtn
@@ -453,7 +507,9 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
         <div className="flex-1" />
         <IconBtn
           title={
-            maskSelected
+            objSel
+              ? 'Usuń zaznaczone obiekty'
+              : maskSelected
               ? 'Usuń maskę (zaznaczona jest maska)'
               : activeLayer?.isGroup
                 ? 'Usuń grupę razem z jej warstwami'
@@ -462,7 +518,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                   : 'Usuń warstwę'
           }
           onClick={onRemoveLayer}
-          disabled={!selectedCorrection && layers.filter((l) => !l.isGroup && !l.isAdjustment).length <= 1 && !maskSelected && !activeLayer?.isGroup && !activeLayer?.isAdjustment}
+          disabled={!objSel && !selectedCorrection && layers.filter((l) => !l.isGroup && !l.isAdjustment).length <= 1 && !maskSelected && !activeLayer?.isGroup && !activeLayer?.isAdjustment}
           danger
         >
           <Trash2 size={12} />
@@ -480,8 +536,12 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
 
           const corrInto = corrOver && corrOver.layerIndex === index && corrOver.id === null;
           const hasCorr = !isGroup && !layer.isAdjustment && layer.corrections.length > 0;
+          const isVec = layer.isVector && !isGroup && !layer.isAdjustment;
+          const objIntoHere = !!objOver && objOver.layerIndex === index && objOver.id === null;
           // grupa pokazuje listę korekcji razem z listą swoich warstw (jeden przycisk rozwijania)
           const corrListOpen = hasCorr && layer.correctionsExpanded;
+          const pendingHere = isVec && !!pendingVectorObject && pendingVectorObject.layerId === layer.id;
+          const objListOpen = isVec && (layer.vectorObjects.length > 0 || pendingHere) && (layer.correctionsExpanded || pendingHere);
           const showBlend = layer.blendMode !== 'SrcOver' && layer.blendMode !== 'PassThrough';
           const nStyles = !isGroup && !layer.isAdjustment ? stylesCount(layer.styles) : 0;
 
@@ -539,13 +599,13 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
               onDragEnd={handleDragEnd}
               onClick={() => onSelectLayer(index)}
               style={isChild ? { marginLeft: 14 } : undefined}
-              className={`relative flex items-center gap-2 p-1 rounded cursor-pointer border transition-all ${
+              className={`relative flex items-center gap-1 p-1 rounded cursor-pointer border transition-all ${
                 isSelected
                   ? 'bg-[#10549c] border-[#2980b9] text-white shadow-sm'
                   : 'bg-[#1e1e1e] hover:bg-[#282828] border-transparent text-[#cccccc]'
               } ${dropHere === 'before' ? 'border-t-2 border-t-[#00ffcc]' : ''} ${
                 dropHere === 'after' ? 'border-b-2 border-b-[#00ffcc]' : ''
-              } ${dropHere === 'into' || corrInto ? 'ring-2 ring-[#00ffcc]' : ''}`}
+              } ${dropHere === 'into' || corrInto || objIntoHere ? 'ring-2 ring-[#00ffcc]' : ''}`}
             >
               {/* Miniatura Warstwy: slot 35x35 bez szarej ramki i czarnego tła; ramka tylko wokół samej miniaturki */}
               <div
@@ -708,7 +768,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
               )}
 
               {/* Nazwa warstwy (1. linia) + skrót trybu mieszania, liczba efektów i rozwijanie (2. linia) */}
-              <div className="flex-1 min-w-0 flex flex-col justify-center gap-0.5">
+              <div className="@container flex-1 min-w-0 flex flex-col justify-center gap-0.5 pl-0.5">
                 <div className={dimmed ? 'opacity-60' : ''}>
                   {editingIndex === index ? (
                     <input
@@ -735,11 +795,20 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                   )}
                 </div>
 
-                {(showBlend || hasCorr || isGroup || nStyles > 0) && (
+                {(showBlend || hasCorr || isGroup || nStyles > 0 || isVec) && (
                   <div className="flex items-center gap-1.5 h-[16px] min-w-0">
                     {showBlend && (
                       <span className="bg-[#000]/40 px-1 py-0.5 rounded text-[8.5px] uppercase font-mono opacity-75 shrink-0" title={`Tryb mieszania: ${layer.blendMode}`}>
                         {layer.blendMode.slice(0, 3)}
+                      </span>
+                    )}
+                    {isVec && (
+                      <span
+                        title={`Warstwa wektorowa: obiektów ${layer.vectorObjects.length}`}
+                        className="flex items-center gap-0.5 text-[9px] text-[#e0b84a] shrink-0 opacity-90"
+                      >
+                        <PenTool size={9} strokeWidth={2.2} />
+                        <span>{layer.vectorObjects.length}</span>
                       </span>
                     )}
                     {hasCorr && layer.corrections.some((c) => !isFilterType(c.type)) && (
@@ -748,7 +817,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                         className="flex items-center gap-0.5 text-[9px] text-[#9cdcfe] shrink-0 opacity-90"
                       >
                         <SlidersHorizontal size={9} strokeWidth={2.2} />
-                        {layer.corrections.filter((c) => !isFilterType(c.type)).length}
+                        <span className="hidden @min-[150px]:inline">{layer.corrections.filter((c) => !isFilterType(c.type)).length}</span>
                       </span>
                     )}
                     {hasCorr && layer.corrections.some((c) => isFilterType(c.type)) && (
@@ -757,7 +826,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                         className="flex items-center gap-0.5 text-[9px] text-[#9cdcfe] shrink-0 opacity-90"
                       >
                         <Filter size={9} strokeWidth={2.2} />
-                        {layer.corrections.filter((c) => isFilterType(c.type)).length}
+                        <span className="hidden @min-[150px]:inline">{layer.corrections.filter((c) => isFilterType(c.type)).length}</span>
                       </span>
                     )}
                     {nStyles > 0 && (
@@ -776,7 +845,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                           } ${editingStylesLayerId === layer.id ? 'bg-black/40' : ''}`}
                         >
                           <Sparkles size={9} strokeWidth={2.2} />
-                          {nStyles}
+                          <span className="hidden @min-[150px]:inline">{nStyles}</span>
                         </button>
                         <button
                           type="button"
@@ -809,7 +878,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                       </button>
                     )}
                     {/* Rozwiń / zwiń listę korekcji warstwy (ten sam przycisk co przy grupach) */}
-                    {hasCorr && !isGroup && (
+                    {(hasCorr || isVec) && !isGroup && (
                       <button
                         type="button"
                         onClick={(e) => {
@@ -817,7 +886,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                           onToggleCorrectionsExpanded(index);
                         }}
                         onDoubleClick={(e) => e.stopPropagation()}
-                        title={layer.correctionsExpanded ? 'Zwiń listę korekcji' : 'Rozwiń listę korekcji'}
+                        title={layer.correctionsExpanded ? (isVec ? 'Zwiń listę obiektów i efektów' : 'Zwiń listę korekcji') : isVec ? 'Rozwiń listę obiektów i efektów' : 'Rozwiń listę korekcji'}
                         className="p-0.5 rounded bg-black/40 hover:bg-black/70 text-[#ddd] cursor-pointer shrink-0"
                       >
                         {layer.correctionsExpanded ? <ChevronDown size={11} strokeWidth={2.4} /> : <ChevronRight size={11} strokeWidth={2.4} />}
@@ -945,6 +1014,121 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                   })}
               </div>
             )}
+            {/* Lista obiektów warstwy wektorowej: od góry najwyżej narysowany. Przeciąganie zmienia kolejność lub przenosi na inną warstwę wektorową */}
+            {objListOpen && (
+              <div style={{ marginLeft: (isChild ? 14 : 0) + 12 }} className="space-y-0.5">
+                {pendingHere && (
+                  <div className="flex items-center gap-1.5 h-[22px] pl-1 pr-0.5 rounded border border-[#e0b84a] bg-[#3a3217] text-white text-[10.5px] italic">
+                    <span className="w-[18px] shrink-0" />
+                    <span className="flex-1 min-w-0 truncate">{pendingVectorObject!.label} (rysowanie…)</span>
+                  </div>
+                )}
+                {layer.vectorObjects
+                  .map((o, oi) => ({ o, oi }))
+                  .reverse()
+                  .map(({ o, oi }) => {
+                    const over = objOver && objOver.layerIndex === index && objOver.id === o.id ? objOver.place : null;
+                    const beingDragged = !!objDrag && objDrag.layerIndex === index && objDrag.id === o.id;
+                    const editing = !!selectedVectorObjects && selectedVectorObjects.layerId === layer.id && selectedVectorObjects.ids.includes(o.id);
+                    const KindIcon = o.kind === 'line' ? Minus : o.kind === 'path' ? Spline : o.kind === 'shape' ? Shapes : Type;
+                    return (
+                      <div
+                        key={o.id}
+                        draggable={renamingObj?.id !== o.id}
+                        onDragStart={(e) => {
+                          e.stopPropagation();
+                          e.dataTransfer.setData('text/plain', `vobj:${o.id}`);
+                          e.dataTransfer.effectAllowed = 'move';
+                          setObjDrag({ layerIndex: index, id: o.id });
+                        }}
+                        onDragOver={(e) => {
+                          if (!objDrag || !layer.isVector) return;
+                          e.preventDefault();
+                          e.stopPropagation();
+                          e.dataTransfer.dropEffect = 'move';
+                          const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                          const place = e.clientY - r.top < r.height / 2 ? 'before' : 'after';
+                          if (!objOver || objOver.layerIndex !== index || objOver.id !== o.id || objOver.place !== place) setObjOver({ layerIndex: index, id: o.id, place });
+                        }}
+                        onDrop={(e) => {
+                          if (!objDrag) return;
+                          e.preventDefault();
+                          e.stopPropagation();
+                          const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                          const place = e.clientY - r.top < r.height / 2 ? 'before' : 'after';
+                          // lista jest wyświetlana od końca: „nad” wierszem = później w tablicy
+                          const ins = place === 'before' ? oi + 1 : oi;
+                          const src = layers[objDrag.layerIndex];
+                          const srcIdx = src ? src.vectorObjects.findIndex((x) => x.id === objDrag.id) : -1;
+                          const final = objDrag.layerIndex === index && srcIdx >= 0 && srcIdx < ins ? ins - 1 : ins;
+                          onMoveVectorObject?.(objDrag.layerIndex, objDrag.id, index, final);
+                          setObjDrag(null);
+                          setObjOver(null);
+                        }}
+                        onDragEnd={handleDragEnd}
+                        onClick={(e) => {
+                          if (index !== activeLayerIndex) onSelectLayer(index);
+                          const cur = selectedVectorObjects && selectedVectorObjects.layerId === layer.id ? selectedVectorObjects.ids : [];
+                          if (e.shiftKey && cur.length > 0 && onSelectVectorObjects) {
+                            // zakres od ostatnio zaznaczonego do klikniętego (w kolejności listy)
+                            const order = layer.vectorObjects.map((x) => x.id);
+                            const a = order.indexOf(cur[cur.length - 1]);
+                            const b = order.indexOf(o.id);
+                            const [lo, hi] = a < b ? [a, b] : [b, a];
+                            onSelectVectorObjects(index, [...new Set([...cur, ...order.slice(lo, hi + 1)])]);
+                            return;
+                          }
+                          if ((e.ctrlKey || e.metaKey) && onSelectVectorObjects) {
+                            onSelectVectorObjects(index, cur.includes(o.id) ? cur.filter((x) => x !== o.id) : [...cur, o.id]);
+                            return;
+                          }
+                          onEditVectorObject?.(index, o.id);
+                        }}
+                        onDoubleClick={() => setRenamingObj({ id: o.id, name: vectorObjectLabel(o) })}
+                        title="Kliknij: edytuj obiekt. Ctrl / Shift + klik: zaznacz wiele. Dwukrotne kliknięcie: zmień nazwę. Przeciągnij, aby zmienić kolejność lub przenieść na inną warstwę wektorową"
+                        className={`group flex items-center gap-1.5 h-[22px] pl-1 pr-0.5 rounded border cursor-pointer text-[10.5px] ${
+                          editing ? 'border-[#e0b84a] bg-[#3a3217] text-white' : 'border-[#2a2a2a] bg-[#191919] hover:bg-[#242424]'
+                        } ${beingDragged ? 'opacity-40' : ''} ${over === 'before' ? 'border-t-2 border-t-[#00ffcc]' : ''} ${over === 'after' ? 'border-b-2 border-b-[#00ffcc]' : ''}`}
+                      >
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onToggleVectorObject?.(index, o.id, !o.visible);
+                          }}
+                          onDoubleClick={(e) => e.stopPropagation()}
+                          title={o.visible ? 'Ukryj obiekt' : 'Pokaż obiekt'}
+                          className={`p-0.5 rounded cursor-pointer shrink-0 ${o.visible ? 'bg-black/60 hover:bg-black/90 text-white' : 'bg-black/80 text-[#ff6666]'}`}
+                        >
+                          {o.visible ? <Eye size={10} strokeWidth={2.2} /> : <EyeOff size={10} strokeWidth={2.2} />}
+                        </button>
+                        <KindIcon size={10} strokeWidth={2.2} className="shrink-0 text-[#e0b84a] opacity-90" />
+                        {renamingObj?.id === o.id ? (
+                          <input
+                            autoFocus
+                            value={renamingObj.name}
+                            onChange={(e) => setRenamingObj({ id: o.id, name: e.target.value })}
+                            onClick={(e) => e.stopPropagation()}
+                            onDoubleClick={(e) => e.stopPropagation()}
+                            onBlur={() => {
+                              onRenameVectorObject?.(index, o.id, renamingObj.name);
+                              setRenamingObj(null);
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                              if (e.key === 'Escape') setRenamingObj(null);
+                            }}
+                            className="flex-1 min-w-0 bg-[#111] text-white px-1 text-[10.5px] border border-[#007acc] rounded focus:outline-none"
+                          />
+                        ) : (
+                          <span className={`flex-1 min-w-0 truncate ${o.visible ? 'text-[#d4d4d4]' : 'text-[#777]'}`}>{vectorObjectLabel(o)}</span>
+                        )}
+                      </div>
+                    );
+                  })}
+              </div>
+            )}
+
             </React.Fragment>
           );
         })}
@@ -956,7 +1140,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
         <IconBtn title="Nowa warstwa rastrowa" onClick={onAddLayer}>
           <FilePlus size={12} />
         </IconBtn>
-        <IconBtn title="Nowa warstwa wektorowa - wkrótce" placeholder>
+        <IconBtn title="Nowa warstwa wektorowa (obiekty zostają edytowalne)" onClick={onAddVectorLayer}>
           <PenTool size={12} />
         </IconBtn>
         <IconBtn title="Nowa grupa warstw" onClick={onAddGroup}>

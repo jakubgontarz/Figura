@@ -65,6 +65,7 @@ import {
   PenHit,
   PenMode,
   PenNode,
+  cloneNodes,
   insertNodeAt,
   moveAllBy,
   moveHandle,
@@ -81,6 +82,9 @@ import {
   setNodeMode,
   setSmoothFromDrag,
 } from '../core/skia/PenPath.ts';
+import { fitFreehand } from '../core/skia/CurveFit.ts';
+import { VectorObject, vectorRichText } from '../core/skia/VectorObjects.ts';
+import type { Layer } from '../core/skia/Layer.ts';
 
 interface CanvasViewportProps {
   engine: GraphicEngine;
@@ -119,6 +123,12 @@ interface CanvasViewportProps {
   liveVectorCancelTrigger?: number;
   penCloseToggleTrigger?: number;
   onPenInfoChange?: (info: { active: boolean; closed: boolean; count: number }) => void;
+  /** Rodzaj obiektu wektorowego otwartego do edycji narzędziem Manipulacja (null = brak). */
+  onVectorEditKind?: (kind: 'line' | 'bezier' | 'shapes' | 'text' | null) => void;
+  /** Zmieniło się zaznaczenie obiektów warstwy wektorowej (odśwież panel warstw). */
+  onVectorSelectionChange?: () => void;
+  /** Żądanie z panelu warstw: otwórz obiekt wektorowy do edycji. */
+  vectorEditRequest?: { n: number; layerIndex: number; id: string } | null;
   onShowToast?: (msg: string) => void;
 }
 
@@ -329,7 +339,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   primaryColor = { r: 0, g: 0, b: 0, a: 255 },
   secondaryColor = { r: 255, g: 255, b: 255, a: 255 },
   onChangeSelectionSettings,
-  activeTool,
+  activeTool: activeToolProp,
   zoom,
   panOffset,
   onUpdateZoom,
@@ -341,6 +351,9 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   liveVectorCancelTrigger,
   penCloseToggleTrigger,
   onPenInfoChange,
+  onVectorEditKind,
+  onVectorSelectionChange,
+  vectorEditRequest,
   onShowToast,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -357,6 +370,10 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   const viewOnlyRef = useRef(false);
   const tileRendererEngineRef = useRef<GraphicEngine | null>(null);
   const baseSigRef = useRef<string | null>(null);
+  /** Sygnatura, dla której płótno dokumentu jest już aktualne po lokalnej zmianie (patrz koniec pociągnięcia pędzla). */
+  const skipRedrawSigRef = useRef<string | null>(null);
+  /** Trwa rysowanie na płótnie przy otwartym oknie edycji efektów/stylizacji (patrz enterLiveOverSession). */
+  const liveOverSessionRef = useRef(false);
 
   const baseSelectionModeRef = useRef<SelectionSettings['mode'] | null>(null);
 
@@ -376,6 +393,29 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
 
   // SESJA EDYCJI TEKSTU (ramka + tekst z formatowaniem fragmentów)
   const [activeTextSession, setActiveTextSession] = useState<ActiveTextSession | null>(null);
+  // Narzędzia Manipulacja i Pisak działają na istniejących sesjach: gdy sesja jest otwarta, obowiązują zasady narzędzia jej rodzaju
+  const sessionKindTool: ToolType | null = activeVectorLineSession
+    ? 'line'
+    : activeVectorBezierSession
+      ? 'bezier'
+      : activeVectorShapeSession
+        ? 'shapes'
+        : activeTextSession
+          ? 'text'
+          : null;
+  const activeTool: ToolType =
+    (activeToolProp === 'vector-select' || activeToolProp === 'pen') && sessionKindTool ? sessionKindTool : activeToolProp;
+  const manipKind = activeToolProp === 'vector-select' ? sessionKindTool : null;
+  useEffect(() => {
+    onVectorEditKind?.(manipKind as 'line' | 'bezier' | 'shapes' | 'text' | null);
+  }, [manipKind, onVectorEditKind]);
+  /** Swobodne rysowanie Pisakiem w toku (punkty w układzie dokumentu). */
+  const freehandRef = useRef<{ pts: SKPoint[] } | null>(null);
+  /** Zaznaczanie obiektów wektorowych obszarem (Manipulacja) i przeciąganie zbiorczej ramki. */
+  const vecMarqueeRef = useRef<{ start: SKPoint; cur: SKPoint; base: string[] } | null>(null);
+  const vecGroupDragRef = useRef<{ start: SKPoint } | null>(null);
+  /** Otwarta krzywa pochodzi z Pisaka (trafia do obiektu z flagą freehand). */
+  const penFreehandSessionRef = useRef(false);
   const textRtRef = useRef<RichText>(new RichText());
   const [textVersion, setTextVersion] = useState(0);
   const [textSel, setTextSel] = useState<{ anchor: number; focus: number }>({ anchor: 0, focus: 0 });
@@ -612,7 +652,8 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       onCanvasModified();
     } else if (activeVectorBezierSession) {
       const bs = activeVectorBezierSession;
-      engine.commitVectorPath(normalizeOpenEnds(bs.nodes, bs.closed), bs.closed, lineAndCurveSettings);
+      engine.commitVectorPath(normalizeOpenEnds(bs.nodes, bs.closed), bs.closed, lineAndCurveSettings, penFreehandSessionRef.current);
+      penFreehandSessionRef.current = false;
       penRef.current = null;
       penDragRef.current = null;
       setPenMenu(null);
@@ -638,7 +679,8 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         activeTextSession.angle,
         textRtRef.current,
         textSettings,
-        textPendingStyleRef.current
+        textPendingStyleRef.current,
+        activeTextSession.autoHeight
       );
       setActiveTextSession(null);
       resetTextModel();
@@ -656,7 +698,20 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     onCanvasModified,
   ]);
 
+  // silnik wywołuje to przy cofnięciu: otwarty element jest zatwierdzany, a następnie cofany (tak jak gradient)
+  const commitVectorRef = useRef(commitActiveVectorSession);
+  commitVectorRef.current = commitActiveVectorSession;
+  const vectorActiveRef = useRef(false);
+  vectorActiveRef.current = isAnyVectorSessionActive;
+  useEffect(() => {
+    engine.setVectorSessionHook({ active: () => vectorActiveRef.current, commit: () => commitVectorRef.current() });
+    return () => engine.setVectorSessionHook(null);
+  }, [engine]);
+
   const cancelActiveVectorSession = useCallback(() => {
+    engine.vec.cancelEdit();
+    penFreehandSessionRef.current = false;
+    freehandRef.current = null;
     setActiveVectorLineSession(null);
     penRef.current = null;
     penDragRef.current = null;
@@ -671,7 +726,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     setIsDrawingSynced(false);
     setDragStartPointSynced(null);
     onCanvasModified();
-  }, [onCanvasModified]);
+  }, [engine, onCanvasModified]);
 
   // ===== EDYCJA TEKSTU: historia, wstawianie, nawigacja, formatowanie =====
   const textSelRange = (): [number, number] => {
@@ -893,7 +948,15 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       if (k === 'z') {
         e.preventDefault();
         if (shift) redoText();
-        else undoText();
+        else if (textHistoryRef.current.undo.length > 0) undoText();
+        else {
+          // historia pisania wyczerpana: cofnięcie dotyczy już całego elementu tekstowego
+          if (rt.length === 0) cancelActiveVectorSession();
+          else {
+            engine.undo();
+            onCanvasModified();
+          }
+        }
         return;
       }
       if (k === 'y') {
@@ -1015,10 +1078,18 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
 
   // Start sesji tekstu: styl początkowy z paska opcji, fokus w edytorze
   const hasTextSession = !!activeTextSession;
+  const textOpenedExistingRef = useRef(false);
   useEffect(() => {
     if (hasTextSession) {
-      textPendingStyleRef.current = pickCharStyle(textSettings);
-      setTextSelection(0, 0);
+      if (textOpenedExistingRef.current) {
+        // istniejący obiekt tekstowy: zostaje jego tekst i styl, kursor na końcu
+        textOpenedExistingRef.current = false;
+        const n = textRtRef.current.length;
+        setTextSelection(n, n);
+      } else {
+        textPendingStyleRef.current = pickCharStyle(textSettings);
+        setTextSelection(0, 0);
+      }
       bumpText();
       focusTextInput();
     }
@@ -1279,7 +1350,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
    * rastrem co podgląd, więc wypełnienia i zaznaczenia pasują do pikseli bez przesunięć o 1 px i szczelin (zwykłe płótno
    * skalowane przez CSS zaokrągla krawędzie pikseli inaczej). Przy mniejszym powiększeniu płótno kafelków jest puste.
    */
-  const presentIdle = (dirty: SKRectI | null): void => {
+  const presentIdle = (dirty: SKRectI | null, win?: { canvas: HTMLCanvasElement; left: number; top: number } | null): void => {
     const tr = tileRendererRef.current;
     const cv = canvasRef.current;
     const tv = tileViewRef.current;
@@ -1295,7 +1366,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       }
       tileWasSessionRef.current = false;
       tilePresentingRef.current = true;
-      tr.present(tv, cv, dirty);
+      tr.present(tv, cv, dirty, win);
       cv.style.visibility = 'hidden';
     } else {
       if (tilePresentingRef.current || tileWasSessionRef.current) tr.clear();
@@ -1306,7 +1377,8 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   };
 
   useEffect(() => {
-    engine.onViewportComposited = (_target, dirty) => presentIdle(dirty);
+    (globalThis as { __figuraEngine?: unknown }).__figuraEngine = engine;
+    engine.onViewportComposited = (_target, dirty, win) => presentIdle(dirty, win);
     return () => {
       engine.onViewportComposited = null;
     };
@@ -1395,9 +1467,13 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     engine.floatingContentExternal = contentSessionActive;
     // Okno korekcji nieniszczącej: podgląd na żywo składają kafelki (od lewego górnego rogu), a nie pełna kompozycja dokumentu
     const correctionSessionActive = engine.hasCorrectionSession && !!tileCanvas;
-    const sessionNow = (isAnyVectorSessionActive || !!gradientPreview || !!bucketPreview || contentSessionActive || correctionSessionActive) && !!tileCanvas;
+    // Rysowanie pędzlem przy otwartym oknie efektów/stylizacji: podgląd na żywo składa zwykła kompozycja (z efektami edytowanej
+    // warstwy), a nie kafelkowy podgląd sesji, który nie zna bieżącego pociągnięcia
+    const liveOverSession = liveOverSessionRef.current;
+    const sessionNow = (isAnyVectorSessionActive || !!gradientPreview || !!bucketPreview || contentSessionActive || (correctionSessionActive && !liveOverSession)) && !!tileCanvas;
     tileSessionRef.current = sessionNow;
     if (sessionNow) {
+      skipRedrawSigRef.current = null;
       tilePresentingRef.current = false;
       tileWasSessionRef.current = true;
       // SZYBKI PODGLĄD EDYCJI: kafelki ekranu renderowane promieniowo od kursora, przerywane przy każdym ruchu.
@@ -1426,7 +1502,16 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       let previewRender: (ctx: CanvasRenderingContext2D) => void = customPreview;
       let previewBlend = currentBlendMode;
       const correctionOnly = correctionSessionActive && !isAnyVectorSessionActive && !gradientPreview && !bucketPreview && !contentSessionActive;
-      if (correctionOnly) {
+      // Edycja istniejącego obiektu wektorowego, nad którym leżą inne: obiekt jest przebudowywany w pikselach warstwy
+      // (właściwa kolejność, tryby mieszania i efekty), więc nakładka niczego nie rysuje - tylko uchwyty
+      const vecLive = engine.vec.liveEditing && isAnyVectorSessionActive && !gradientPreview && !bucketPreview && !contentSessionActive;
+      if (vecLive) {
+        previewRender = () => {};
+        previewBlend = 'SrcOver';
+        bounds = { left: 0, top: 0, right: engine.width, bottom: engine.height, width: engine.width, height: engine.height };
+        centerDoc = { x: 0, y: 0 };
+        contentKey = 'vl:' + engine.vec.liveVersion + ':' + engine.activeLayerIndex;
+      } else if (correctionOnly) {
         // Sama korekcja: brak własnego rysunku narzędzia, kafelki tylko składają dokument z korekcjami aktywnej warstwy
         previewRender = () => {};
         previewBlend = 'SrcOver';
@@ -1536,12 +1621,12 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       }
 
       const dragging = (!!activeVectorHandleRef.current || !!penDragRef.current || !!gradientPreview || (contentSessionActive && !!transformActiveHandleRef.current)) && !!cursorPosRef.current;
-      const focus = correctionOnly
+      const focus = correctionOnly || vecLive
         ? { x: 0, y: 0 } // kafelki od lewego górnego rogu ekranu
         : dragging
         ? { x: cursorPosRef.current!.x, y: cursorPosRef.current!.y }
         : { x: left + centerDoc.x * zoom * dpr, y: top + centerDoc.y * zoom * dpr };
-      if (dragging && !correctionOnly) {
+      if (dragging && !correctionOnly && !vecLive) {
         focus.x *= dpr;
         focus.y *= dpr;
       }
@@ -1570,7 +1655,9 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       // Gdy użytkownik tylko przesuwa obiekt, renderer kopiuje gotowy podgląd zamiast rasteryzować go od nowa.
       const r4 = (n: number) => Math.round(n * 1e4) / 1e4;
       let previewMove: { key: string; x: number; y: number } | undefined;
-      if (activeVectorLineSession) {
+      if (vecLive) {
+        previewMove = undefined;
+      } else if (activeVectorLineSession) {
         const { p0, p1 } = activeVectorLineSession;
         previewMove = {
           key: 'l:' + JSON.stringify([r4(p1.x - p0.x), r4(p1.y - p0.y), lineAndCurveSettings, previewBlend]),
@@ -1617,6 +1704,16 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       return;
     }
 
+    if (skipRedrawSigRef.current !== null) {
+      const same = skipRedrawSigRef.current === engine.getBaseSignature();
+      skipRedrawSigRef.current = null;
+      if (same && canvasRef.current && baseSigRef.current === engine.getBaseSignature()) {
+        const trs = tileRendererRef.current;
+        const tvs = tileViewRef.current;
+        if (!(trs && tvs && trs.isShowing(tvs))) presentIdle(null);
+        return;
+      }
+    }
     if (viewOnlyRef.current) {
       presentIdle(null);
       return;
@@ -1654,6 +1751,50 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
 
   // Samo przesunięcie / zoom / zmiana rozmiaru okna poza sesją podglądu nie zmienia pikseli dokumentu:
   // płótno dokumentu skaluje przeglądarka (CSS), więc nie wolno za każdym razem składać wszystkich warstw od nowa.
+  // Edycja istniejącego obiektu wektorowego z innymi obiektami nad nim: bieżący stan sesji wraca do pikseli warstwy na
+  // właściwe miejsce w kolejności (przed odświeżeniem widoku, więc efekt jest zadeklarowany wcześniej niż rysowanie)
+  useEffect(() => {
+    if (!engine.vec.liveEditing || !isAnyVectorSessionActive) return;
+    const base = { id: 'live', name: null, visible: true };
+    let o: VectorObject | null = null;
+    if (activeVectorLineSession) {
+      o = { ...base, kind: 'line', p0: { ...activeVectorLineSession.p0 }, p1: { ...activeVectorLineSession.p1 }, settings: lineAndCurveSettings };
+    } else if (activeVectorBezierSession && activeVectorBezierSession.nodes.length >= 2) {
+      const bs = activeVectorBezierSession;
+      o = { ...base, kind: 'path', nodes: cloneNodes(normalizeOpenEnds(bs.nodes, bs.closed)), closed: bs.closed, settings: lineAndCurveSettings, freehand: penFreehandSessionRef.current };
+    } else if (activeVectorShapeSession) {
+      const sh = activeVectorShapeSession;
+      o = { ...base, kind: 'shape', center: { ...sh.center }, width: sh.width, height: sh.height, angle: sh.angle, flipX: sh.flipX, flipY: sh.flipY, settings: vectorShapeSettings };
+    } else if (activeTextSession && textRtRef.current.length > 0) {
+      const tx = activeTextSession;
+      o = {
+        ...base,
+        kind: 'text',
+        center: { ...tx.center },
+        width: tx.width,
+        height: tx.height,
+        angle: tx.angle,
+        autoHeight: !!tx.autoHeight,
+        runs: textRtRef.current.runs.map((r) => ({ text: r.text, style: { ...r.style } })),
+        settings: textSettings,
+        fallback: textPendingStyleRef.current ?? pickCharStyle(textSettings),
+      };
+    }
+    if (o) engine.vec.updateLive(o);
+  }, [
+    engine,
+    isAnyVectorSessionActive,
+    activeVectorLineSession,
+    activeVectorBezierSession,
+    activeVectorShapeSession,
+    activeTextSession,
+    lineAndCurveSettings,
+    vectorShapeSettings,
+    textSettings,
+    textVersion,
+    textLayout,
+  ]);
+
   const contentKeyRef = useRef<unknown[] | null>(null);
   useEffect(() => {
     // Ustawienia narzędzi wektorowych (App podmienia je przy każdej zmianie koloru) liczą się do klucza tylko wtedy,
@@ -3073,9 +3214,26 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
           return;
         }
       }
+      if ((e.key === 'Delete' || e.key === 'Backspace') && !(e.target instanceof HTMLInputElement) && !(e.target instanceof HTMLTextAreaElement)) {
+        if (deleteVecRef.current()) {
+          e.preventDefault();
+          return;
+        }
+      }
       if (e.key === 'Escape') {
-        if (isAnyVectorSessionActive) {
+        if (vecGroupDragRef.current) {
+          vecGroupDragRef.current = null;
+          engine.vec.cancelGroupMove();
+          onCanvasModified();
+        } else if (vecMarqueeRef.current) {
+          vecMarqueeRef.current = null;
+        } else if (isAnyVectorSessionActive) {
           cancelActiveVectorSession();
+          engine.vec.clearSelection();
+          notifyVecRef.current();
+        } else if (engine.vec.getSelection() && engine.getActiveLayer()?.isVector) {
+          engine.vec.clearSelection();
+          notifyVecRef.current();
         } else if (engine.transformContentSession) {
           engine.cancelTransformContent();
           onCanvasModified();
@@ -3418,6 +3576,51 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
             oCtx.restore();
           }
 
+          // 4b. ZAZNACZENIE OBIEKTÓW WEKTOROWYCH: ramka zbiorcza (bez uchwytów obiektów) i zaznaczanie obszarem
+          {
+            const vl = engine.getActiveLayer();
+            if (vl && vl.isVector && !vectorActiveRef.current) {
+              const ids = engine.vec.selectedIds(vl);
+              const box = ids.length > 0 ? engine.vec.selectionTightBounds(vl) : null;
+              if (box) {
+                oCtx.save();
+                const pad = 3 / zoom;
+                const x = box.x0 - pad;
+                const y = box.y0 - pad;
+                const w = box.x1 - box.x0 + 2 * pad;
+                const h = box.y1 - box.y0 + 2 * pad;
+                oCtx.lineWidth = 2.5 / zoom;
+                oCtx.strokeStyle = 'rgba(0,0,0,0.55)';
+                oCtx.setLineDash([]);
+                oCtx.strokeRect(x, y, w, h);
+                oCtx.lineWidth = 1.2 / zoom;
+                oCtx.strokeStyle = '#00e5ff';
+                oCtx.setLineDash([5 / zoom, 4 / zoom]);
+                oCtx.lineDashOffset = performance.now() / 60 / zoom;
+                oCtx.strokeRect(x, y, w, h);
+                oCtx.restore();
+              }
+            }
+            const mq = vecMarqueeRef.current;
+            if (mq) {
+              const mx = Math.min(mq.start.x, mq.cur.x);
+              const my = Math.min(mq.start.y, mq.cur.y);
+              const mw = Math.abs(mq.cur.x - mq.start.x);
+              const mh = Math.abs(mq.cur.y - mq.start.y);
+              if (mw > 0 || mh > 0) {
+                oCtx.save();
+                oCtx.lineWidth = 1 / zoom;
+                oCtx.setLineDash([4 / zoom, 4 / zoom]);
+                oCtx.lineDashOffset = performance.now() / 60 / zoom;
+                oCtx.strokeStyle = '#00e5ff';
+                oCtx.fillStyle = 'rgba(0, 229, 255, 0.15)';
+                oCtx.fillRect(mx, my, mw, mh);
+                oCtx.strokeRect(mx, my, mw, mh);
+                oCtx.restore();
+              }
+            }
+          }
+
           // 5. INTERFEJS EDYCJI LINII NA ŻYWO (P0, P1, ŚRODEK) - PUSTE ZNACZNIKI
           if (activeVectorLineSession) {
             const { p0, p1 } = activeVectorLineSession;
@@ -3450,7 +3653,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
           }
 
           // 6. INTERFEJS EDYCJI KRZYWEJ WIELOWĘZŁOWEJ NA ŻYWO (węzły, uchwyty, linia pomocnicza do kursora)
-          if (activeVectorBezierSession) {
+          if (activeVectorBezierSession && !freehandRef.current) {
             const { nodes, closed, phase, selected } = activeVectorBezierSession;
             const nN = nodes.length;
             const hov = hoverVectorHandle;
@@ -4015,7 +4218,18 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
             activeTool === 'select-lasso' ||
             activeTool === 'magic-wand';
 
-          if (cursorPosRef.current && isSelectionTool) {
+          const isPlusTool =
+            isSelectionTool ||
+            activeTool === 'bucket' ||
+            activeTool === 'gradient' ||
+            activeTool === 'line' ||
+            activeTool === 'bezier' ||
+            activeTool === 'shapes' ||
+            activeTool === 'text' ||
+            activeTool === 'transform-selection' ||
+            activeTool === 'transform-content';
+          // plusik tylko wtedy, gdy systemowy kursor jest ukryty (przy uchwytach działają kursory zmiany rozmiaru itd.)
+          if (cursorPosRef.current && isPlusTool && cursorStyleRef.current === 'none') {
             const { x: cx, y: cy } = cursorPosRef.current;
             oCtx.save();
 
@@ -4037,7 +4251,8 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
             // 3. Rysujemy modyfikator obok plusika (+ / - / ∩ / X)
             const mode = selectionSettings.mode;
             let badge = '';
-            if (mode === 'add') badge = '+';
+            if (!isSelectionTool) badge = '';
+            else if (mode === 'add') badge = '+';
             else if (mode === 'subtract') badge = '-';
             else if (mode === 'intersect') badge = '∩';
             else if (mode === 'invert') badge = 'X';
@@ -4329,6 +4544,172 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   };
 
   // POINTER DOWN
+  const enterLiveOverSession = () => {
+    const cv = canvasRef.current;
+    if (!cv || liveOverSessionRef.current) return;
+    liveOverSessionRef.current = true;
+    tileSessionRef.current = false;
+    tilePresentingRef.current = false;
+    tileWasSessionRef.current = false;
+    tileRendererRef.current?.clear();
+    cv.style.visibility = '';
+    // podkład nie zna jeszcze bieżących ustawień edytowanych efektów: pełne złożenie z nimi
+    engine.compositeToViewport(cv, null);
+    baseSigRef.current = engine.getBaseSignature();
+  };
+
+  /** Otwiera obiekt warstwy wektorowej do edycji: ustawienia paska opcji i sesja odpowiedniego rodzaju. */
+  const openVectorObject = (o: VectorObject) => {
+    switch (o.kind) {
+      case 'line':
+        onChangeLineAndCurveSettings?.(o.settings);
+        setActiveVectorLineSession({ p0: { ...o.p0 }, p1: { ...o.p1 } });
+        break;
+      case 'path':
+        onChangeLineAndCurveSettings?.(o.settings);
+        penFreehandSessionRef.current = !!o.freehand;
+        setPen({ nodes: cloneNodes(o.nodes), closed: o.closed, phase: 'editing', selected: 0 });
+        break;
+      case 'shape':
+        onChangeVectorShapeSettings?.(o.settings);
+        setActiveVectorShapeSession({
+          center: { ...o.center },
+          width: o.width,
+          height: o.height,
+          angle: o.angle,
+          pivot: { ...o.center },
+          flipX: o.flipX,
+          flipY: o.flipY,
+        });
+        break;
+      case 'text': {
+        resetTextModel();
+        textOpenedExistingRef.current = true;
+        textRtRef.current = vectorRichText(o);
+        textPendingStyleRef.current = { ...o.fallback };
+        onSyncTextSettings?.(o.settings);
+        setActiveTextSession({
+          center: { ...o.center },
+          width: o.width,
+          height: o.height,
+          angle: o.angle,
+          pivot: { ...o.center },
+          flipX: false,
+          flipY: false,
+          autoHeight: o.autoHeight,
+        });
+        const n = textRtRef.current.length;
+        setTextSelection(n, n);
+        bumpText();
+        break;
+      }
+    }
+    onCanvasModified();
+  };
+
+  /** Czy kliknięcie trafia w uchwyty lub ramkę otwartej sesji wektorowej (wtedy obsługuje je zwykła logika narzędzia). */
+  const vectorSessionHit = (e: React.PointerEvent, pt: SKPoint): boolean => {
+    const bs = penRef.current;
+    if (bs) {
+      const ms = penScreenPos(e);
+      return !!hitTestPen(bs, ms.x, ms.y, pt);
+    }
+    return !!hitTestVectorHandles(e);
+  };
+
+  const lastEditRequestRef = useRef<number>(vectorEditRequest?.n ?? 0);
+  useEffect(() => {
+    if (!vectorEditRequest || vectorEditRequest.n === lastEditRequestRef.current) return;
+    lastEditRequestRef.current = vectorEditRequest.n;
+    if (isAnyVectorSessionActive) commitActiveVectorSession();
+    const loaded = engine.vec.beginEdit(vectorEditRequest.layerIndex, vectorEditRequest.id);
+    if (loaded) openVectorObject(loaded);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [vectorEditRequest]);
+
+  /** Powiadamia panel warstw o zmianie zaznaczenia obiektów wektorowych. */
+  const notifyVecSelection = () => {
+    onVectorSelectionChange?.();
+    onCanvasModified();
+  };
+
+  /** Zaznaczenie obiektów warstwy wektorowej z płótna (bez sesji edycji): ramka zbiorcza. */
+  const selectVectorObjects = (layer: Layer, ids: string[]) => {
+    engine.vec.setSelection(layer.id, ids);
+    notifyVecSelection();
+  };
+
+  /** Usuwa zaznaczone obiekty (klawisz Delete): także obiekt otwarty do edycji (linia / kształt). */
+  const deleteSelectedVectorObjects = (): boolean => {
+    const layer = engine.getActiveLayer();
+    if (!layer || !layer.isVector || activeToolProp !== 'vector-select') return false;
+    const ids = engine.vec.selectedIds(layer);
+    if (ids.length === 0) return false;
+    if (isAnyVectorSessionActive) {
+      // w sesji tekstu i krzywej Delete należy do edycji (znaki, węzły)
+      if (activeTextSession || activeVectorBezierSession) return false;
+      cancelActiveVectorSession();
+    }
+    engine.vec.deleteObjects(engine.layers.indexOf(layer), ids);
+    notifyVecSelection();
+    return true;
+  };
+
+  // klawiatura działa na domknięciu z efektu: funkcje zależne od bieżącego stanu wołamy przez ref
+  const deleteVecRef = useRef<() => boolean>(() => false);
+  deleteVecRef.current = deleteSelectedVectorObjects;
+  const notifyVecRef = useRef<() => void>(() => {});
+  notifyVecRef.current = notifyVecSelection;
+
+  /** Manipulacja (wybór i edycja obiektu) i Pisak (rysowanie odręczne). Zwraca true, gdy zdarzenie obsłużone. */
+  const vectorToolPointerDown = (e: React.PointerEvent, pt: SKPoint): boolean => {
+    const layer = engine.getActiveLayer();
+    if (!layer || !layer.isVector) return true;
+    if (isAnyVectorSessionActive && vectorSessionHit(e, pt)) return false;
+    if (activeToolProp === 'vector-select') {
+      const mod = e.shiftKey || e.ctrlKey || e.metaKey;
+      const idx = engine.layers.indexOf(layer);
+      if (isAnyVectorSessionActive) commitActiveVectorSession();
+      const o = engine.vec.hitTest(layer, pt, 6 / Math.max(zoom, 0.05));
+      const sel = engine.vec.selectedIds(layer);
+      if (mod) {
+        // Shift / Ctrl: dodaje obiekt do zaznaczenia albo go z niego zdejmuje; puste miejsce zaczyna zaznaczanie obszarem (dodawanie)
+        if (o) {
+          selectVectorObjects(layer, sel.includes(o.id) ? sel.filter((x) => x !== o.id) : [...sel, o.id]);
+        } else {
+          vecMarqueeRef.current = { start: pt, cur: pt, base: sel };
+        }
+        return true;
+      }
+      if (o) {
+        if (sel.length > 1 && sel.includes(o.id)) {
+          if (engine.vec.beginGroupMove(idx, sel)) vecGroupDragRef.current = { start: pt };
+          return true;
+        }
+        const loaded = engine.vec.beginEdit(idx, o.id);
+        if (loaded) openVectorObject(loaded);
+        notifyVecSelection();
+        return true;
+      }
+      const box = sel.length > 0 ? engine.vec.selectionTightBounds(layer) : null;
+      if (box && sel.length > 1 && pt.x >= box.x0 && pt.x <= box.x1 && pt.y >= box.y0 && pt.y <= box.y1) {
+        if (engine.vec.beginGroupMove(idx, sel)) vecGroupDragRef.current = { start: pt };
+        return true;
+      }
+      // puste miejsce: zaznaczanie obszarem (nowe zaznaczenie zastępuje stare)
+      if (sel.length > 0) {
+        engine.vec.clearSelection();
+        notifyVecSelection();
+      }
+      vecMarqueeRef.current = { start: pt, cur: pt, base: [] };
+      return true;
+    }
+    // Pisak: zatwierdź poprzednią krzywą i zacznij rysować odręcznie
+    if (isAnyVectorSessionActive) commitActiveVectorSession();
+    freehandRef.current = { pts: [pt] };
+    return true;
+  };
+
   const handlePointerDown = (e: React.PointerEvent) => {
     if (e.button === 1 || isSpacePressed || activeTool === 'pan') {
       setIsPanning(true);
@@ -4417,11 +4798,14 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     // SPRAWDZENIE CZY WARSTWA JEST ZABLOKOWANA DLA NARZĘDZI EDYCYJNYCH
     const activeLayer = engine.getActiveLayer();
     if (activeLayer?.locked) {
-      if (isDrawingTool(activeTool) || activeTool === 'transform-content') {
+      if (isDrawingTool(activeTool) || activeToolProp === 'pen' || activeToolProp === 'vector-select' || activeTool === 'transform-content') {
         onShowToast?.('Warstwa jest zablokowana');
         return;
       }
     }
+
+    // MANIPULACJA / PISAK na warstwie wektorowej
+    if ((activeToolProp === 'vector-select' || activeToolProp === 'pen') && vectorToolPointerDown(e, pt)) return;
 
     // KRZYWA WIELOWĘZŁOWA
     if (activeTool === 'bezier') {
@@ -4653,6 +5037,13 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       return;
     }
 
+    if (
+      engine.hasCorrectionSession &&
+      (activeTool === 'brush' || activeTool === 'eraser' || activeTool === 'correction-brush' || activeTool === 'deform' || activeTool === 'color-replace' || activeTool === 'stamp')
+    ) {
+      enterLiveOverSession();
+    }
+
     if (activeTool === 'brush' || activeTool === 'eraser') {
       setIsDrawingSynced(true);
       const isEraser = activeTool === 'eraser';
@@ -4842,6 +5233,33 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         x: e.clientX - panStart.x,
         y: e.clientY - panStart.y,
       });
+      return;
+    }
+
+    // MANIPULACJA: przeciąganie zaznaczonych obiektów i zaznaczanie obszarem
+    if (vecGroupDragRef.current && pt) {
+      const g = vecGroupDragRef.current;
+      engine.vec.groupMoveTo(pt.x - g.start.x, pt.y - g.start.y);
+      onCanvasModified();
+      return;
+    }
+    if (vecMarqueeRef.current && pt) {
+      vecMarqueeRef.current.cur = pt;
+      return;
+    }
+
+    // PISAK: dopasowanie krzywej do rysowanej ścieżki na żywo
+    if (freehandRef.current && pt) {
+      const f = freehandRef.current;
+      const last = f.pts[f.pts.length - 1];
+      if (Math.hypot(pt.x - last.x, pt.y - last.y) * zoom >= 2) {
+        f.pts.push(pt);
+        const nodes = fitFreehand(f.pts, Math.max(1.2, 2.5 / zoom));
+        if (nodes.length >= 2) {
+          penFreehandSessionRef.current = true;
+          setPen({ nodes, closed: false, phase: 'editing', selected: -1 });
+        }
+      }
       return;
     }
 
@@ -5216,9 +5634,59 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     try {
       (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
     } catch {}
+    liveOverSessionRef.current = false;
 
     if (isPanning) {
       setIsPanning(false);
+      return;
+    }
+
+    if (vecGroupDragRef.current) {
+      vecGroupDragRef.current = null;
+      engine.vec.endGroupMove();
+      notifyVecSelection();
+      return;
+    }
+    if (vecMarqueeRef.current) {
+      const m = vecMarqueeRef.current;
+      vecMarqueeRef.current = null;
+      const layer = engine.getActiveLayer();
+      if (layer && layer.isVector) {
+        const moved = Math.hypot(m.cur.x - m.start.x, m.cur.y - m.start.y) * zoom >= 3;
+        if (moved) {
+          const hit = engine.vec.objectsInRect(layer, {
+            x0: Math.min(m.start.x, m.cur.x),
+            y0: Math.min(m.start.y, m.cur.y),
+            x1: Math.max(m.start.x, m.cur.x),
+            y1: Math.max(m.start.y, m.cur.y),
+          });
+          const ids = [...new Set([...m.base, ...hit])];
+          if (ids.length === 1 && m.base.length === 0) {
+            const loaded = engine.vec.beginEdit(engine.layers.indexOf(layer), ids[0]);
+            if (loaded) openVectorObject(loaded);
+            notifyVecSelection();
+          } else {
+            selectVectorObjects(layer, ids);
+          }
+        } else if (m.base.length === 0) {
+          notifyVecSelection();
+        }
+      }
+      return;
+    }
+
+    if (freehandRef.current) {
+      const f = freehandRef.current;
+      freehandRef.current = null;
+      const nodes = f.pts.length >= 2 ? fitFreehand(f.pts, Math.max(1.2, 2.5 / zoom)) : [];
+      if (nodes.length >= 2) {
+        penFreehandSessionRef.current = true;
+        setPen({ nodes: normalizeOpenEnds(nodes, false), closed: false, phase: 'editing', selected: nodes.length - 1 });
+      } else {
+        penRef.current = null;
+        setActiveVectorBezierSession(null);
+      }
+      redraw();
       return;
     }
 
@@ -5468,6 +5936,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
 
     if (activeTool === 'brush' || activeTool === 'eraser') {
       const mask = engine.selectionManager.hasActiveSelection ? engine.selectionManager.maskCanvas : null;
+      const sigBeforeEnd = engine.getBaseSignature();
       const endResult = engine.brushEngine.endStroke(layer, mask);
       if (endResult) {
         engine.pushTileAction({
@@ -5479,7 +5948,18 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         });
 
         if (canvasRef.current) {
-          engine.compositeToViewport(canvasRef.current, endResult.dirtyRect);
+          // Przy efektach ostatnia klatka na żywo jest już poprawna: przeliczenie wyników filtrów odkładamy na później
+          if (baseSigRef.current === sigBeforeEnd && engine.renderHasFilters) {
+            engine.scheduleFilterWarmup(endResult.dirtyRect);
+          } else {
+            engine.compositeToViewport(canvasRef.current, endResult.dirtyRect);
+          }
+          // płótno dokumentu jest już aktualne (złożony tylko zmieniony fragment): pełne przerysowanie po stanie React zbędne
+          if (baseSigRef.current === sigBeforeEnd) {
+            const s2 = engine.getBaseSignature();
+            baseSigRef.current = s2;
+            skipRedrawSigRef.current = s2;
+          }
         }
       }
       brushIsSecondaryRef.current = false;
@@ -5578,6 +6058,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   };
 
   // KURSOR MYSZY
+  const cursorStyleRef = useRef('default');
   const getCursorStyle = (): string => {
     if (isPanning || isSpacePressed || activeTool === 'pan') {
       return isPanning ? 'grabbing' : 'grab';
@@ -5588,6 +6069,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       activeTool === 'correction-brush' ||
       activeTool === 'color-replace' ||
       activeTool === 'stamp' ||
+      activeTool === 'deform' ||
       activeTool === 'pipette' ||
       isQuickPipetteActive
     ) {
@@ -5596,7 +6078,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     if (isAnyVectorSessionActive && hoverVectorHandle) {
       if (hoverVectorHandle === 'text-body') return 'text';
       if (hoverVectorHandle === 'move') return 'move';
-      if (hoverVectorHandle === 'modifier' || hoverVectorHandle === 'modifier-shaft') return 'crosshair';
+      if (hoverVectorHandle === 'modifier' || hoverVectorHandle === 'modifier-shaft') return 'pointer';
       if (hoverVectorHandle === 'rotate') {
         const boxAngleDeg = Math.round(
           (((activeVectorShapeSession ?? activeTextSession)?.angle || 0) * 180) / Math.PI
@@ -5612,7 +6094,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     if (isTransformTool) {
       const h = transformActiveHandle || transformHoverHandle;
       if (h === 'pivot' || h === 'move' || h === 'pmove') return 'move';
-      if (h === 'p0' || h === 'p1' || h === 'p2' || h === 'p3') return 'crosshair';
+      if (h === 'p0' || h === 'p1' || h === 'p2' || h === 'p3') return 'pointer';
       if (h === 'rotate') {
         const boxAngleDeg = Math.round(
           ((engine.selectionManager.transformState?.angle || 0) * 180) / Math.PI
@@ -5623,25 +6105,27 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       if (h === 'ne' || h === 'sw') return 'nesw-resize';
       if (h === 'n' || h === 's') return 'ns-resize';
       if (h === 'e' || h === 'w') return 'ew-resize';
-      return 'default';
+      return 'none';
     }
     if (activeTool.startsWith('select') || activeTool === 'magic-wand') {
       return 'none';
     }
-    if (activeTool === 'line' || activeTool === 'bezier' || activeTool === 'shapes' || activeTool === 'text') {
-      return 'crosshair';
+    // jednolity, mały plusik rysowany na nakładce (patrz sekcja 9b) zamiast systemowych kursorów
+    if (activeTool === 'line' || activeTool === 'bezier' || activeTool === 'shapes' || activeTool === 'text' || activeTool === 'bucket') {
+      return 'none';
     }
     if (activeTool === 'gradient') {
       if (gradientHoverHandle !== null || isDraggingGradientHandle !== null) {
         return 'move';
       }
-      return 'crosshair';
+      return 'none';
     }
     if (activeTool === 'zoom') {
       return isShiftKeyDown || zoomButtonRef.current === 2 ? 'zoom-out' : 'zoom-in';
     }
     return 'default';
   };
+  cursorStyleRef.current = getCursorStyle();
 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
@@ -5698,7 +6182,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         cursorPosRef.current = null;
       }}
       className="relative flex-1 h-full overflow-hidden select-none bg-[#6f6f6f] touch-none"
-      style={{ cursor: getCursorStyle() }}
+      style={{ cursor: cursorStyleRef.current }}
     >
       {/* JEDNOLITA STRUKTURA PŁÓTNA: SZACHOWNICA + RYSUNEK + 1PX RAMKA */}
       <div

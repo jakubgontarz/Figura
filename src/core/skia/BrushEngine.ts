@@ -532,8 +532,14 @@ export class BrushEngine {
       }));
     }
 
-    // Zawsze wyczyść cały bufor pociągnięcia, aby nie pozostawić żadnych pozostałości
-    this.strokeCtx.clearRect(0, 0, this.strokeCanvas.width, this.strokeCanvas.height);
+    // Czyścimy bufor pociągnięcia: tylko obszar, w którym cokolwiek narysowano (czyszczenie całego bufora 12 Mpx
+    // na dużym płótnie to kilkanaście ms zacięcia na końcu każdego pociągnięcia); bez znanego obszaru - cały
+    if (dirty && dirty.width > 0 && dirty.height > 0) {
+      const pad = 4;
+      this.strokeCtx.clearRect(dirty.left - pad, dirty.top - pad, dirty.width + 2 * pad, dirty.height + 2 * pad);
+    } else {
+      this.strokeCtx.clearRect(0, 0, this.strokeCanvas.width, this.strokeCanvas.height);
+    }
 
     this.strokeDirtyRect = null;
     this.activeBrushSettings = null;

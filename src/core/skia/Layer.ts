@@ -3,11 +3,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { VectorObject, cloneVectorObjects } from './VectorObjects.ts';
 import { TileGrid } from './TileGrid.ts';
 import { Tile } from './Tile.ts';
 import { SKBlendMode, SKColor } from './types.ts';
 import { Correction, cloneCorrections } from './Corrections.ts';
-import { Chain, FxContext, chainMargin, compileChain, runChain, runChainOnCanvas } from './Filters.ts';
+import { Chain, FxContext, chainGpuSupported, chainMargin, compileChain, runChain, runChainInSession, runChainOnCanvas } from './Filters.ts';
 import { LayerStyles, StyleFx, cloneStyles, styleOn, stylesActive } from './Styles.ts';
 
 const layerTileUids = new WeakMap<object, number>();
@@ -144,6 +145,13 @@ export class Layer {
    * działa na wszystko, co leży pod nią w tym samym kontenerze (grupie albo na poziomie głównym).
    */
   public isAdjustment: boolean = false;
+  /**
+   * Warstwa wektorowa: piksele są pochodną listy `vectorObjects` (silnik przebudowuje je po każdej zmianie listy),
+   * więc narzędzia rastrowe jej nie dotykają, a korekcje, filtry, maska i style działają jak na zwykłej warstwie.
+   */
+  public isVector: boolean = false;
+  /** Obiekty warstwy wektorowej od najniższego do najwyższego (kolejność rysowania). */
+  public vectorObjects: VectorObject[] = [];
   /** Id nagłówka grupy, do której należy warstwa (null = poziom główny). */
   public groupId: string | null = null;
   /** Grupa rozwinięta (dzieci widoczne na liście). */
@@ -338,6 +346,16 @@ export class Layer {
     return false;
   }
 
+  /** Czy cały łańcuch korekcji / filtrów / stylizacji warstwy da się wykonać w sesji GPU na oknie w x h (brak efektów = tak). */
+  public gpuChainFits(w: number, h: number, scale: number): boolean {
+    return !this.hasActiveCorrections || chainGpuSupported(this.chain(), w, h, scale);
+  }
+
+  /** Wykonuje łańcuch warstwy w otwartej sesji GPU (kompozytor GPU); false = wynik do odrzucenia. */
+  public runChainGpu(w: number, h: number, fx: FxContext): boolean {
+    return runChainInSession(this.chain(), w, h, this.styleFx(fx));
+  }
+
   /** Nakłada włączone korekcje i filtry W MIEJSCU na fragment (x, y, w, h) płótna; bez nich nic nie robi. Zwraca to samo płótno. */
   public applyCorrectionsToCanvas(
     cv: HTMLCanvasElement,
@@ -430,14 +448,48 @@ export class Layer {
   }
 
   /** Ile kafelków na bok liczy się razem: przy dużym marginesie osobne okna wokół każdego kafelka byłyby wielokrotnie droższe. */
-  private blockTiles(margin: number): number {
-    return margin > this.pixelGrid.tileSize ? 8 : 1;
+  private blockTiles(_margin: number): number {
+    // Zawsze bloki 8x8 kafelków: osobne wywołanie (a przy GPU: odczyt wyniku) dla każdego kafelka 64 px kosztowało
+    // tysiące wywołań przy przeliczaniu całej warstwy na dużym płótnie (4000x3000 = ok. 3000 kafelków)
+    return 8;
   }
 
   /** Nakłada podaną listę korekcji (w tej kolejności) na piksele warstwy (bez maski); lista korekcji warstwy bez zmian. */
+  /**
+   * Wpieka włączoną maskę w piksele warstwy i ustawia maskę na biało (cała warstwa widoczna). Efekty działają PO masce
+   * (cienie i zniekształcenia widzą już zamaskowany obraz i nie są przycinane maską), więc po wypieczeniu efektów
+   * maska nie może zostać, bo zadziałałaby drugi raz. Wygląd warstwy przed i po jest taki sam.
+   */
+  public bakeMaskIntoPixels(): void {
+    const mg = this.maskGrid;
+    if (!mg || !this.maskEnabled) return;
+    const g = this.pixelGrid;
+    const copies: Array<{ t: Tile; cv: HTMLCanvasElement }> = [];
+    for (const row of g.tiles) {
+      for (const t of row) {
+        if (!t.hasContent || t.width <= 0 || t.height <= 0) continue;
+        const mc = this.renderCore(t, false);
+        if (!mc || mc === t.canvas) continue;
+        const cv = document.createElement('canvas');
+        cv.width = Math.max(1, t.width);
+        cv.height = Math.max(1, t.height);
+        cv.getContext('2d')!.drawImage(mc, 0, 0);
+        copies.push({ t, cv });
+      }
+    }
+    for (const { t, cv } of copies) {
+      t.ctx.globalCompositeOperation = 'source-over';
+      t.ctx.clearRect(0, 0, t.width, t.height);
+      t.ctx.drawImage(cv, 0, 0);
+      t.isDirty = true;
+    }
+    mg.fill({ r: 255, g: 255, b: 255, a: 255 });
+  }
+
   public bakeCorrectionList(list: Correction[]): void {
     const enabled = list.filter((c) => c.enabled);
     if (enabled.length === 0) return;
+    this.bakeMaskIntoPixels();
     const chain = compileChain(enabled);
     const g = this.pixelGrid;
     const results: Array<{ t: Tile; cv: HTMLCanvasElement }> = [];
@@ -677,6 +729,8 @@ export class Layer {
     copy._locked = this._locked;
     copy.isGroup = this.isGroup;
     copy.isAdjustment = this.isAdjustment;
+    copy.isVector = this.isVector;
+    copy.vectorObjects = cloneVectorObjects(this.vectorObjects);
     copy.groupId = this.groupId;
     copy.expanded = this.expanded;
     copy.groupHidden = this.groupHidden;
@@ -960,26 +1014,35 @@ export class Layer {
     if (hit && hit.key === key) return hit.canvas;
     const K = this.blockTiles(margin);
     if (K > 1) {
-      // blok kafelków liczony jednym przebiegiem; wszystkie kafelki bloku trafiają do pamięci podręcznej
+      // Blok kafelków liczony jednym przebiegiem, ale tylko dla kafelków, których wynik jest nieaktualny: region obliczeń
+      // to prostokąt obejmujący te kafelki (zmiana jednego kafelka nie przelicza całego bloku 8x8)
       const bx = Math.floor(tile.tileX / K) * K;
       const by = Math.floor(tile.tileY / K) * K;
-      const first = g.tiles[by][bx];
-      const lastT = g.tiles[Math.min(g.rows - 1, by + K - 1)][Math.min(g.cols - 1, bx + K - 1)];
-      const reg = this.filterRegion(first.pixelX, first.pixelY, lastT.pixelX + lastT.width - first.pixelX, lastT.pixelY + lastT.height - first.pixelY, this.chain(), margin);
+      const stale: Array<{ t: Tile; key: string }> = [];
+      let rx0 = Infinity, ry0 = Infinity, rx1 = -Infinity, ry1 = -Infinity;
       for (let ty = by; ty <= Math.min(g.rows - 1, by + K - 1); ty++) {
         for (let tx = bx; tx <= Math.min(g.cols - 1, bx + K - 1); tx++) {
           const t = g.tiles[ty][tx];
           if (t.width <= 0 || t.height <= 0 || (t !== tile && !this.tileShown(t))) continue;
+          const tk = t === tile ? key : this.filteredKey(t, n);
           const cur = this.filteredCache.get(t);
-          const cv = cur ? cur.canvas : document.createElement('canvas');
-          cv.width = Math.max(1, t.width);
-          cv.height = Math.max(1, t.height);
-          const c2 = cv.getContext('2d', { willReadFrequently: true })!;
-          c2.globalCompositeOperation = 'source-over';
-          c2.clearRect(0, 0, cv.width, cv.height);
-          c2.drawImage(reg, t.pixelX - first.pixelX, t.pixelY - first.pixelY, t.width, t.height, 0, 0, t.width, t.height);
-          this.filteredCache.set(t, { key: this.filteredKey(t, n), canvas: cv });
+          if (cur && cur.key === tk) continue;
+          stale.push({ t, key: tk });
+          rx0 = Math.min(rx0, t.pixelX); ry0 = Math.min(ry0, t.pixelY);
+          rx1 = Math.max(rx1, t.pixelX + t.width); ry1 = Math.max(ry1, t.pixelY + t.height);
         }
+      }
+      const reg = this.filterRegion(rx0, ry0, rx1 - rx0, ry1 - ry0, this.chain(), margin);
+      for (const { t, key: tk } of stale) {
+        const cur = this.filteredCache.get(t);
+        const cv = cur ? cur.canvas : document.createElement('canvas');
+        cv.width = Math.max(1, t.width);
+        cv.height = Math.max(1, t.height);
+        const c2 = cv.getContext('2d', { willReadFrequently: true })!;
+        c2.globalCompositeOperation = 'source-over';
+        c2.clearRect(0, 0, cv.width, cv.height);
+        c2.drawImage(reg, t.pixelX - rx0, t.pixelY - ry0, t.width, t.height, 0, 0, t.width, t.height);
+        this.filteredCache.set(t, { key: tk, canvas: cv });
       }
       return this.filteredCache.get(tile)!.canvas;
     }

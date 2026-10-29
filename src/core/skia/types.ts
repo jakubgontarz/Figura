@@ -362,6 +362,8 @@ export type ToolType =
   | 'line'
   | 'bezier'
   | 'text'
+  | 'vector-select'
+  | 'pen'
   | 'pan'
   | 'zoom';
 
@@ -388,6 +390,9 @@ export interface FiguraProjectFile {
     isGroup?: boolean;
     /** Korekcja samodzielna w stosie (jedna korekcja w `corrections`, bez pikseli) */
     isAdjustment?: boolean;
+    /** Warstwa wektorowa: lista obiektów (piksele w `dataUrl` są ich renderem) */
+    isVector?: boolean;
+    vectorObjects?: unknown;
     groupId?: string | null;
     expanded?: boolean;
     /** Korekcje nieniszczące warstwy (kolejność = kolejność stosowania) */

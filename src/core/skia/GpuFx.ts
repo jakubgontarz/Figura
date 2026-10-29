@@ -256,7 +256,7 @@ function uni(g: GL, pr: Prog, name: string): WebGLUniformLocation | null {
   return l;
 }
 
-export type TexFmt = 'r32f' | 'rgba32f' | 'rgba8';
+export type TexFmt = 'r32f' | 'rgba32f' | 'rgba16f' | 'rgba8';
 
 function makeTex(g: GL, w: number, h: number, fmt: TexFmt): Tex {
   const tx = g.createTexture()!;
@@ -266,6 +266,7 @@ function makeTex(g: GL, w: number, h: number, fmt: TexFmt): Tex {
   g.texParameteri(g.TEXTURE_2D, g.TEXTURE_WRAP_S, g.CLAMP_TO_EDGE);
   g.texParameteri(g.TEXTURE_2D, g.TEXTURE_WRAP_T, g.CLAMP_TO_EDGE);
   if (fmt === 'rgba32f') g.texImage2D(g.TEXTURE_2D, 0, g.RGBA32F, w, h, 0, g.RGBA, g.FLOAT, null);
+  else if (fmt === 'rgba16f') g.texImage2D(g.TEXTURE_2D, 0, g.RGBA16F, w, h, 0, g.RGBA, g.HALF_FLOAT, null);
   else if (fmt === 'r32f') g.texImage2D(g.TEXTURE_2D, 0, g.R32F, w, h, 0, g.RED, g.FLOAT, null);
   else g.texImage2D(g.TEXTURE_2D, 0, g.RGBA8, w, h, 0, g.RGBA, g.UNSIGNED_BYTE, null);
   const fbo = g.createFramebuffer()!;
@@ -295,7 +296,7 @@ interface KitTex extends Tex {
 const kitPool: KitTex[] = [];
 
 export type { Tex, GL as GL2 };
-export { getGl as kitGl, prog as kitProg, uni as kitUni, pass as kitPass, bindIn as kitBind, uploadSrc as kitUpload, readBack as kitRead };
+export { getGl as kitGl, prog as kitProg, uni as kitUni, pass as kitPass, bindIn as kitBind, uploadSrc as kitUpload, readBack as kitRead, makeTex as kitMakeTex };
 
 /** Początek zadania: usuwa tekstury o innym rozmiarze, resztę oznacza jako wolne. */
 export function kitBegin(g: GL, w: number, h: number): void {
@@ -449,9 +450,60 @@ export function gpuSessionBegin(cv: HTMLCanvasElement): boolean {
   }
 }
 
+/**
+ * Rozpoczyna sesję na istniejącej teksturze `src` (RGBA8, proste kolory, rozmiar w x h): zawartość jest kopiowana do tekstury
+ * sesji, więc `src` zostaje nietknięta. Pozwala łączyć łańcuch efektów z kompozytorem GPU bez żadnego odczytu na CPU.
+ */
+export function gpuSessionBeginTex(src: Tex, w: number, h: number): boolean {
+  if (sess) return false;
+  if (w < 2 || h < 2 || src.w !== w || src.h !== h) return false;
+  const g = getGl();
+  if (!g || w > maxTex || h > maxTex) return false;
+  try {
+    const a = tex(g, 'sA', w, h, false);
+    const b = tex(g, 'sB', w, h, false);
+    const pr = prog(g, 'copy', FS_COPY);
+    pass(g, pr, a, w, h, () => {
+      bindIn(g, 0, src);
+      g.uniform1i(uni(g, pr, 'uTex'), 0);
+    });
+    sess = { g, w, h, cur: a, other: b, failed: false };
+    return true;
+  } catch {
+    disabled = true;
+    return false;
+  }
+}
+
+/** Kończy sesję rozpoczętą `gpuSessionBeginTex`; zwraca teksturę z wynikiem (należy do puli sesji: ważna do następnej sesji) albo null. */
+export function gpuSessionEndTex(): Tex | null {
+  const s = sess;
+  sess = null;
+  if (!s || s.failed) return null;
+  return s.cur;
+}
+
+/** Jeden krok własny w sesji (np. stylizacje): `body` czyta `src` i zapisuje wynik do `out`; po kroku tekstury się zamieniają. */
+export function gpuSessionRun(w: number, h: number, body: (g: GL, src: Tex, out: Tex) => void): boolean {
+  if (!sess) return false;
+  return run(new Uint8ClampedArray(0), w, h, (g, src, _fa, _fb, out) => body(g, src, out), false);
+}
+
 export function gpuSessionAbort(): void {
   sess = null;
 }
+
+/** Oznacza bieżącą sesję jako nieudaną (kolejne kroki są pomijane, a koniec sesji zgłasza porażkę). */
+export function gpuSessionFail(): void {
+  if (sess) sess.failed = true;
+}
+
+const FS_COPY =
+  GL_HEAD +
+  `uniform sampler2D uTex;
+void main() {
+  o = texelFetch(uTex, ivec2(gl_FragCoord.xy), 0);
+}`;
 
 const FS_BLIT =
   GL_HEAD +
