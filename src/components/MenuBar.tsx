@@ -383,49 +383,6 @@ export const MenuBar: React.FC<MenuBarProps> = ({ handlers }) => {
           </div>
         )}
       </div>
-
-      {/* Efekty i Kolory */}
-      <div className="relative">
-        <button
-          type="button"
-          onClick={() => setOpenMenu(openMenu === 'efekty' ? null : 'efekty')}
-          onMouseEnter={() => openMenu && setOpenMenu('efekty')}
-          className={`px-2.5 py-0.5 rounded-sm hover:bg-[#383838] transition-colors cursor-pointer ${
-            openMenu === 'efekty' ? 'bg-[#383838] text-white' : ''
-          }`}
-        >
-          Korekty i Filtry
-        </button>
-        {openMenu === 'efekty' && (
-          <div className="absolute left-0 top-full mt-0.5 min-w-[210px] bg-[#1e1e1e] border border-[#3f3f46] shadow-xl py-1 text-[12px] text-[#cccccc]">
-            <button
-              onClick={() => handleAction(handlers.onInvertColors)}
-              className="w-full text-left px-3 py-1 hover:bg-[#007acc] hover:text-white cursor-pointer"
-            >
-              Odwróć kolory (Invert)
-            </button>
-            <button
-              onClick={() => handleAction(handlers.onGrayscale)}
-              className="w-full text-left px-3 py-1 hover:bg-[#007acc] hover:text-white cursor-pointer"
-            >
-              Skala szarości (Grayscale)
-            </button>
-            <div className="h-[1px] bg-[#333333] my-1" />
-            <button
-              onClick={() => handleAction(handlers.onBrightnessUp)}
-              className="w-full text-left px-3 py-1 hover:bg-[#007acc] hover:text-white cursor-pointer"
-            >
-              Zwiększ jasność (+20)
-            </button>
-            <button
-              onClick={() => handleAction(handlers.onContrastUp)}
-              className="w-full text-left px-3 py-1 hover:bg-[#007acc] hover:text-white cursor-pointer"
-            >
-              Zwiększ kontrast (+20)
-            </button>
-          </div>
-        )}
-      </div>
     </div>
   );
 };

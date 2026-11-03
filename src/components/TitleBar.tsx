@@ -9,6 +9,9 @@ import { Minus, Square, X, Plus } from 'lucide-react';
 interface TabItem {
   id: string;
   title: string;
+  /** Zakładka obiektu inteligentnego: kolor wyróżniający i opis. */
+  accent?: string;
+  hint?: string;
 }
 
 interface TitleBarProps {
@@ -44,6 +47,8 @@ export const TitleBar: React.FC<TitleBarProps> = ({
               <div
                 key={tab.id}
                 onClick={() => onSelectTab(tab.id)}
+                title={tab.hint}
+                style={tab.accent ? { borderTopColor: tab.accent, backgroundColor: isActive ? '#3a2f1c' : '#25201a', color: isActive ? '#fff' : '#d9c08a' } : undefined}
                 className={`group flex items-center gap-2 px-3 py-1 text-[11px] font-medium rounded-t cursor-pointer border-t-2 transition-colors ${
                   isActive
                     ? 'bg-[#2b2b2b] text-white border-[#0078d7]'

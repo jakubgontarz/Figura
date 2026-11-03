@@ -170,6 +170,12 @@ export const Toolbox: React.FC<ToolboxProps> = ({
       icon: <Type size={16} strokeWidth={2.2} />,
     },
     {
+      id: 'guides',
+      name: 'Prowadnice (pionowe i poziome, dla całego obrazu)',
+      shortcut: 'klik = wstaw',
+      icon: <Ruler size={16} strokeWidth={2.2} />,
+    },
+    {
       id: 'pan',
       name: 'Nawigacja',
       shortcut: 'H',
@@ -192,8 +198,8 @@ export const Toolbox: React.FC<ToolboxProps> = ({
       byId('line'),
       byId('bezier'),
       byId('text'),
-      { placeholder: 'Obiekt inteligentny - wkrótce', icon: <ImagePlus size={16} strokeWidth={2.2} /> },
-      { placeholder: 'Prowadnice - wkrótce', icon: <Ruler size={16} strokeWidth={2.2} /> },
+      { id: 'smart-object', name: 'Obiekt inteligentny (osobny dokument w zakładce)', shortcut: 'dwuklik = edycja', icon: <ImagePlus size={16} strokeWidth={2.2} /> },
+      byId('guides'),
       byId('pipette'),
       byId('pan'),
       byId('zoom'),

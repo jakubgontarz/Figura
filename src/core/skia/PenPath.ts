@@ -391,3 +391,35 @@ export function insertNodeAt(nodes: PenNode[], hit: PenHit): { nodes: PenNode[];
   out.splice(insertAt, 0, { x: mid.x, y: mid.y, hin: p012, hout: p123 });
   return { nodes: out, index: insertAt };
 }
+
+
+/** Prostokąt opisany na samej krzywej (próbkowane odcinki, bez uchwytów). */
+export function penCurveBounds(nodes: PenNode[], closed: boolean): { x0: number; y0: number; x1: number; y1: number } | null {
+  if (nodes.length === 0) return null;
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  const add = (p: SKPoint) => {
+    if (p.x < x0) x0 = p.x;
+    if (p.y < y0) y0 = p.y;
+    if (p.x > x1) x1 = p.x;
+    if (p.y > y1) y1 = p.y;
+  };
+  for (const n of nodes) add(n);
+  for (const seg of penSegments(nodes, closed)) {
+    if (seg.straight) continue;
+    for (let k = 1; k < 24; k++) add(bezierPoint(seg, k / 24));
+  }
+  return { x0, y0, x1, y1 };
+}
+
+/** Przekształca wszystkie punkty krzywej (węzły i uchwyty) funkcją punktu. */
+export function mapPenPoints(nodes: PenNode[], f: (p: SKPoint) => SKPoint): PenNode[] {
+  const r = (v: number) => Math.round(v * 100) / 100;
+  const m = (p: SKPoint): SKPoint => {
+    const q = f(p);
+    return { x: r(q.x), y: r(q.y) };
+  };
+  return nodes.map((n) => {
+    const q = m(n);
+    return { x: q.x, y: q.y, hin: n.hin ? m(n.hin) : null, hout: n.hout ? m(n.hout) : null };
+  });
+}

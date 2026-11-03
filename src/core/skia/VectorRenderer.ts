@@ -51,6 +51,10 @@ const windowedContexts = new WeakSet<CanvasRenderingContext2D>();
 export function markWindowedContext(ctx: CanvasRenderingContext2D): void {
   windowedContexts.add(ctx);
 }
+/** Cofa oznaczenie (kontekst współdzielony między rysowaniem okienkowym i pełnym, np. bufor kompozycji obiektu). */
+export function unmarkWindowedContext(ctx: CanvasRenderingContext2D): void {
+  windowedContexts.delete(ctx);
+}
 
 export interface IsoCrop {
   /** Początek bufora w układzie dokumentu */
@@ -758,6 +762,105 @@ export function createShapePath(
   }
 
   return path;
+}
+
+/**
+ * Charakterystyczne punkty kształtu we współrzędnych lokalnych (środek w (0, 0), bez obrotu i odbić): wierzchołki
+ * wielokąta, gwiazdy, strzałki, trójkąta i rombu, skrajne punkty elipsy i serca. Używane do przyciągania kursora.
+ * null = brak własnych punktów (prostokąt itp. - wtedy obowiązuje siatka 3 x 3 ramki).
+ */
+export function shapeSnapPoints(
+  shapeKind: VectorShapeSettings['shapeKind'],
+  width: number,
+  height: number,
+  settings: VectorShapeSettings
+): SKPoint[] | null {
+  const halfW = Math.max(1, width / 2);
+  const halfH = Math.max(1, height / 2);
+  const pts: SKPoint[] = [{ x: 0, y: 0 }];
+  switch (shapeKind) {
+    case 'triangle':
+      pts.push({ x: 0, y: -halfH }, { x: halfW, y: halfH }, { x: -halfW, y: halfH }, { x: 0, y: halfH });
+      return pts;
+    case 'diamond':
+      pts.push({ x: 0, y: -halfH }, { x: halfW, y: 0 }, { x: 0, y: halfH }, { x: -halfW, y: 0 });
+      return pts;
+    case 'star': {
+      const n = Math.max(3, settings.starPoints || 5);
+      const inner = Math.max(0.1, Math.min(0.9, settings.starInnerRatio || 0.45));
+      const R = Math.min(halfW, halfH);
+      const sx = halfW / Math.max(1, R);
+      const sy = halfH / Math.max(1, R);
+      for (let i = 0; i < n * 2; i++) {
+        const r = (i % 2 === 0 ? R : R * inner);
+        const a = -Math.PI / 2 + (i * Math.PI) / n;
+        pts.push({ x: Math.cos(a) * r * sx, y: Math.sin(a) * r * sy });
+      }
+      return pts;
+    }
+    case 'polygon': {
+      const n = Math.max(3, settings.polygonSides || 6);
+      const R = Math.min(halfW, halfH);
+      const sx = halfW / Math.max(1, R);
+      const sy = halfH / Math.max(1, R);
+      for (let i = 0; i < n; i++) {
+        const a = -Math.PI / 2 + (i * Math.PI * 2) / n;
+        pts.push({ x: Math.cos(a) * R * sx, y: Math.sin(a) * R * sy });
+      }
+      return pts;
+    }
+    case 'arrow': {
+      const headWidth = Math.max(0.1, Math.min(0.9, settings.arrowHeadWidth || 0.45));
+      const shaftThickness = Math.max(0.05, Math.min(0.9, settings.arrowShaftThickness || 0.35));
+      const headLen = Math.max(1, Math.min(width - 1, Math.round(width * headWidth)));
+      let shaftH = Math.max(1, Math.min(height - 2, Math.round(height * shaftThickness)));
+      if (height % 2 === 1 && shaftH % 2 === 0) shaftH = Math.max(1, shaftH - 1);
+      else if (height % 2 === 0 && shaftH % 2 === 1) shaftH = Math.max(2, shaftH - 1);
+      const hs = shaftH / 2;
+      const left = -halfW;
+      const hb = left + (width - headLen);
+      pts.push(
+        { x: left, y: -hs }, { x: hb, y: -hs }, { x: hb, y: -halfH }, { x: halfW, y: 0 },
+        { x: hb, y: halfH }, { x: hb, y: hs }, { x: left, y: hs }
+      );
+      return pts;
+    }
+    case 'ellipse':
+      pts.push({ x: 0, y: -halfH }, { x: halfW, y: 0 }, { x: 0, y: halfH }, { x: -halfW, y: 0 });
+      return pts;
+    case 'round-rect': {
+      const r = Math.max(0, Math.min(Math.min(halfW, halfH), Math.round(settings.cornerRadius ?? 16)));
+      pts.push(
+        { x: 0, y: -halfH }, { x: halfW, y: 0 }, { x: 0, y: halfH }, { x: -halfW, y: 0 },
+        { x: -halfW + r, y: -halfH }, { x: halfW - r, y: -halfH }, { x: halfW, y: -halfH + r }, { x: halfW, y: halfH - r },
+        { x: halfW - r, y: halfH }, { x: -halfW + r, y: halfH }, { x: -halfW, y: halfH - r }, { x: -halfW, y: -halfH + r }
+      );
+      return pts;
+    }
+    case 'heart': {
+      const bez = (p0: SKPoint, c1: SKPoint, c2: SKPoint, p1: SKPoint, t: number): SKPoint => {
+        const u = 1 - t;
+        return {
+          x: u * u * u * p0.x + 3 * u * u * t * c1.x + 3 * u * t * t * c2.x + t * t * t * p1.x,
+          y: u * u * u * p0.y + 3 * u * u * t * c1.y + 3 * u * t * t * c2.y + t * t * t * p1.y,
+        };
+      };
+      const tip = { x: 0, y: halfH * 0.7 };
+      const notch = { x: 0, y: -halfH * 0.35 };
+      const segL = [tip, { x: -halfW * 0.9, y: -halfH * 0.2 }, { x: -halfW, y: -halfH * 0.9 }, notch] as const;
+      let left = notch;
+      let top = notch;
+      for (let i = 0; i <= 40; i++) {
+        const q = bez(segL[0], segL[1], segL[2], segL[3], i / 40);
+        if (q.x < left.x) left = q;
+        if (q.y < top.y) top = q;
+      }
+      pts.push(tip, notch, left, { x: -left.x, y: left.y }, top, { x: -top.x, y: top.y });
+      return pts;
+    }
+    default:
+      return null;
+  }
 }
 
 /**

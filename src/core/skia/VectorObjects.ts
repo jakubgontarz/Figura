@@ -13,14 +13,15 @@ import {
   getCanvasCompositeOperation,
 } from './types.ts';
 import { PenNode, cloneNodes, nearestOnPath, penAllPoints } from './PenPath.ts';
-import { renderVectorLine, renderVectorPath, renderVectorShape } from './VectorRenderer.ts';
+import { markWindowedContext, renderVectorLine, renderVectorPath, renderVectorShape, unmarkWindowedContext } from './VectorRenderer.ts';
+import { drawSmartBitmap, getSmartBitmap } from './SmartObjects.ts';
 import { RichText, TextRun, getTextInnerWidth, getTextInset, getTextLayoutOptions, layoutText, pickCharStyle, renderVectorText } from './TextEngine.ts';
 
 /**
  * Obiekty warstwy wektorowej: linia, krzywa (także z Pisaka), kształt i tekst. Przechowują parametry, z których
  * piksele warstwy są budowane za każdym razem tym samym rendererem co przy warstwie rastrowej.
  */
-export type VectorKind = 'line' | 'path' | 'shape' | 'text';
+export type VectorKind = 'line' | 'path' | 'shape' | 'text' | 'smart';
 
 interface Base {
   id: string;
@@ -69,7 +70,26 @@ export interface VecText extends Base {
   fallback: TextCharStyle;
 }
 
-export type VectorObject = VecLine | VecPath | VecShape | VecText;
+/** Obiekt inteligentny: bitmapa wewnętrznego dokumentu w ramce jak kształt. */
+export interface VecSmart extends Base {
+  kind: 'smart';
+  center: SKPoint;
+  width: number;
+  height: number;
+  angle: number;
+  flipX: boolean;
+  flipY: boolean;
+  /** rozmiar wewnętrznego dokumentu (piksele) */
+  docW: number;
+  docH: number;
+  /** wewnętrzny dokument (plik .fig jako tekst); null = przezroczyste tło bez zawartości */
+  fig: string | null;
+  /** spłaszczony wynik wewnętrznego dokumentu (PNG data URL); null = przezroczysty */
+  png: string | null;
+  settings: { blendMode: SKBlendMode };
+}
+
+export type VectorObject = VecLine | VecPath | VecShape | VecText | VecSmart;
 
 export interface VecBounds {
   x0: number;
@@ -104,6 +124,8 @@ export function cloneVectorObject(o: VectorObject): VectorObject {
       return { ...o, nodes: cloneNodes(o.nodes), settings: cloneLineSettings(o.settings) };
     case 'shape':
       return { ...o, center: cp(o.center), settings: cloneShapeSettings(o.settings) };
+    case 'smart':
+      return { ...o, center: cp(o.center), settings: { ...o.settings } };
     case 'text':
       return {
         ...o,
@@ -125,12 +147,13 @@ export function reviveVectorObjects(raw: unknown): VectorObject[] {
   const out: VectorObject[] = [];
   for (const o of raw) {
     if (!o || typeof o !== 'object' || typeof o.kind !== 'string') continue;
-    if (!['line', 'path', 'shape', 'text'].includes(o.kind)) continue;
+    if (!['line', 'path', 'shape', 'text', 'smart'].includes(o.kind)) continue;
     const base = { id: typeof o.id === 'string' ? o.id : newVectorId(), name: typeof o.name === 'string' ? o.name : null, visible: o.visible !== false };
     try {
       if (o.kind === 'line') out.push({ ...(o as VecLine), ...base });
       else if (o.kind === 'path') out.push({ ...(o as VecPath), ...base });
       else if (o.kind === 'shape') out.push({ ...(o as VecShape), ...base });
+      else if (o.kind === 'smart') out.push({ ...(o as VecSmart), ...base, fig: typeof o.fig === 'string' ? o.fig : null, png: typeof o.png === 'string' ? o.png : null, settings: { blendMode: o.settings?.blendMode ?? 'SrcOver' } });
       else out.push({ ...(o as VecText), ...base });
     } catch {
       /* pomiń */
@@ -164,18 +187,24 @@ export function drawVectorObject(ctx: CanvasRenderingContext2D, o: VectorObject)
     case 'text':
       renderVectorText(ctx, o.center, o.width, o.height, o.angle, vectorRichText(o), o.settings, undefined, o.fallback);
       break;
+    case 'smart':
+      drawSmartBitmap(ctx, getSmartBitmap(o.png), o.center, o.width, o.height, o.angle, o.flipX, o.flipY);
+      break;
   }
 }
 
 /** Nakłada obiekt na kontekst akumulacji tak jak przy zatwierdzaniu na warstwie rastrowej (obiekt osobno, potem tryb mieszania). */
 let scratchCanvas: HTMLCanvasElement | null = null;
-export function compositeVectorObject(acc: CanvasRenderingContext2D, o: VectorObject, w: number, h: number, ox: number, oy: number): void {
+export function compositeVectorObject(acc: CanvasRenderingContext2D, o: VectorObject, w: number, h: number, ox: number, oy: number, windowed = false): void {
   if (!scratchCanvas) scratchCanvas = document.createElement('canvas');
   if (scratchCanvas.width !== w || scratchCanvas.height !== h) {
     scratchCanvas.width = w;
     scratchCanvas.height = h;
   }
   const sctx = scratchCanvas.getContext('2d')!;
+  // windowed = rysowanie w skali ekranu: renderery przycinają obiekt do bufora (w x h) zamiast rasteryzować go w całości
+  if (windowed) markWindowedContext(sctx);
+  else unmarkWindowedContext(sctx);
   sctx.setTransform(1, 0, 0, 1, 0, 0);
   sctx.clearRect(0, 0, w, h);
   sctx.translate(-ox, -oy);
@@ -213,6 +242,10 @@ export function vectorObjectBounds(o: VectorObject): VecBounds {
       const diag = Math.hypot(o.width, o.height) / 2;
       const pad = Math.max(40, o.settings.strokeWidth * 3 + 40);
       const r = diag + pad;
+      return { x0: Math.floor(o.center.x - r), y0: Math.floor(o.center.y - r), x1: Math.ceil(o.center.x + r), y1: Math.ceil(o.center.y + r) };
+    }
+    case 'smart': {
+      const r = Math.hypot(o.width, o.height) / 2 + 4;
       return { x0: Math.floor(o.center.x - r), y0: Math.floor(o.center.y - r), x1: Math.ceil(o.center.x + r), y1: Math.ceil(o.center.y + r) };
     }
     case 'text': {
@@ -260,6 +293,8 @@ export function vectorObjectLabel(o: VectorObject): string {
       return 'Linia';
     case 'path':
       return o.freehand ? 'Pisak' : o.closed ? 'Krzywa zamknięta' : 'Krzywa';
+    case 'smart':
+      return 'Obiekt inteligentny';
     case 'shape':
       return SHAPE_NAMES[o.settings.shapeKind as string] ?? 'Kształt';
     case 'text': {
@@ -300,6 +335,7 @@ export function hitTestVectorObject(o: VectorObject, p: SKPoint, tol: number): b
       }
       return false;
     }
+    case 'smart':
     case 'shape':
     case 'text': {
       const dx = p.x - o.center.x;
@@ -344,6 +380,7 @@ export function translateVectorObject<T extends VectorObject>(o: T, dx: number, 
       }
       break;
     case 'shape':
+    case 'smart':
     case 'text':
       mv(o.center);
       break;
@@ -365,6 +402,7 @@ export function vectorObjectTightBounds(o: VectorObject): VecBounds {
       pad = o.settings.strokeWidth / 2;
       break;
     case 'shape':
+    case 'smart':
     case 'text': {
       let h = o.height;
       let w = o.width;
@@ -384,7 +422,7 @@ export function vectorObjectTightBounds(o: VectorObject): VecBounds {
         const ly = (sy * h) / 2;
         pts.push({ x: o.center.x + lx * c - ly * s, y: o.center.y + lx * s + ly * c });
       }
-      pad = o.settings.strokeWidth / 2;
+      pad = o.kind === 'smart' ? 0 : (o.settings as { strokeWidth: number }).strokeWidth / 2;
       break;
     }
   }
@@ -415,4 +453,58 @@ export function vectorObjectKey(o: VectorObject): string {
 
 export function vectorObjectsEqual(a: VectorObject, b: VectorObject): boolean {
   return vectorObjectKey(a) === vectorObjectKey(b);
+}
+
+/**
+ * Kopia obiektu przeskalowana o S (wszystkie wymiary w pikselach: współrzędne, grubości, promienie, rozmiary pisma)
+ * i przesunięta o (dx, dy) już po skalowaniu. Pozwala narysować obiekt tymi samymi rendererami w rozdzielczości widoku,
+ * czyli wektorowo (ostro przy dowolnym powiększeniu), zamiast powiększać piksele dokumentu.
+ */
+export function scaleVectorObject(o: VectorObject, S: number, dx = 0, dy = 0): VectorObject {
+  const c = cloneVectorObject(o);
+  const sp = (p: SKPoint | null | undefined) => {
+    if (p) {
+      p.x = p.x * S + dx;
+      p.y = p.y * S + dy;
+    }
+  };
+  switch (c.kind) {
+    case 'line':
+      sp(c.p0);
+      sp(c.p1);
+      c.settings.strokeWidth *= S;
+      break;
+    case 'path':
+      for (const n of c.nodes) {
+        sp(n);
+        sp(n.hin);
+        sp(n.hout);
+      }
+      c.settings.strokeWidth *= S;
+      break;
+    case 'shape':
+      sp(c.center);
+      c.width *= S;
+      c.height *= S;
+      c.settings.strokeWidth *= S;
+      c.settings.cornerRadius *= S;
+      break;
+    case 'smart':
+      sp(c.center);
+      c.width *= S;
+      c.height *= S;
+      break;
+    case 'text':
+      sp(c.center);
+      c.width *= S;
+      c.height *= S;
+      c.settings.fontSize *= S;
+      c.settings.letterSpacing *= S;
+      c.settings.strokeWidth *= S;
+      if (c.settings.padding) c.settings.padding *= S;
+      c.fallback.fontSize *= S;
+      for (const r of c.runs) r.style.fontSize *= S;
+      break;
+  }
+  return c;
 }

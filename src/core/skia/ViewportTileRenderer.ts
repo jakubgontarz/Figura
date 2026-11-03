@@ -8,7 +8,7 @@ import { SKBlendMode, SKRectI, getCanvasCompositeOperation } from './types.ts';
 import { markWindowedContext } from './VectorRenderer.ts';
 import { grayToAlpha, finishPassThrough } from './Layer.ts';
 import type { FxContext } from './Filters.ts';
-import { GpuComposer, type GpuPreviewSource, type GpuWindow } from './GpuCompose.ts';
+import { GpuComposer, type GpuCrispSource, type GpuPreviewSource, type GpuWindow } from './GpuCompose.ts';
 
 /**
  * Szybki, przerywalny renderer podglądu edycji (figury, linie, krzywe, tekst, gradient) dla płótna dowolnej wielkości.
@@ -366,7 +366,7 @@ export class ViewportTileRenderer {
       bounds: pv.bounds,
       rasterize: (win, rect) => this.rasterizeForGpu(pv, win, rect),
     };
-    const glc = this.gpu.compose(v, source);
+    const glc = this.gpu.compose(v, source, this.crisp);
     if (!glc) return false;
     if (this.canvas.width !== v.width || this.canvas.height !== v.height) {
       this.canvas.width = v.width;
@@ -392,6 +392,16 @@ export class ViewportTileRenderer {
     if (this.windowApprox && !exact) this.scheduleRefine();
     this.flushIdle();
     return true;
+  }
+
+  /** Tryb Wektory: warstwy wektorowe w podglądzie sesji rysowane ostro w skali widoku (ustawia widok dokumentu). */
+  public crisp: GpuCrispSource | null = null;
+
+  /** Wspólny kompozytor GPU (te same tekstury dokumentu co w podglądzie sesji); null, gdy GPU niedostępne. */
+  public sharedGpu(): GpuComposer | null {
+    if (!GpuComposer.available()) return null;
+    if (!this.gpu) this.gpu = new GpuComposer(this.engine);
+    return this.gpu;
   }
 
   /** Wyjście z trybu GPU: płótno kafelków zawiera cały dokument, więc ścieżka CPU zaczyna od pełnego odtworzenia. */
@@ -767,7 +777,7 @@ export class ViewportTileRenderer {
     // po zakończeniu dokładnego renderu z tego podglądu powstanie sprite do przesuwania (tylko tryb nakładki, bez zaznaczenia)
     const mv = req.preview.move;
     this.spriteCandidate =
-      mv && overlay && fullKey !== null && !this.engine.selectionManager.hasActiveSelection
+      mv && overlay && fullKey !== null && !this.engine.selectionAffectsActiveLayer
         ? { key: this.makeFullKey(mv.key, overlay), x: mv.x, y: mv.y }
         : null;
 
@@ -1089,7 +1099,8 @@ export class ViewportTileRenderer {
    */
   private getSelectionRect(): Rect | null | undefined {
     const sm = this.engine.selectionManager;
-    if (!sm.hasActiveSelection) return undefined;
+    // zaznaczenie nie dotyczy warstwy wektorowej: jej podgląd nie jest ograniczany do prostokąta zaznaczenia
+    if (!this.engine.selectionAffectsActiveLayer) return undefined;
     const ref = sm.contourPath;
     if (this.selCacheRef === ref) return this.selCacheRect;
 
@@ -1260,7 +1271,7 @@ export class ViewportTileRenderer {
   /** Token zaznaczenia: zmienia się, gdy zaznaczenie zostanie zbudowane od nowa (każda zmiana tworzy nowy contourPath). */
   private selectionToken(): number {
     const sm = this.engine.selectionManager;
-    if (!sm.hasActiveSelection) return 0;
+    if (!this.engine.selectionAffectsActiveLayer) return 0;
     const ref = sm.contourPath;
     if (this.selTokenRef !== ref) {
       this.selTokenRef = ref;
@@ -1424,7 +1435,7 @@ export class ViewportTileRenderer {
     const blk = this.prevBlk;
     // przesuwanie sprite'a działa tylko poniżej 100% (powyżej render idzie w rozdzielczości dokumentu)
     if (!cand || !v || !pv || !blk || !pv.bounds || !this.overlay || v.zoom >= 1) return;
-    if (this.engine.selectionManager.hasActiveSelection) return;
+    if (this.engine.selectionAffectsActiveLayer) return;
     const b = pv.bounds;
     const eng = this.engine;
     if (b.left < 0 || b.top < 0 || b.right > eng.width || b.bottom > eng.height) return;
@@ -1476,7 +1487,7 @@ export class ViewportTileRenderer {
     const mv = req.preview.move;
     const sp = this.sprite;
     if (!mv || !sp || !overlay || !this.overlay) return false;
-    if (this.engine.selectionManager.hasActiveSelection) return false;
+    if (this.engine.selectionAffectsActiveLayer) return false;
     if (sp.key !== this.makeFullKey(mv.key, overlay)) return false;
     if (sp.zoom !== v.zoom || sp.left !== v.left || sp.top !== v.top || sp.width !== v.width || sp.height !== v.height) return false;
     // płótno kafelków musi być w stanie sesji podglądu (po present() zawiera cały dokument)

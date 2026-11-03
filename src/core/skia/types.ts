@@ -364,8 +364,24 @@ export type ToolType =
   | 'text'
   | 'vector-select'
   | 'pen'
+  | 'smart-object'
+  | 'guides'
   | 'pan'
   | 'zoom';
+
+/** Prowadnica obrazu: pionowa ('v', pozycja x) albo pozioma ('h', pozycja y), w pikselach dokumentu. */
+export interface Guide {
+  id: string;
+  axis: 'h' | 'v';
+  pos: number;
+}
+
+/** Ustawienia narzędzia Obiekt inteligentny: rozmiar ramki (px) i tryb mieszania. */
+export interface SmartObjectSettings {
+  width: number;
+  height: number;
+  blendMode: SKBlendMode;
+}
 
 export interface FiguraProjectFile {
   format: 'FIGURA_PROJECT';
@@ -374,6 +390,9 @@ export interface FiguraProjectFile {
   width: number;
   height: number;
   tileSize: number;
+  dpi?: number;
+  /** Prowadnice obrazu (niezależne od warstw) */
+  guides?: { id: string; axis: 'h' | 'v'; pos: number }[];
   activeLayerIndex: number;
   layers: {
     id: string;
@@ -393,6 +412,11 @@ export interface FiguraProjectFile {
     /** Warstwa wektorowa: lista obiektów (piksele w `dataUrl` są ich renderem) */
     isVector?: boolean;
     vectorObjects?: unknown;
+    /** Obiekty maski warstwy wektorowej i podkład maski (PNG), na którym są rysowane */
+    maskObjects?: unknown;
+    maskBaseDataUrl?: string;
+    /** Maska warstwy wektorowej jest rastrowa */
+    maskRaster?: boolean;
     groupId?: string | null;
     expanded?: boolean;
     /** Korekcje nieniszczące warstwy (kolejność = kolejność stosowania) */

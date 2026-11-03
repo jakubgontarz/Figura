@@ -550,6 +550,34 @@ export class BrushEngine {
     return null;
   }
 
+  private maskedStrokeCanvas: HTMLCanvasElement | null = null;
+
+  /**
+   * Bufor pociągnięcia przycięty maską zaznaczenia (obszar `dirty`). Używa współdzielonego płótna CPU
+   * (willReadFrequently) - płótno tworzone bez tej flagi trafia na GPU, a odczyt z niego do kafelków CPU
+   * wymusza synchroniczny readback (na dużym płótnie to sekundy przy puszczeniu przycisku myszy).
+   */
+  private buildMaskedStroke(src: HTMLCanvasElement, mask: HTMLCanvasElement, dirty: SKRectI): HTMLCanvasElement {
+    if (!this.maskedStrokeCanvas) this.maskedStrokeCanvas = document.createElement('canvas');
+    const cv = this.maskedStrokeCanvas;
+    if (cv.width < dirty.width || cv.height < dirty.height) {
+      cv.width = Math.max(cv.width, dirty.width, 256);
+      cv.height = Math.max(cv.height, dirty.height, 256);
+    }
+    const mctx = cv.getContext('2d', { willReadFrequently: true })!;
+    mctx.save();
+    mctx.setTransform(1, 0, 0, 1, 0, 0);
+    mctx.globalCompositeOperation = 'source-over';
+    mctx.globalAlpha = 1;
+    // z zapasem: kafelki na brzegu `dirty` czytają odrobinę poza obszar - nie może tam zostać stary obraz
+    mctx.clearRect(0, 0, dirty.width + 128, dirty.height + 128);
+    mctx.drawImage(src, dirty.left, dirty.top, dirty.width, dirty.height, 0, 0, dirty.width, dirty.height);
+    mctx.globalCompositeOperation = 'destination-in';
+    mctx.drawImage(mask, dirty.left, dirty.top, dirty.width, dirty.height, 0, 0, dirty.width, dirty.height);
+    mctx.restore();
+    return cv;
+  }
+
   private bakeStrokeToLayer(
     layer: Layer,
     dirty: SKRectI,
@@ -564,24 +592,7 @@ export class BrushEngine {
     // Jeśli aktywne jest zaznaczenie, zamaskuj bufor pociągnięcia
     let sourceCanvas: HTMLCanvasElement = this.strokeCanvas;
     if (selectionMask) {
-      const maskedCanvas = document.createElement('canvas');
-      maskedCanvas.width = dirty.width;
-      maskedCanvas.height = dirty.height;
-      const mctx = maskedCanvas.getContext('2d')!;
-
-      mctx.drawImage(
-        this.strokeCanvas,
-        dirty.left, dirty.top, dirty.width, dirty.height,
-        0, 0, dirty.width, dirty.height
-      );
-      mctx.globalCompositeOperation = 'destination-in';
-      mctx.drawImage(
-        selectionMask,
-        dirty.left, dirty.top, dirty.width, dirty.height,
-        0, 0, dirty.width, dirty.height
-      );
-
-      sourceCanvas = maskedCanvas;
+      sourceCanvas = this.buildMaskedStroke(this.strokeCanvas, selectionMask, dirty);
     }
 
     const affectedTiles = layer.tileGrid.getTilesIntersectingRect(dirty);
@@ -2257,24 +2268,7 @@ export class BrushEngine {
 
     let sourceCanvas: HTMLCanvasElement = strokeSrc;
     if (selectionMask) {
-      const maskedCanvas = document.createElement('canvas');
-      maskedCanvas.width = dirty.width;
-      maskedCanvas.height = dirty.height;
-      const mctx = maskedCanvas.getContext('2d')!;
-
-      mctx.drawImage(
-        strokeSrc,
-        dirty.left, dirty.top, dirty.width, dirty.height,
-        0, 0, dirty.width, dirty.height
-      );
-      mctx.globalCompositeOperation = 'destination-in';
-      mctx.drawImage(
-        selectionMask,
-        dirty.left, dirty.top, dirty.width, dirty.height,
-        0, 0, dirty.width, dirty.height
-      );
-
-      sourceCanvas = maskedCanvas;
+      sourceCanvas = this.buildMaskedStroke(strokeSrc, selectionMask, dirty);
     }
 
     const affectedTiles = grid.getTilesIntersectingRect(dirty);

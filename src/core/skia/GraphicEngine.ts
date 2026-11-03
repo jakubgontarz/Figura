@@ -4,6 +4,7 @@
  */
 
 import { PenNode, cloneNodes, penAllPoints } from './PenPath.ts';
+import { ensureSmartBitmap, registerSmartBitmap } from './SmartObjects.ts';
 import { Layer, grayToAlpha, finishPassThrough } from './Layer.ts';
 import { Quad, drawPerspectiveMesh, drawPerspectivePreview, isConvexQuad, warpPerspectiveExact, warpPerspectivePreview, PerspectivePreview, WarpResult } from './Perspective.ts';
 import { renderGradientPreview } from './GradientRenderer.ts';
@@ -26,6 +27,12 @@ import {
   reviveCorrections,
 } from './Corrections.ts';
 import { MAX_FILTER_MARGIN } from './Filters.ts';
+import { isFilterType } from './Corrections.ts';
+
+/** Czy lista korekcji zawiera włączony filtr (działający na sąsiednich pikselach) albo stylizacje. */
+function listHasFilters(list: ReadonlyArray<{ type: CorrectionType; enabled: boolean }>): boolean {
+  return list.some((c) => c.enabled && isFilterType(c.type));
+}
 import type { FxContext } from './Filters.ts';
 import { LayerStyles, cloneStyles, defaultStyles, reviveStyles, stylesCount, stylesEqual } from './Styles.ts';
 import { FillClient } from './FillClient.ts';
@@ -49,6 +56,7 @@ import {
   TextToolSettings,
   WandSampleSource,
   getCanvasCompositeOperation,
+  Guide,
 } from './types.ts';
 import {
   renderVectorPath,
@@ -307,6 +315,25 @@ export class GraphicEngine {
   public gradientPreview: GradientPreviewParams | null = null;
 
   // Wewnętrzny schowek aplikacji FIGURA
+  /** Rozdzielczość dokumentu (piksele na cal): przelicza piksele na milimetry w trybie wektorowym. */
+  public dpi: number = 96;
+  /** Prowadnice obrazu: nie należą do żadnej warstwy, zapisują się w pliku. */
+  public guides: Guide[] = [];
+  public addGuide(axis: 'h' | 'v', pos: number): string {
+    const id = `guide_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+    this.guides.push({ id, axis, pos });
+    return id;
+  }
+  public moveGuide(id: string, pos: number): void {
+    const g = this.guides.find((x) => x.id === id);
+    if (g) g.pos = pos;
+  }
+  public removeGuide(id: string): void {
+    this.guides = this.guides.filter((x) => x.id !== id);
+  }
+  public clearGuides(): void {
+    this.guides = [];
+  }
   public clipboardCanvas: HTMLCanvasElement | null = null;
   public clipboardMaskCanvas: HTMLCanvasElement | null = null;
 
@@ -421,7 +448,8 @@ export class GraphicEngine {
       this.brushMaskCanvas = document.createElement('canvas');
       this.brushMaskCanvas.width = Math.max(256, w);
       this.brushMaskCanvas.height = Math.max(256, h);
-      this.brushMaskCtx = this.brushMaskCanvas.getContext('2d');
+      // bufor CPU: rysowanie z niego do buforów CPU (okno / kafelek) nie może wymagać odczytu z GPU przy każdym ruchu pędzla
+      this.brushMaskCtx = this.brushMaskCanvas.getContext('2d', { willReadFrequently: true });
     }
     if (this.brushMaskCanvas.width < w || this.brushMaskCanvas.height < h) {
       this.brushMaskCanvas.width = Math.max(this.brushMaskCanvas.width, w);
@@ -616,7 +644,10 @@ export class GraphicEngine {
           }
         }
         if (action.other) this.applyOtherSnapshot(layer, action.onMask, action.other.before);
-        if (action.vector) layer.vectorObjects = cloneVectorObjects(action.vector.before);
+        if (action.vector) {
+          if (action.onMask && layer.maskGrid) layer.maskObjects = cloneVectorObjects(action.vector.before);
+          else layer.layerObjects = cloneVectorObjects(action.vector.before);
+        }
         layer.updateThumbnail();
       }
       this.redoStack.push(action);
@@ -715,7 +746,10 @@ export class GraphicEngine {
           }
         }
         if (action.other) this.applyOtherSnapshot(layer, action.onMask, action.other.after);
-        if (action.vector) layer.vectorObjects = cloneVectorObjects(action.vector.after);
+        if (action.vector) {
+          if (action.onMask && layer.maskGrid) layer.maskObjects = cloneVectorObjects(action.vector.after);
+          else layer.layerObjects = cloneVectorObjects(action.vector.after);
+        }
         layer.updateThumbnail();
       }
       this.undoStack.push(action);
@@ -785,7 +819,7 @@ export class GraphicEngine {
 
   public copy(): boolean {
     const layer = this.getActiveLayer();
-    if (!layer || !layer.visible) return false;
+    if (!layer || !layer.paintable) return false;
 
     const clip = document.createElement('canvas');
     clip.width = this.width;
@@ -830,7 +864,7 @@ export class GraphicEngine {
 
   public cut(): boolean {
     const layer = this.getActiveLayer();
-    if (!layer || layer.locked || layer.isVector) return false;
+    if (!layer || layer.locked || layer.vectorTarget) return false;
 
     if (!this.copy()) return false;
 
@@ -914,7 +948,7 @@ export class GraphicEngine {
 
   public pasteCanvas(pastedCanvas: HTMLCanvasElement, customMaskCanvas?: HTMLCanvasElement | null): boolean {
     const layer = this.getActiveLayer();
-    if (!layer || layer.locked || layer.isVector) return false;
+    if (!layer || layer.locked || layer.vectorTarget) return false;
 
     if (this.transformContentSession) {
       this.commitTransformContent();
@@ -1095,6 +1129,39 @@ export class GraphicEngine {
   public get renderIsolation(): { start: number; header: number; group: Layer } | null {
     if (this.maskView) return null;
     return this.getRenderList().iso;
+  }
+
+  /**
+   * Lista warstw dla ostrego kompozytora GPU (tryb Wektory): wszystkie warstwy w kolejności stosu, bez pośredników grup.
+   * Grupy składane izolowanie (tryb mieszania, korekcje grupy, korekcja samodzielna w grupie) mają zakres [start, header]:
+   * kompozytor rysuje ich dzieci do osobnego bufora i dopiero ten bufor nakłada z ustawieniami nagłówka. Dzięki temu
+   * obiekty wektorowe w takiej grupie też są ostre. null = układ, którego nie obsługujemy (przepuszczanie z krytem lub maską,
+   * grupy w grupach, nieciągłe dzieci, edycja maski grupy) - wtedy działa dotychczasowa ścieżka.
+   */
+  public get crispRenderList(): { layers: Layer[]; groupEnds: Map<number, number>; active: number } | null {
+    const L = this.layers;
+    const groupEnds = new Map<number, number>(); // indeks nagłówka -> indeks pierwszego dziecka
+    for (let i = 0; i < L.length; i++) {
+      const h = L[i];
+      if (!h.isGroup) continue;
+      const kind = this.groupKind(h);
+      if (kind === 'none') continue;
+      if (kind === 'pass') return null;
+      if (h.groupId) return null; // grupa w grupie
+      if (h === L[this.activeLayerIndex] && h.editMask) return null;
+      let first = i;
+      let n = 0;
+      for (let k = i - 1; k >= 0 && L[k].groupId === h.id; k--) {
+        if (L[k].isGroup) return null;
+        first = k;
+        n++;
+      }
+      for (let k = 0; k < i - n; k++) if (L[k].groupId === h.id) return null; // dzieci poza ciągłym zakresem
+      for (let k = i + 1; k < L.length; k++) if (L[k].groupId === h.id) return null;
+      if (n === 0) continue;
+      groupEnds.set(i, first);
+    }
+    return { layers: L, groupEnds, active: this.activeLayerIndex };
   }
 
   /** Czy w bieżącej liście są aktywne korekcje samodzielne (wtedy bufory grup warstw nie mają zastosowania). */
@@ -1470,6 +1537,17 @@ export class GraphicEngine {
    * potem maskowane i nakładane z jej krytem i trybem.
    */
   private drawLayersCropped(ctx: CanvasRenderingContext2D, cropX: number, cropY: number, w: number, h: number): void {
+    // eksport i próbkowanie zawsze zawierają warstwy wyświetlane wektorowo (viewHidden dotyczy tylko widoku)
+    const hid = this.layers.filter((l) => l.viewHidden);
+    if (hid.length) {
+      for (const l of hid) l.viewHidden = false;
+      try {
+        this.drawLayersCropped(ctx, cropX, cropY, w, h);
+      } finally {
+        for (const l of hid) l.viewHidden = true;
+      }
+      return;
+    }
     const L = this.layers;
     // filtry na złożeniu (korekcje stosu, grupy) potrzebują całego dokumentu: składamy całość i wycinamy fragment
     if ((cropX !== 0 || cropY !== 0 || w !== this.width || h !== this.height) && L.some((l) => l.hasActiveFilters && (l.isAdjustment || l.isGroup) && (!l.isAdjustment || l.adjustmentActive))) {
@@ -1629,6 +1707,7 @@ export class GraphicEngine {
       return;
     }
     this.finishOpenSessions();
+    this.vec.clearSelection();
     this.activeLayerIndex = index;
     layer.editMask = wantMask;
     // wyjście z edycji maski kończy też jej podgląd w szarości
@@ -1881,14 +1960,14 @@ export class GraphicEngine {
 
   /** Zaznaczenie wpływa na podgląd i rysowanie (nie dotyczy warstw wektorowych: obiekty nie są przycinane do zaznaczenia). */
   public get selectionAffectsActiveLayer(): boolean {
-    return this.selectionManager.hasActiveSelection && !this.getActiveLayer()?.isVector;
+    return this.selectionManager.hasActiveSelection && !this.getActiveLayer()?.vectorTarget;
   }
 
   /** Powód, dla którego piksele aktywnej warstwy nie mogą być edytowane narzędziami rastrowymi (null = można). */
   public pixelEditBlockReason(layer: Layer | undefined = this.getActiveLayer()): string | null {
     if (!layer) return null;
     if (layer.locked) return 'Warstwa jest zablokowana';
-    if (layer.isVector) return 'Warstwa wektorowa: obiekty edytuje się narzędziem Manipulacja';
+    if (layer.vectorTarget) return layer.editMask && layer.maskGrid ? 'Maska wektorowa: obiekty edytuje się narzędziem Manipulacja (przycisk „Przekształć warstwę” zamienia maskę na rastrową)' : 'Warstwa wektorowa: obiekty edytuje się narzędziem Manipulacja';
     return null;
   }
 
@@ -1918,8 +1997,12 @@ export class GraphicEngine {
     const sel = this.selectedCorrection;
     if (sel) {
       const li = this.layers.findIndex((l) => l.id === sel.layerId);
+      if (li >= 0) {
+        const done = this.removeCorrection(li, sel.id); // przy zaznaczeniu wielu usuwa wszystkie zaznaczone
+        this.selectedCorrection = null;
+        return done;
+      }
       this.selectedCorrection = null;
-      if (li >= 0) return this.removeCorrection(li, sel.id);
     }
     const active = this.getActiveLayer();
     if (!active) return false;
@@ -1960,7 +2043,9 @@ export class GraphicEngine {
     if (sel) {
       const li = this.layers.findIndex((l) => l.id === sel.layerId);
       const before = li >= 0 ? this.layers[li].corrections.length : 0;
+      const wasMulti = this.selectedCorrectionIds.length > 1;
       if (li >= 0 && this.duplicateCorrection(li, sel.id)) {
+        if (wasMulti) return this.getActiveLayer();
         const l = this.layers[li];
         const i = l.corrections.findIndex((x) => x.id === sel.id);
         if (l.corrections.length > before && i >= 0) this.selectedCorrection = { layerId: l.id, id: l.corrections[i + 1].id };
@@ -2139,7 +2224,19 @@ export class GraphicEngine {
     if (place === 'into' && !tgt.isGroup && !tgt.hasMask && !src.isGroup && !src.isAdjustment) {
       if (tgt.locked || src.locked) return false;
       this.saveFullSnapshot('Utworzenie maski z warstwy');
+      const srcObjects = src.isVector && tgt.isVector ? cloneVectorObjects(src.layerObjects) : null;
       tgt.setMaskFromLayer(src);
+      if (srcObjects && tgt.maskGrid) {
+        // wektorowa na wektorową: maska zostaje wektorowa (obiekty źródła na białym podkładzie)
+        const base = new TileGrid(this.width, this.height, this.tileSize);
+        for (const brow of base.tiles) for (const bt of brow) bt.fill({ r: 255, g: 255, b: 255, a: 255 });
+        tgt.maskBase = base;
+        tgt.maskObjects = srcObjects;
+        tgt.maskRaster = false;
+        this.vec.rebuildAll(tgt);
+        tgt.editMask = true;
+        tgt.updateThumbnail(true);
+      }
       if (this.maskView === src) this.maskView = null;
       this.layers.splice(srcIndex, 1);
       this.activeLayerIndex = this.layers.indexOf(tgt);
@@ -2216,6 +2313,8 @@ export class GraphicEngine {
       const l = this.layers[li];
       const i = l ? l.corrections.findIndex((x) => x.id === sel.id) : -1;
       if (i < 0) return false;
+      const multi = this.multiSelectedIds(l, sel.id);
+      if (multi) return this.moveSelectedCorrections(li, multi, dir);
       const ni = i + dir; // lista wyświetlana od końca: „w górę” = później w tablicy
       if (ni < 0 || ni >= l.corrections.length) return false;
       return this.moveCorrection(li, sel.id, li, dir > 0 ? ni + 1 : ni);
@@ -2581,7 +2680,12 @@ export class GraphicEngine {
     const c = layer.corrections.find((x) => x.id === id);
     if (!c) return false;
     const before = cloneCorrections(layer.corrections);
-    c.enabled = !c.enabled;
+    const multi = this.multiSelectedIds(layer, id);
+    if (multi) {
+      // wszystkie zaznaczone dostają przeciwny stan niż kliknięty
+      const target = !c.enabled;
+      for (const x of layer.corrections) if (multi.includes(x.id)) x.enabled = target;
+    } else c.enabled = !c.enabled;
     this.pushCorrectionsAction(c.enabled ? 'Włączenie korekcji' : 'Wyłączenie korekcji', [
       { layerIndex, before, after: cloneCorrections(layer.corrections) },
     ]);
@@ -2596,7 +2700,11 @@ export class GraphicEngine {
     const i = layer.corrections.findIndex((x) => x.id === id);
     if (i < 0) return false;
     const before = cloneCorrections(layer.corrections);
-    layer.corrections.splice(i, 1);
+    const multi = this.multiSelectedIds(layer, id);
+    if (multi) {
+      layer.corrections = layer.corrections.filter((x) => !multi.includes(x.id));
+      this.selectedCorrection = null;
+    } else layer.corrections.splice(i, 1);
     this.pushCorrectionsAction('Usunięcie korekcji', [{ layerIndex, before, after: cloneCorrections(layer.corrections) }]);
     this.invalidateCorrections(layer);
     return true;
@@ -2608,11 +2716,78 @@ export class GraphicEngine {
   // (w grupie: na warstwy pod nim w tej grupie; na poziomie głównym: na cały obraz pod nim).
 
   /** Zaznaczony efekt na liście korekcji WEWNĄTRZ warstwy (do „Zastosuj efekty”); null = zaznaczona sama warstwa. */
-  public selectedCorrection: { layerId: string; id: string } | null = null;
+  private _selCorr: { layerId: string; id: string } | null = null;
+  /** Dodatkowo zaznaczone efekty tej samej warstwy (Ctrl / Shift); zaznaczenie główne jest w `_selCorr`. */
+  private _selCorrExtra = new Set<string>();
+  private _selCorrAnchor: string | null = null;
 
-  public selectCorrection(layerIndex: number, id: string | null): void {
+  public get selectedCorrection(): { layerId: string; id: string } | null {
+    return this._selCorr;
+  }
+  public set selectedCorrection(v: { layerId: string; id: string } | null) {
+    this._selCorr = v;
+    this._selCorrExtra.clear();
+    this._selCorrAnchor = v ? v.id : null;
+  }
+
+  /** Wszystkie zaznaczone efekty warstwy (w kolejności tablicy: od pierwszego zastosowanego). */
+  public get selectedCorrectionIds(): string[] {
+    const sc = this._selCorr;
+    if (!sc) return [];
+    const l = this.layers.find((x) => x.id === sc.layerId);
+    if (!l) return [];
+    return l.corrections.filter((c) => c.id === sc.id || this._selCorrExtra.has(c.id)).map((c) => c.id);
+  }
+
+  /** mode: 'single' = zwykłe kliknięcie, 'toggle' = Ctrl (dodaj / odejmij), 'range' = Shift (od ostatnio klikniętego). */
+  public selectCorrection(layerIndex: number, id: string | null, mode: 'single' | 'toggle' | 'range' = 'single'): void {
     const l = this.layers[layerIndex];
-    this.selectedCorrection = l && id && l.corrections.some((c) => c.id === id) ? { layerId: l.id, id } : null;
+    if (!l || !id || !l.corrections.some((c) => c.id === id)) {
+      this.selectedCorrection = null;
+      return;
+    }
+    const cur = this._selCorr;
+    if (mode === 'single' || !cur || cur.layerId !== l.id) {
+      this.selectedCorrection = { layerId: l.id, id };
+      return;
+    }
+    if (mode === 'toggle') {
+      const ids = new Set(this.selectedCorrectionIds);
+      if (ids.has(id)) {
+        ids.delete(id);
+        if (ids.size === 0) {
+          this.selectedCorrection = null;
+          return;
+        }
+        const first = l.corrections.find((c) => ids.has(c.id))!;
+        const keep = ids.has(cur.id) ? cur.id : first.id;
+        this._selCorr = { layerId: l.id, id: keep };
+        this._selCorrExtra = new Set([...ids].filter((x) => x !== keep));
+      } else {
+        this._selCorrExtra = new Set([...ids].filter((x) => x !== id));
+        if (cur.id !== id) this._selCorrExtra.add(cur.id);
+        this._selCorr = { layerId: l.id, id };
+      }
+      this._selCorrAnchor = id;
+      return;
+    }
+    // range
+    const anchor = this._selCorrAnchor && l.corrections.some((c) => c.id === this._selCorrAnchor) ? this._selCorrAnchor : cur.id;
+    const a = l.corrections.findIndex((c) => c.id === anchor);
+    const b = l.corrections.findIndex((c) => c.id === id);
+    const lo = Math.min(a, b);
+    const hi = Math.max(a, b);
+    this._selCorr = { layerId: l.id, id };
+    this._selCorrExtra = new Set(l.corrections.slice(lo, hi + 1).map((c) => c.id).filter((x) => x !== id));
+    this._selCorrAnchor = anchor;
+  }
+
+  /** Czy efekt jest zaznaczony razem z innymi (wtedy operacje dotyczą całego zaznaczenia). */
+  private multiSelectedIds(layer: Layer, id: string): string[] | null {
+    const sc = this._selCorr;
+    if (!sc || sc.layerId !== layer.id) return null;
+    const ids = this.selectedCorrectionIds;
+    return ids.length > 1 && ids.includes(id) ? ids : null;
   }
 
   private makeAdjustmentLayer(c: Correction): Layer {
@@ -2726,12 +2901,12 @@ export class GraphicEngine {
     if (mode === 'layer') return this.applyActiveLayerCorrections();
     if (mode === 'correction') {
       if (act.locked || act.isVector) return false;
-      const id = this.selectedCorrection!.id;
-      const c = act.corrections.find((x) => x.id === id);
-      if (!c) return false;
+      const ids = this.selectedCorrectionIds;
+      const picked = act.corrections.filter((x) => ids.includes(x.id));
+      if (picked.length === 0) return false;
       this.saveFullSnapshot('Zastosowanie efektu');
-      act.bakeCorrectionList(c.enabled ? [c] : []);
-      act.corrections = act.corrections.filter((x) => x.id !== id);
+      act.bakeCorrectionList(picked.filter((x) => x.enabled));
+      act.corrections = act.corrections.filter((x) => !ids.includes(x.id));
       act.touchCorrections();
       this.selectedCorrection = null;
     } else {
@@ -2804,6 +2979,25 @@ export class GraphicEngine {
     const i = layer.corrections.findIndex((x) => x.id === id);
     if (i < 0) return false;
     const before = cloneCorrections(layer.corrections);
+    const multi = this.multiSelectedIds(layer, id);
+    if (multi) {
+      // każda kopia ląduje tuż nad swoim oryginałem; zaznaczenie przechodzi na kopie
+      const copies: string[] = [];
+      for (let k = layer.corrections.length - 1; k >= 0; k--) {
+        const src = layer.corrections[k];
+        if (!multi.includes(src.id)) continue;
+        const cp = createCorrection(src.type, cloneParams(src.params) as never) as Correction;
+        cp.enabled = src.enabled;
+        layer.corrections.splice(k + 1, 0, cp);
+        copies.push(cp.id);
+      }
+      layer.correctionsExpanded = true;
+      this.pushCorrectionsAction('Duplikowanie korekcji', [{ layerIndex, before, after: cloneCorrections(layer.corrections) }]);
+      this.invalidateCorrections(layer);
+      this.selectedCorrection = { layerId: layer.id, id: copies[0] };
+      this._selCorrExtra = new Set(copies.slice(1));
+      return true;
+    }
     const copy = createCorrection(layer.corrections[i].type, cloneParams(layer.corrections[i].params) as never) as Correction;
     copy.enabled = layer.corrections[i].enabled;
     layer.corrections.splice(i + 1, 0, copy);
@@ -2842,6 +3036,36 @@ export class GraphicEngine {
     to.correctionsExpanded = true;
     this.invalidateCorrections(from);
     if (!same) this.invalidateCorrections(to);
+    return true;
+  }
+
+  /** Przesuwa zaznaczone efekty o jedno miejsce (dir > 0 = w górę listy = później w tablicy); zachowuje ich wzajemną kolejność. */
+  private moveSelectedCorrections(layerIndex: number, ids: string[], dir: 1 | -1): boolean {
+    const layer = this.layers[layerIndex];
+    if (!layer || !this.canHaveCorrections(layer) || this.correctionsLocked(layer)) return false;
+    this.finishOpenSessions();
+    const list = layer.corrections;
+    const before = cloneCorrections(list);
+    const sel = (k: number) => ids.includes(list[k].id);
+    let moved = false;
+    if (dir > 0) {
+      for (let k = list.length - 2; k >= 0; k--) {
+        if (sel(k) && !sel(k + 1)) {
+          [list[k], list[k + 1]] = [list[k + 1], list[k]];
+          moved = true;
+        }
+      }
+    } else {
+      for (let k = 1; k < list.length; k++) {
+        if (sel(k) && !sel(k - 1)) {
+          [list[k], list[k - 1]] = [list[k - 1], list[k]];
+          moved = true;
+        }
+      }
+    }
+    if (!moved) return false;
+    this.pushCorrectionsAction('Zmiana kolejności korekcji', [{ layerIndex, before, after: cloneCorrections(list) }]);
+    this.invalidateCorrections(layer);
     return true;
   }
 
@@ -3195,7 +3419,7 @@ export class GraphicEngine {
     colorSource?: 'primary' | 'secondary'
   ): boolean {
     const layer = this.getActiveLayer();
-    if (!layer || !layer.visible) return false;
+    if (!layer || !layer.paintable) return false;
 
     if (isNewClick) {
       this.commitPaintBucketSession();
@@ -3344,7 +3568,7 @@ export class GraphicEngine {
     const pv = this.getBucketPreview();
     const layerIndex = this.bucketInitialLayerIndex;
     const layer = layerIndex >= 0 ? this.layers[layerIndex] : undefined;
-    if (pv && layer && layer.visible) {
+    if (pv && layer && layer.paintable) {
       const rect: SKRectI = { left: pv.x, top: pv.y, right: pv.x + pv.w, bottom: pv.y + pv.h, width: pv.w, height: pv.h };
       const before = layer.tileGrid.getTilesSnapshot(rect);
       const hasSel = this.selectionManager.hasActiveSelection;
@@ -3437,7 +3661,7 @@ export class GraphicEngine {
     colorSource?: 'primary' | 'secondary'
   ): boolean {
     const layer = this.getActiveLayer();
-    if (!layer || !layer.visible) return false;
+    if (!layer || !layer.paintable) return false;
 
     if (isNewDrag) {
       this.commitGradientSession();
@@ -3482,39 +3706,64 @@ export class GraphicEngine {
    * Działa kafelek po kafelku tą samą funkcją, której używa podgląd, więc wynik jest identyczny z podglądem,
    * a koszt zależy od liczby dotkniętych kafelków (obwiednia zaznaczenia), nie od rozmiaru całego płótna.
    */
+  private gradStrip: HTMLCanvasElement | null = null;
+
   private bakeGradient(layer: Layer, params: GradientPreviewParams): void {
     const rect = this.getGradientAffectedRect();
     if (rect.width <= 0 || rect.height <= 0) return;
 
     const hasSel = this.selectionManager.hasActiveSelection;
-    const mask = this.selectionManager.maskCanvas;
-    const scratch = document.createElement('canvas');
+    const mask = hasSel ? this.selectionManager.maskCanvas : null;
     const blendOp = getCanvasCompositeOperation(params.blendMode);
+    const grid = layer.tileGrid;
+    const ts = grid.tileSize;
 
-    for (const tile of layer.tileGrid.getTilesIntersectingRect(rect)) {
-      if (tile.width <= 0 || tile.height <= 0) continue;
-      if (scratch.width !== tile.width || scratch.height !== tile.height) {
-        scratch.width = tile.width;
-        scratch.height = tile.height;
+    // Gradient liczony jest pasami (cały rząd kafelków naraz) w jednym buforze CPU, a kafelki dostają gotowe fragmenty
+    // jednym drawImage. Wcześniej każdy kafelek 64 x 64 miał własny putImageData / drawImage przez płótno GPU, czyli
+    // tysiące synchronizacji z kartą graficzną (na dużym płótnie sekundy). Operacje na pikselach są te same, więc wynik
+    // jest taki sam jak dla podglądu i dla poprzedniej wersji.
+    const minTx = Math.max(0, Math.floor(rect.left / ts));
+    const maxTx = Math.min(grid.cols - 1, Math.floor((rect.right - 1) / ts));
+    const minTy = Math.max(0, Math.floor(rect.top / ts));
+    const maxTy = Math.min(grid.rows - 1, Math.floor((rect.bottom - 1) / ts));
+    const stripX = minTx * ts;
+    const stripW = Math.min(this.width, (maxTx + 1) * ts) - stripX;
+    if (stripW <= 0) return;
+    let strip = this.gradStrip;
+    if (!strip) {
+      strip = this.gradStrip = document.createElement('canvas');
+    }
+    const g = strip.getContext('2d', { willReadFrequently: true })!;
+
+    for (let ty = minTy; ty <= maxTy; ty++) {
+      const stripY = ty * ts;
+      const stripH = Math.min(this.height, stripY + ts) - stripY;
+      if (stripH <= 0) continue;
+      if (strip.width !== stripW || strip.height !== stripH) {
+        strip.width = stripW;
+        strip.height = stripH;
       }
-      const g = scratch.getContext('2d')!;
       g.setTransform(1, 0, 0, 1, 0, 0);
       g.globalCompositeOperation = 'source-over';
-      g.clearRect(0, 0, tile.width, tile.height);
-      g.setTransform(1, 0, 0, 1, -tile.pixelX, -tile.pixelY);
+      g.clearRect(0, 0, stripW, stripH);
+      g.setTransform(1, 0, 0, 1, -stripX, -stripY);
       renderGradientPreview(g, params, this.width, this.height);
       g.setTransform(1, 0, 0, 1, 0, 0);
-      if (hasSel) {
+      if (mask) {
         g.globalCompositeOperation = 'destination-in';
-        g.drawImage(mask, tile.pixelX, tile.pixelY, tile.width, tile.height, 0, 0, tile.width, tile.height);
+        g.drawImage(mask, stripX, stripY, stripW, stripH, 0, 0, stripW, stripH);
         g.globalCompositeOperation = 'source-over';
       }
-      tile.ctx.save();
-      tile.ctx.globalCompositeOperation = blendOp;
-      tile.ctx.drawImage(scratch, 0, 0);
-      tile.ctx.restore();
-      tile.hasContent = true;
-      tile.isDirty = true;
+      for (let tx = minTx; tx <= maxTx; tx++) {
+        const tile = grid.tiles[ty][tx];
+        if (!tile || tile.width <= 0 || tile.height <= 0) continue;
+        tile.ctx.save();
+        tile.ctx.globalCompositeOperation = blendOp;
+        tile.ctx.drawImage(strip, tile.pixelX - stripX, 0, tile.width, tile.height, 0, 0, tile.width, tile.height);
+        tile.ctx.restore();
+        tile.hasContent = true;
+        tile.isDirty = true;
+      }
     }
 
     layer.updateThumbnail();
@@ -3668,7 +3917,7 @@ export class GraphicEngine {
     }
 
     const layer = this.getActiveLayer();
-    if (!layer || !layer.visible) return false;
+    if (!layer || !layer.paintable) return false;
     // Połączona maska: warstwa przekształca się jako całość (piksele + maska), więc celem jest zawsze siatka pikseli
     if (layer.maskGrid && layer.maskLinked && layer.editMask) {
       if (this.maskView === layer) this.maskView = null;
@@ -4324,8 +4573,14 @@ export class GraphicEngine {
       let stroke: HTMLCanvasElement = this.brushEngine.strokeCanvas;
       let sx = wl, sy = wt;
       if (this.selectionManager.hasActiveSelection) {
-        this.winBrush = GraphicEngine.exactCanvas(this.winBrush, ww, wh);
-        const bctx = this.winBrush.getContext('2d')!;
+        // bufor CPU rosnący tylko w górę (wszystkie operacje mają jawne prostokąty): zmiana rozmiaru płótna przy każdym ruchu
+        // pędzla realokowała bufor, a kontekst GPU wymuszał synchroniczny odczyt przy rysowaniu do okna CPU
+        if (!this.winBrush) this.winBrush = document.createElement('canvas');
+        if (this.winBrush.width < ww || this.winBrush.height < wh) {
+          this.winBrush.width = Math.max(this.winBrush.width, ww, 128);
+          this.winBrush.height = Math.max(this.winBrush.height, wh, 128);
+        }
+        const bctx = this.winBrush.getContext('2d', { willReadFrequently: true })!;
         bctx.globalCompositeOperation = 'source-over';
         bctx.clearRect(0, 0, ww, wh);
         bctx.drawImage(stroke, wl, wt, ww, wh, 0, 0, ww, wh);
@@ -4839,7 +5094,7 @@ export class GraphicEngine {
       return;
     }
     const layer = this.getActiveLayer();
-    if (!layer || !layer.visible) return;
+    if (!layer || !layer.paintable) return;
 
     const tempCanvas = document.createElement('canvas');
     tempCanvas.width = this.width;
@@ -4881,7 +5136,7 @@ export class GraphicEngine {
       return;
     }
     const layer = this.getActiveLayer();
-    if (!layer || !layer.visible) return;
+    if (!layer || !layer.paintable) return;
 
     const tempCanvas = document.createElement('canvas');
     tempCanvas.width = this.width;
@@ -4917,6 +5172,213 @@ export class GraphicEngine {
     this.bakeCanvasToLayer(layer, tempCanvas, dirtyRect, 'Krzywa Beziera', settings.blendMode);
   }
 
+  /** Wstawia obiekt inteligentny (tylko warstwa wektorowa). */
+  public commitVectorSmart(
+    center: SKPoint,
+    width: number,
+    height: number,
+    angle: number,
+    blendMode: SKBlendMode,
+    flipX: boolean,
+    flipY: boolean,
+    docW: number,
+    docH: number,
+    fig: string | null,
+    png: string | null
+  ): { layerId: string; id: string } | null {
+    const tl = this.vec.targetLayer();
+    if (!(this.vec.editing || tl)) return null;
+    const isNew = !this.vec.editing;
+    const id = newVectorId();
+    const done = this.vec.commitObject({
+      id, name: null, visible: true, kind: 'smart', center: { ...center }, width, height, angle, flipX, flipY,
+      docW, docH, fig, png, settings: { blendMode },
+    });
+    return done && isNew && tl ? { layerId: tl.id, id } : null;
+  }
+
+  /**
+   * Tryb Wektory: warstwy wektorowe z końca stosu (od góry), które da się narysować bez pośrednictwa kompozytora dokumentu
+   * (zwykłe mieszanie, bez maski, korekcji i stylów, poza grupą). Pierwsza warstwa, której nie da się narysować osobno,
+   * przerywa serię, bo wszystko pod nią jest składane normalnie.
+   */
+  public crispEligibleLayers(exceptId?: string | null): Layer[] {
+    // Od góry stosu: warstwy wektorowe (dowolne: tryb mieszania, maska i efekty są pomijane) oraz zwykłe warstwy
+    // rastrowe (bez trybu mieszania, maski, korekcji i efektów) tworzą ciągły "segment" rysowany przez widok.
+    // Segment zaczyna się od najniższej warstwy wektorowej; warstwa rastrowa pod nią zostaje w zwykłym kompozycie.
+    const out: Layer[] = [];
+    for (let i = this.layers.length - 1; i >= 0; i--) {
+      const l = this.layers[i];
+      if (!l.ownVisible && !l.isGroup) continue;
+      if (l.isGroup || l.groupId || l.isAdjustment) break;
+      if (l.isVector && l.editMask && l.maskGrid) break; // podczas edycji maski warstwa jest pokazywana zwykłym kompozytem
+      if (!l.isVector) {
+        // zwykła warstwa rastrowa: dowolny tryb mieszania i korekcje kolorów; filtry, stylizacje i maska wracają do kompozytu
+        const plainRaster =
+          l.id !== exceptId &&
+          !l.maskGrid &&
+          !listHasFilters(l.activeCorrections) &&
+          !(l.styles && stylesCount(l.styles) > 0);
+        if (!plainRaster) break;
+      }
+      out.unshift(l);
+    }
+    while (out.length > 0 && !out[0].isVector) out.shift();
+    return out;
+  }
+
+  /** Ustawia, które warstwy wektorowe są pomijane w kompozycie dokumentu (rysuje je widok). Zwraca true, gdy coś się zmieniło. */
+  public setCrispLayers(ids: string[]): boolean {
+    const set = new Set(ids);
+    let changed = false;
+    for (const l of this.layers) {
+      const want = set.has(l.id);
+      if (l.viewHidden !== want) {
+        l.viewHidden = want;
+        changed = true;
+      }
+    }
+    if (changed) this.markAllLayersDirty();
+    return changed;
+  }
+
+  /** Dokument obiektu inteligentnego: jedna przezroczysta warstwa bez tła. */
+  public initTransparentDocument(): void {
+    this.layers = [];
+    const l = new Layer('layer1', 'Warstwa 1', this.width, this.height, this.tileSize);
+    l.updateThumbnail();
+    this.layers.push(l);
+    this.activeLayerIndex = 0;
+    this.selectionManager.resize(this.width, this.height);
+    this.clearHistory();
+  }
+
+  /** Dokument obiektu inteligentnego zbudowany z bitmapy: jedna warstwa z jej zawartością (fig) i spłaszczony wynik (png). */
+  public static makeSmartPayload(source: HTMLCanvasElement): { fig: string; png: string } {
+    const child = new GraphicEngine('Obiekt inteligentny.fig', source.width, source.height);
+    child.initTransparentDocument();
+    const layer = child.layers[0];
+    for (let ty = 0; ty < layer.tileGrid.rows; ty++) {
+      for (let tx = 0; tx < layer.tileGrid.cols; tx++) {
+        const tile = layer.tileGrid.tiles[ty][tx];
+        tile.ctx.drawImage(source, tile.pixelX, tile.pixelY, tile.width, tile.height, 0, 0, tile.width, tile.height);
+        tile.hasContent = true;
+        tile.isDirty = true;
+      }
+    }
+    layer.updateThumbnail();
+    const fig = child.saveToFigFile();
+    const copy = document.createElement('canvas');
+    copy.width = source.width;
+    copy.height = source.height;
+    copy.getContext('2d')!.drawImage(source, 0, 0);
+    const png = copy.toDataURL('image/png');
+    registerSmartBitmap(png, copy);
+    return { fig, png };
+  }
+
+  /** Wkleja raster na aktywnej warstwie wektorowej jako obiekt inteligentny wyśrodkowany w dokumencie. */
+  public pasteCanvasAsSmart(source: HTMLCanvasElement): string | null {
+    const layer = this.vec.targetLayer();
+    if (!layer || layer.locked || source.width < 1 || source.height < 1) return null;
+    this.finishOpenSessions();
+    // Wycinek skopiowany z warstwy to płótno wielkości dokumentu z zawartością na swoim miejscu: obiekt dostaje wymiary
+    // prostokąta opisanego na zawartości i zostaje w tym samym miejscu. Obrazy spoza programu zachowują całe wymiary.
+    let src = source;
+    let cx = this.width / 2;
+    let cy = this.height / 2;
+    if (source.width === this.width && source.height === this.height) {
+      const sctx = source.getContext('2d', { willReadFrequently: true });
+      if (sctx) {
+        const d = sctx.getImageData(0, 0, source.width, source.height).data;
+        let x0 = source.width, y0 = source.height, x1 = -1, y1 = -1;
+        for (let y = 0; y < source.height; y++) {
+          const row = y * source.width * 4;
+          for (let x = 0; x < source.width; x++) {
+            if (d[row + x * 4 + 3] > 0) {
+              if (x < x0) x0 = x;
+              if (x > x1) x1 = x;
+              if (y < y0) y0 = y;
+              y1 = y;
+            }
+          }
+        }
+        if (x1 >= x0 && y1 >= y0 && (x1 - x0 + 1 < source.width || y1 - y0 + 1 < source.height)) {
+          const bw = x1 - x0 + 1;
+          const bh = y1 - y0 + 1;
+          const crop = document.createElement('canvas');
+          crop.width = bw;
+          crop.height = bh;
+          crop.getContext('2d')!.drawImage(source, x0, y0, bw, bh, 0, 0, bw, bh);
+          src = crop;
+          cx = x0 + bw / 2;
+          cy = y0 + bh / 2;
+        }
+      }
+    }
+    const { fig, png } = GraphicEngine.makeSmartPayload(src);
+    const id = newVectorId();
+    const ok = this.vec.commitObject({
+      id, name: null, visible: true, kind: 'smart',
+      center: { x: cx, y: cy }, width: src.width, height: src.height, angle: 0, flipX: false, flipY: false,
+      docW: src.width, docH: src.height, fig, png, settings: { blendMode: 'SrcOver' },
+    });
+    if (!ok) return null;
+    this.vec.setSelection(layer.id, [id]);
+    return id;
+  }
+
+  /**
+   * „Przekształć warstwę”: wektorowa -> rastrowa (piksele zostają, obiekty znikają), rastrowa -> wektorowa z jednym obiektem
+   * inteligentnym na cały dokument. Zwraca opis wyniku albo null, gdy warstwy nie da się przekształcić.
+   */
+  public convertLayerKind(index: number): 'rasterized' | 'mask-rasterized' | 'smart' | null {
+    const layer = this.layers[index];
+    if (!layer || layer.isGroup || layer.isAdjustment || layer.locked) return null;
+    this.finishOpenSessions();
+    this.vec.settle();
+    // Edytowana jest maska warstwy wektorowej: tylko ona staje się rastrowa (obiekty maski zamieniają się w jej piksele)
+    if (layer.isVector && layer.editMask && layer.maskGrid) {
+      if (layer.maskRaster) return null;
+      this.saveFullSnapshot('Rasteryzacja maski warstwy wektorowej');
+      this.vec.clearSelection();
+      layer.maskObjects = [];
+      layer.maskBase = null;
+      layer.maskRaster = true;
+      layer.updateThumbnail(true);
+      this.markAllLayersDirty();
+      this.invalidateComposite();
+      return 'mask-rasterized';
+    }
+    if (layer.isVector) {
+      this.saveFullSnapshot('Rasteryzacja warstwy wektorowej');
+      this.vec.clearSelection();
+      layer.isVector = false;
+      layer.layerObjects = [];
+      layer.maskObjects = [];
+      layer.maskBase = null;
+      layer.maskRaster = false;
+      layer.updateThumbnail();
+      this.markAllLayersDirty();
+      return 'rasterized';
+    }
+    const flat = layer.pixelGrid.compositeToFlatCanvas();
+    this.saveFullSnapshot('Zamiana warstwy na wektorową (obiekt inteligentny)');
+    const { fig, png } = GraphicEngine.makeSmartPayload(flat);
+    layer.isVector = true;
+    layer.maskRaster = !!layer.maskGrid; // istniejąca maska to piksele, więc zostaje rastrowa
+    layer.correctionsExpanded = true;
+    layer.layerObjects = [{
+      id: newVectorId(), name: null, visible: true, kind: 'smart',
+      center: { x: this.width / 2, y: this.height / 2 }, width: this.width, height: this.height, angle: 0, flipX: false, flipY: false,
+      docW: this.width, docH: this.height, fig, png, settings: { blendMode: 'SrcOver' },
+    }];
+    this.vec.rebuildAll(layer);
+    layer.updateThumbnail();
+    this.markAllLayersDirty();
+    return 'smart';
+  }
+
   public commitVectorShape(
     center: SKPoint,
     width: number,
@@ -4931,7 +5393,7 @@ export class GraphicEngine {
       return;
     }
     const layer = this.getActiveLayer();
-    if (!layer || !layer.visible) return;
+    if (!layer || !layer.paintable) return;
 
     const tempCanvas = document.createElement('canvas');
     tempCanvas.width = this.width;
@@ -4989,7 +5451,7 @@ export class GraphicEngine {
       return;
     }
     const layer = this.getActiveLayer();
-    if (!layer || !layer.visible) return;
+    if (!layer || !layer.paintable) return;
     if (rt.length === 0) return;
 
     const tempCanvas = document.createElement('canvas');
@@ -5411,6 +5873,8 @@ export class GraphicEngine {
       width: this.width,
       height: this.height,
       tileSize: this.tileSize,
+      dpi: this.dpi,
+      guides: this.guides.length > 0 ? this.guides.map((g) => ({ ...g })) : undefined,
       activeLayerIndex: this.activeLayerIndex,
       layers: this.layers.map((l) => ({
         id: l.id,
@@ -5420,7 +5884,10 @@ export class GraphicEngine {
         isGroup: l.isGroup || undefined,
         isAdjustment: l.isAdjustment || undefined,
         isVector: l.isVector || undefined,
-        vectorObjects: l.isVector ? cloneVectorObjects(l.vectorObjects) : undefined,
+        vectorObjects: l.isVector ? cloneVectorObjects(l.layerObjects) : undefined,
+        maskObjects: l.isVector && l.maskGrid && l.maskObjects.length > 0 ? cloneVectorObjects(l.maskObjects) : undefined,
+        maskRaster: l.isVector && l.maskGrid && l.maskRaster ? true : undefined,
+        maskBaseDataUrl: l.isVector && l.maskGrid && l.maskObjects.length > 0 && l.maskBase ? l.maskBase.compositeToFlatCanvas().toDataURL('image/png') : undefined,
         groupId: l.groupId,
         expanded: l.isGroup ? l.expanded : undefined,
         opacity: l.opacity,
@@ -5448,6 +5915,10 @@ export class GraphicEngine {
       this.width = data.width || 800;
       this.height = data.height || 600;
       this.tileSize = data.tileSize || DEFAULT_TILE_SIZE;
+      this.dpi = typeof data.dpi === 'number' && data.dpi > 0 ? data.dpi : 96;
+      this.guides = Array.isArray(data.guides)
+        ? data.guides.filter((g: Guide) => g && (g.axis === 'h' || g.axis === 'v') && typeof g.pos === 'number').map((g: Guide, i: number) => ({ id: typeof g.id === 'string' ? g.id : `guide_l${i}`, axis: g.axis, pos: g.pos }))
+        : [];
       this.brushEngine.ensureBufferSize(this.width, this.height);
       this.selectionManager.resize(this.width, this.height);
 
@@ -5465,7 +5936,10 @@ export class GraphicEngine {
         layer.isGroup = isGroupData;
         layer.isAdjustment = lData.isAdjustment === true && !isGroupData;
         layer.isVector = lData.isVector === true && !isGroupData && !layer.isAdjustment;
-        if (layer.isVector) layer.vectorObjects = reviveVectorObjects(lData.vectorObjects);
+        if (layer.isVector) {
+          layer.layerObjects = reviveVectorObjects(lData.vectorObjects);
+          for (const vo of layer.layerObjects) if (vo.kind === 'smart' && vo.png) await ensureSmartBitmap(vo.png);
+        }
         layer.groupId = typeof lData.groupId === 'string' ? lData.groupId : null;
         layer.expanded = lData.expanded !== false;
         layer.locked = lData.locked === true;
@@ -5529,6 +6003,30 @@ export class GraphicEngine {
               }
               layer.maskEnabled = lData.maskEnabled !== false;
               layer.maskLinked = lData.maskLinked !== false;
+              layer.maskRaster = layer.isVector && lData.maskRaster === true;
+              if (layer.isVector && Array.isArray(lData.maskObjects) && lData.maskObjects.length > 0 && lData.maskBaseDataUrl) {
+                layer.maskObjects = reviveVectorObjects(lData.maskObjects);
+                const bimg = new Image();
+                bimg.onload = () => {
+                  const bg = new TileGrid(this.width, this.height, this.tileSize);
+                  for (const brow of bg.tiles) {
+                    for (const bt of brow) {
+                      bt.ctx.drawImage(bimg, bt.pixelX, bt.pixelY, bt.width, bt.height, 0, 0, bt.width, bt.height);
+                      bt.hasContent = true;
+                      bt.isDirty = true;
+                    }
+                  }
+                  layer.maskBase = bg;
+                  layer.updateThumbnail();
+                  resolve();
+                };
+                bimg.onerror = () => {
+                  layer.maskObjects = [];
+                  resolve();
+                };
+                bimg.src = lData.maskBaseDataUrl;
+                return;
+              }
               layer.updateThumbnail();
               resolve();
             };

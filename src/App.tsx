@@ -3,8 +3,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { vectorObjectLabel } from './core/skia/VectorObjects.ts';
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Lock } from 'lucide-react';
+import { registerSmartBitmap, setSmartReadyHook } from './core/skia/SmartObjects.ts';
 import { GraphicEngine } from './core/skia/GraphicEngine.ts';
 import {
   BrushSettings,
@@ -21,6 +23,7 @@ import {
   StampSettings,
   ToolType,
   VectorShapeSettings,
+  SmartObjectSettings,
   TextToolSettings,
 } from './core/skia/types.ts';
 import { TitleBar } from './components/TitleBar.tsx';
@@ -28,8 +31,11 @@ import { MenuBar, MenuActionHandlers } from './components/MenuBar.tsx';
 import { ToolOptionsBar } from './components/ToolOptionsBar.tsx';
 import { Toolbox } from './components/Toolbox.tsx';
 import { CanvasViewport } from './components/CanvasViewport.tsx';
+import { PropertiesPanel, PropsDescriptor, PropsApi } from './components/PropertiesPanel.tsx';
 import { ColorPanel } from './components/ColorPanel.tsx';
 import { LayersPanel } from './components/LayersPanel.tsx';
+import { UnitsContext } from './components/Units.tsx';
+import type { UnitMode } from './core/skia/Units.ts';
 import { StatusBar } from './components/StatusBar.tsx';
 import { NewDocumentModal } from './components/NewDocumentModal.tsx';
 import { CorrectionDialog } from './components/CorrectionDialog.tsx';
@@ -39,14 +45,18 @@ import { Correction, CorrectionType, Histogram } from './core/skia/Corrections.t
 import type { Layer } from './core/skia/Layer.ts';
 
 /** Narzędzia dostępne na warstwie wektorowej (reszta działa na pikselach). */
-const VECTOR_LAYER_TOOLS = new Set<ToolType>(['vector-select', 'pen', 'shapes', 'line', 'bezier', 'text', 'pipette', 'pan', 'zoom']);
+const VECTOR_LAYER_TOOLS = new Set<ToolType>(['vector-select', 'pen', 'smart-object', 'guides', 'shapes', 'line', 'bezier', 'text', 'pipette', 'pan', 'zoom']);
 const VECTOR_ONLY_TOOLS = new Set<ToolType>(['vector-select', 'pen']);
 
 interface DocumentTab {
   id: string;
   title: string;
   engine: GraphicEngine;
+  /** Zakładka obiektu inteligentnego: skąd pochodzi (zakładka nadrzędna, warstwa, obiekt) i zawartość wyjściowa. */
+  smart?: { parentTabId: string; layerId: string; objectId: string; origFig: string | null };
 }
+
+const SMART_TAB_COLOR = '#e0a43a';
 
 export default function App() {
   const [tabs, setTabs] = useState<DocumentTab[]>(() => {
@@ -55,8 +65,15 @@ export default function App() {
   });
 
   const [activeTabId, setActiveTabId] = useState<string>('tab_1');
+  /** Przełącznik na pasku stanu: Piksele (domyślnie) albo Wektory (wymiary w mm). Dokumenty obiektów inteligentnych zawsze w pikselach. */
+  const [unitMode, setUnitMode] = useState<UnitMode>('px');
+  const tabsRef = useRef<DocumentTab[]>([]);
+  tabsRef.current = tabs;
+  const activeTabIdRef = useRef('tab_1');
+  activeTabIdRef.current = activeTabId;
   const activeTab = tabs.find((t) => t.id === activeTabId) || tabs[0];
   const engine = activeTab.engine;
+  const effectiveUnitMode: UnitMode = activeTab.smart ? 'px' : unitMode;
 
   const [engineRevision, setEngineRevision] = useState(0);
   const bumpEngineRevision = useCallback(() => {
@@ -350,6 +367,8 @@ export default function App() {
     arrowShaftThickness: 0.35,
   });
 
+  const [smartSettings, setSmartSettings] = useState<SmartObjectSettings>({ width: 400, height: 300, blendMode: 'SrcOver' });
+  const handleUpdateSmartSettings = useCallback((n: Partial<SmartObjectSettings>) => setSmartSettings((p) => ({ ...p, ...n })), []);
   const handleUpdateVectorShapeSettings = (newSettings: Partial<VectorShapeSettings>) => {
     setVectorShapeSettings((prev) => ({ ...prev, ...newSettings }));
   };
@@ -436,14 +455,20 @@ export default function App() {
   // Narzędzia
   const [activeTool, setActiveToolRaw] = useState<ToolType>('brush');
   // Stan edycji obiektu wektorowego z narzędzia Manipulacja: rodzaj otwartej sesji (decyduje o opcjach narzędzia)
-  const [vectorEditKind, setVectorEditKind] = useState<'line' | 'bezier' | 'shapes' | 'text' | null>(null);
-  const activeIsVector = !!engine.getActiveLayer()?.isVector;
+  const [guideAxis, setGuideAxis] = useState<'h' | 'v'>('v');
+  const [snapEnabled, setSnapEnabled] = useState(false);
+  const [guidesVisible, setGuidesVisible] = useState(true);
+  const [rightTab, setRightTab] = useState<'color' | 'props'>('color');
+  const [propsState, setPropsState] = useState<{ desc: PropsDescriptor; api: PropsApi | null }>({ desc: null, api: null });
+  const handlePropertiesChange = useCallback((desc: PropsDescriptor, api: PropsApi) => setPropsState({ desc, api }), []);
+  const [vectorEditKind, setVectorEditKind] = useState<'line' | 'bezier' | 'shapes' | 'text' | 'smart-object' | null>(null);
+  const activeIsVector = !!engine.getActiveLayer()?.vectorTarget;
   // Żądanie otwarcia obiektu wektorowego do edycji (kliknięcie wiersza w panelu warstw)
   const [vectorEditRequest, setVectorEditRequest] = useState<{ n: number; layerIndex: number; id: string } | null>(null);
   /** Wybór narzędzia z uwzględnieniem rodzaju aktywnej warstwy (wektorowa ma własny zestaw narzędzi). */
   const setActiveTool = useCallback(
     (tool: ToolType) => {
-      const vec = !!engine.getActiveLayer()?.isVector;
+      const vec = !!engine.getActiveLayer()?.vectorTarget;
       if (vec && !VECTOR_LAYER_TOOLS.has(tool)) {
         showToast('Warstwa wektorowa: dostępne są tylko narzędzia obiektów wektorowych');
         return;
@@ -461,6 +486,24 @@ export default function App() {
     if (activeIsVector && !VECTOR_LAYER_TOOLS.has(activeTool)) setActiveToolRaw('vector-select');
     else if (!activeIsVector && VECTOR_ONLY_TOOLS.has(activeTool)) setActiveToolRaw('brush');
   }, [activeIsVector, activeTool]);
+  // Przejście do zakładki z aktywną warstwą rastrową przy narzędziu obiektu inteligentnego: od razu pędzel. Po powrocie do zakładki,
+  // z której narzędzie zostało w ten sposób zabrane (np. po wstawieniu obiektu otwiera się jego zakładka), wraca obiekt inteligentny.
+  // Ten efekt jest po efekcie powyżej, więc jego ustawienie narzędzia wygrywa.
+  const prevTabRef = useRef(activeTabId);
+  const smartToolLeftRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const prev = prevTabRef.current;
+    prevTabRef.current = activeTabId;
+    if (prev === activeTabId) return;
+    if (activeTool === 'smart-object' && !activeIsVector) {
+      smartToolLeftRef.current.add(prev);
+      setActiveToolRaw('brush');
+    } else if (smartToolLeftRef.current.delete(activeTabId) && activeIsVector && (activeTool === 'brush' || activeTool === 'vector-select')) {
+      setActiveToolRaw('smart-object');
+    }
+    // tylko przy zmianie zakładki
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTabId]);
 
   // Zaznaczenie obiektów wektorowych istnieje tylko przy narzędziu Manipulacja
   useEffect(() => {
@@ -481,7 +524,85 @@ export default function App() {
     setBrushSettings((prev) => ({ ...prev, ...newSettings }));
   };
 
+  /** Składa dokument obiektu inteligentnego do jednej bitmapy i zapisuje go w obiekcie dokumentu nadrzędnego. */
+  const flushSmartTab = useCallback((tab: DocumentTab | undefined): void => {
+    if (!tab?.smart) return;
+    const parent = tabsRef.current.find((t) => t.id === tab.smart!.parentTabId);
+    if (!parent) return;
+    const fig = tab.engine.saveToFigFile();
+    if (fig === tab.smart.origFig) return;
+    const canvas = tab.engine.getCompositeFlatCanvas();
+    const png = canvas.toDataURL('image/png');
+    registerSmartBitmap(png, canvas);
+    if (parent.engine.vec.updateSmartContent(tab.smart.layerId, tab.smart.objectId, fig, png)) {
+      tab.smart.origFig = fig;
+      if (parent.id === activeTabIdRef.current) bumpEngineRevision();
+    }
+  }, [bumpEngineRevision]);
+
+  const handleOpenSmartObject = useCallback((layerId: string, objectId: string) => {
+    const cur = tabsRef.current.find((t) => t.id === activeTabIdRef.current);
+    if (!cur) return;
+    cur.engine.finishOpenSessions();
+    const existing = tabsRef.current.find((t) => t.smart && t.smart.parentTabId === cur.id && t.smart.objectId === objectId);
+    if (existing) {
+      setActiveTabId(existing.id);
+      setPanOffset({ x: 0, y: 0 });
+      bumpEngineRevision();
+      return;
+    }
+    const obj = cur.engine.vec.findSmart(layerId, objectId);
+    if (!obj) return;
+    void (async () => {
+      const child = new GraphicEngine('Obiekt inteligentny.fig', obj.docW, obj.docH);
+      child.dpi = cur.engine.dpi;
+      if (obj.fig) {
+        const ok = await child.loadFromFigFile(obj.fig);
+        if (!ok) child.initTransparentDocument();
+      } else {
+        child.initTransparentDocument();
+      }
+      const tab: DocumentTab = {
+        id: `tab_${Date.now()}`,
+        title: `Obiekt inteligentny`,
+        engine: child,
+        smart: { parentTabId: cur.id, layerId, objectId, origFig: obj.fig ? child.saveToFigFile() : child.saveToFigFile() },
+      };
+      setTabs((prev) => {
+        const at = prev.findIndex((t) => t.id === cur.id);
+        let ins = at + 1;
+        while (ins < prev.length && prev[ins].smart?.parentTabId === cur.id) ins++;
+        return [...prev.slice(0, ins), tab, ...prev.slice(ins)];
+      });
+      setActiveTabId(tab.id);
+      const maxDim = Math.max(child.width, child.height);
+      setZoom(maxDim > 1600 ? 0.3 : maxDim > 1000 ? 0.6 : 1.0);
+      setPanOffset({ x: 0, y: 0 });
+      bumpEngineRevision();
+    })();
+  }, [bumpEngineRevision]);
+
+  /** Zakładka obiektu inteligentnego nosi nazwę obiektu z warstwy na obrazie nadrzędnym (zmienia się razem z nią). */
+  const smartTabTitle = (t: DocumentTab): string => {
+    if (!t.smart) return t.title;
+    const parent = tabs.find((x) => x.id === t.smart!.parentTabId);
+    const obj = parent ? parent.engine.vec.findSmart(t.smart.layerId, t.smart.objectId) : null;
+    return obj ? vectorObjectLabel(obj) : t.title;
+  };
+
+  useEffect(() => {
+    setSmartReadyHook(() => {
+      for (const t of tabsRef.current) for (const l of t.engine.layers) if (l.isVector) t.engine.vec.rebuildAll(l);
+      bumpEngineRevision();
+    });
+    return () => setSmartReadyHook(null);
+  }, [bumpEngineRevision]);
+
   const handleSelectTab = (id: string) => {
+    if (id !== activeTabId) {
+      engine.finishOpenSessions();
+      flushSmartTab(tabs.find((t) => t.id === activeTabId));
+    }
     setActiveTabId(id);
     const selectedTab = tabs.find((t) => t.id === id);
     if (selectedTab) {
@@ -500,16 +621,31 @@ export default function App() {
 
   const handleCloseTab = (id: string) => {
     if (tabs.length <= 1) return;
-    const remaining = tabs.filter((t) => t.id !== id);
+    const closing = tabs.find((t) => t.id === id);
+    closing?.engine.finishOpenSessions();
+    flushSmartTab(closing);
+    // zamknięcie dokumentu zamyka też jego obiekty inteligentne (ich zawartość jest już w obiektach)
+    const dropped = new Set<string>([id]);
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const t of tabs) if (t.smart && dropped.has(t.smart.parentTabId) && !dropped.has(t.id)) { dropped.add(t.id); grew = true; }
+    }
+    for (const t of tabs) if (dropped.has(t.id) && t.id !== id) flushSmartTab(t);
+    const remaining = tabs.filter((t) => !dropped.has(t.id));
+    if (remaining.length === 0) return;
     setTabs(remaining);
-    if (activeTabId === id) {
-      setActiveTabId(remaining[0].id);
+    if (dropped.has(activeTabId)) {
+      const back = closing?.smart && remaining.find((t) => t.id === closing.smart!.parentTabId);
+      setActiveTabId((back ?? remaining[0]).id);
+      setPanOffset({ x: 0, y: 0 });
     }
     bumpEngineRevision();
   };
 
-  const handleCreateNewDocument = (title: string, width: number, height: number) => {
+  const handleCreateNewDocument = (title: string, width: number, height: number, dpi: number = 96) => {
     const newDoc = new GraphicEngine(title, width, height);
+    newDoc.dpi = dpi;
     const newTab: DocumentTab = {
       id: `tab_${Date.now()}`,
       title: title.replace(/\.fig$/, ''),
@@ -579,6 +715,7 @@ export default function App() {
   };
 
   const handleSaveFig = () => {
+    for (const t of tabs) if (t.smart) flushSmartTab(t);
     const jsonStr = engine.saveToFigFile();
     const blob = new Blob([jsonStr], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -611,16 +748,52 @@ export default function App() {
   /** Aktywna warstwa wektorowa: jej indeks i zaznaczone obiekty (z otwartą edycją włącznie). */
   const vectorSelection = useCallback((): { idx: number; ids: string[] } | null => {
     const l = engine.getActiveLayer();
-    if (!l || !l.isVector) return null;
+    if (!l || !l.vectorTarget) return null;
     const ids = engine.vec.selectedIds(l);
     return ids.length > 0 ? { idx: engine.layers.indexOf(l), ids } : null;
   }, [engine]);
 
+  /** Co skopiowano ostatnio w programie: obiekty wektorowe czy raster (decyduje, co wkleić na warstwę wektorową). */
+  const lastCopyRef = useRef<'objects' | 'raster' | null>(null);
+
+  const blobToCanvas = useCallback((blob: Blob): Promise<HTMLCanvasElement | null> => new Promise((resolve) => {
+    const img = new Image();
+    const url = URL.createObjectURL(blob);
+    img.onload = () => {
+      const c = document.createElement('canvas');
+      c.width = img.naturalWidth;
+      c.height = img.naturalHeight;
+      c.getContext('2d')!.drawImage(img, 0, 0);
+      URL.revokeObjectURL(url);
+      resolve(c);
+    };
+    img.onerror = () => resolve(null);
+    img.src = url;
+  }), []);
+
+  /** Wkleja raster na warstwę wektorową jako obiekt inteligentny. */
+  const pasteAsSmart = useCallback((canvas: HTMLCanvasElement | null) => {
+    if (!canvas || !engine.pasteCanvasAsSmart(canvas)) {
+      showToast('Nie można wkleić obrazu jako obiektu inteligentnego (warstwa zablokowana lub pusty obraz)');
+      return;
+    }
+    setActiveToolRaw('vector-select');
+    bumpEngineRevision();
+  }, [engine, showToast, bumpEngineRevision]);
+
+  const handleConvertLayer = useCallback(() => {
+    const r = engine.convertLayerKind(engine.activeLayerIndex);
+    if (!r) showToast('Tej warstwy nie można przekształcić (grupa, warstwa korekcyjna, warstwa zablokowana albo maska już rastrowa)');
+    else showToast(r === 'rasterized' ? 'Warstwa wektorowa (i jej maska) została zrasteryzowana' : r === 'mask-rasterized' ? 'Maska warstwy wektorowej jest teraz rastrowa' : 'Warstwa jest teraz wektorowa z jednym obiektem inteligentnym');
+    bumpEngineRevision();
+  }, [engine, showToast, bumpEngineRevision]);
+
   const handleCut = useCallback(() => {
-    if (engine.getActiveLayer()?.isVector) {
+    if (engine.getActiveLayer()?.vectorTarget) {
       const vs = vectorSelection();
       if (!vs) showToast('Zaznacz obiekty wektorowe, aby je wyciąć');
       else if (!engine.vec.cutObjects(vs.idx, vs.ids)) showToast('Nie można wyciąć: warstwa jest zablokowana');
+      else lastCopyRef.current = 'objects';
       bumpEngineRevision();
       return;
     }
@@ -632,17 +805,19 @@ export default function App() {
       }
     }
     if (engine.cut()) {
+      lastCopyRef.current = 'raster';
       bumpEngineRevision();
     }
   }, [engine, bumpEngineRevision, showToast, vectorSelection]);
 
   const handleCopy = useCallback(() => {
-    if (engine.getActiveLayer()?.isVector) {
+    if (engine.getActiveLayer()?.vectorTarget) {
       const vs = vectorSelection();
       if (!vs) showToast('Zaznacz obiekty wektorowe, aby je skopiować');
-      else engine.vec.copyObjects(vs.idx, vs.ids);
+      else if (engine.vec.copyObjects(vs.idx, vs.ids)) lastCopyRef.current = 'objects';
       return;
     }
+    lastCopyRef.current = 'raster';
     engine.copy();
   }, [engine, vectorSelection, showToast]);
 
@@ -667,6 +842,10 @@ export default function App() {
   }, [engine, bumpEngineRevision, showToast]);
 
   const pasteImageBlob = useCallback((file: File | Blob) => {
+    if (engine.getActiveLayer()?.vectorTarget) {
+      void blobToCanvas(file).then(pasteAsSmart);
+      return;
+    }
     {
       const why = engine.pixelEditBlockReason();
       if (why) {
@@ -683,15 +862,49 @@ export default function App() {
       }
       pasteExternalBlob(file);
     });
-  }, [engine, bumpEngineRevision, showToast, pasteExternalBlob]);
+  }, [engine, bumpEngineRevision, showToast, pasteExternalBlob, blobToCanvas, pasteAsSmart]);
 
   const handlePaste = useCallback((inPlace?: boolean) => {
-    if (engine.getActiveLayer()?.isVector) {
+    if (engine.getActiveLayer()?.vectorTarget) {
       const idx = engine.layers.indexOf(engine.getActiveLayer()!);
-      if (!engine.vec.hasClipboard) showToast('Schowek obiektów jest pusty: zaznacz obiekty i skopiuj je (Ctrl+C)');
-      else if (engine.vec.pasteObjects(idx, inPlace === true).length === 0) showToast('Nie można wkleić: warstwa jest zablokowana');
-      else setActiveToolRaw('vector-select');
-      bumpEngineRevision();
+      const pasteObjs = () => {
+        if (!engine.vec.hasClipboard) showToast('Schowek jest pusty: skopiuj obiekty (Ctrl+C) albo obraz');
+        else if (engine.vec.pasteObjects(idx, inPlace === true).length === 0) showToast('Nie można wkleić: warstwa jest zablokowana');
+        else setActiveToolRaw('vector-select');
+        bumpEngineRevision();
+      };
+      // ostatnio skopiowane obiekty wektorowe: wklej je (tak jak dotąd)
+      if (lastCopyRef.current === 'objects' && engine.vec.hasClipboard) {
+        pasteObjs();
+        return;
+      }
+      // raster (schowek systemowy lub wewnętrzny) trafia do warstwy wektorowej jako obiekt inteligentny
+      const fallback = () => {
+        if (engine.clipboardCanvas) pasteAsSmart(engine.clipboardCanvas);
+        else pasteObjs();
+      };
+      if (navigator.clipboard && typeof navigator.clipboard.read === 'function') {
+        navigator.clipboard
+          .read()
+          .then(async (items) => {
+            for (const item of items) {
+              const imageType = item.types.find((t) => t.startsWith('image/'));
+              if (imageType) {
+                const blob = await item.getType(imageType);
+                if (lastCopyRef.current === 'raster' && engine.clipboardCanvas && (await engine.isOwnClipboardBlob(blob))) {
+                  pasteAsSmart(engine.clipboardCanvas);
+                } else {
+                  pasteAsSmart(await blobToCanvas(blob));
+                }
+                return;
+              }
+            }
+            fallback();
+          })
+          .catch(fallback);
+      } else {
+        fallback();
+      }
       return;
     }
     {
@@ -735,7 +948,7 @@ export default function App() {
         bumpEngineRevision();
       }
     }
-  }, [engine, pasteImageBlob, bumpEngineRevision]);
+  }, [engine, pasteImageBlob, bumpEngineRevision, pasteAsSmart, blobToCanvas, showToast]);
 
   useEffect(() => {
     const handleGlobalPaste = (e: ClipboardEvent) => {
@@ -897,8 +1110,8 @@ export default function App() {
       else if (key === 'y') setActiveTool('text');
       else if (key === 'h') setActiveTool('pan');
       else if (key === 'z') setActiveTool('zoom');
-      else if (key === 'v' && engine.getActiveLayer()?.isVector) setActiveTool('vector-select');
-      else if (key === 'n' && engine.getActiveLayer()?.isVector) setActiveTool('pen');
+      else if (key === 'v' && engine.getActiveLayer()?.vectorTarget) setActiveTool('vector-select');
+      else if (key === 'n' && engine.getActiveLayer()?.vectorTarget) setActiveTool('pen');
       else if (key === 'p') setActiveTool('bezier');
       else if (key === 'x') {
         setPrimaryColor(secondaryColor);
@@ -916,7 +1129,7 @@ export default function App() {
         } else if (activeTool === 'deform') {
           setDeformSettings((prev) => ({ ...prev, size: Math.max(1, Math.min(2000, prev.size + delta)) }));
         }
-      } else if (e.key === 'Delete' && !isLiveVectorSessionActiveRef.current && !engine.getActiveLayer()?.isVector) {
+      } else if (e.key === 'Delete' && !isLiveVectorSessionActiveRef.current && !engine.getActiveLayer()?.vectorTarget) {
         // Przy aktywnej sesji (np. krzywa) Delete należy do sesji (usuwa węzeł), a nie czyści warstwy
         const mask = engine.selectionManager.hasActiveSelection ? engine.selectionManager.maskCanvas : null;
         engine.getActiveLayer()?.clear(mask);
@@ -1009,46 +1222,6 @@ export default function App() {
       engine.getActiveLayer()?.flipVertical();
       bumpEngineRevision();
     },
-    onInvertColors: () => {
-      const why = engine.pixelEditBlockReason();
-      if (why) {
-        showToast(why);
-        return;
-      }
-      const mask = engine.selectionManager.hasActiveSelection ? engine.selectionManager.maskCanvas : null;
-      engine.getActiveLayer()?.invertColors(mask);
-      bumpEngineRevision();
-    },
-    onGrayscale: () => {
-      const why = engine.pixelEditBlockReason();
-      if (why) {
-        showToast(why);
-        return;
-      }
-      const mask = engine.selectionManager.hasActiveSelection ? engine.selectionManager.maskCanvas : null;
-      engine.getActiveLayer()?.toGrayscale(mask);
-      bumpEngineRevision();
-    },
-    onBrightnessUp: () => {
-      const why = engine.pixelEditBlockReason();
-      if (why) {
-        showToast(why);
-        return;
-      }
-      const mask = engine.selectionManager.hasActiveSelection ? engine.selectionManager.maskCanvas : null;
-      engine.getActiveLayer()?.adjustBrightnessContrast(20, 0, mask);
-      bumpEngineRevision();
-    },
-    onContrastUp: () => {
-      const why = engine.pixelEditBlockReason();
-      if (why) {
-        showToast(why);
-        return;
-      }
-      const mask = engine.selectionManager.hasActiveSelection ? engine.selectionManager.maskCanvas : null;
-      engine.getActiveLayer()?.adjustBrightnessContrast(0, 20, mask);
-      bumpEngineRevision();
-    },
     onAddLayer: () => {
       engine.addLayer();
       bumpEngineRevision();
@@ -1076,6 +1249,7 @@ export default function App() {
   };
 
   return (
+    <UnitsContext.Provider value={{ mode: effectiveUnitMode, dpi: engine.dpi }}>
     <div className="flex flex-col h-screen w-screen overflow-hidden bg-[#1e1e1e] text-[#dddddd] font-sans">
       <input
         ref={fileInputRef}
@@ -1087,7 +1261,7 @@ export default function App() {
 
       {/* 1. Pasek tytułu: FIGURA + Zakładki */}
       <TitleBar
-        tabs={tabs}
+        tabs={tabs.map((t) => ({ id: t.id, title: smartTabTitle(t), accent: t.smart ? SMART_TAB_COLOR : undefined, hint: t.smart ? 'Obiekt inteligentny: po zamknięciu lub powrocie do głównej zakładki zawartość jest składana do bitmapy' : undefined }))}
         activeTabId={activeTabId}
         onSelectTab={handleSelectTab}
         onCloseTab={handleCloseTab}
@@ -1119,6 +1293,15 @@ export default function App() {
         onChangeGradientSettings={handleUpdateGradientSettings}
         vectorShapeSettings={vectorShapeSettings}
         onChangeVectorShapeSettings={handleUpdateVectorShapeSettings}
+        smartSettings={smartSettings}
+        onChangeSmartSettings={handleUpdateSmartSettings}
+        guideAxis={guideAxis}
+        onChangeGuideAxis={setGuideAxis}
+        guideCount={engine.guides.length}
+        onClearGuides={() => {
+          engine.clearGuides();
+          bumpEngineRevision();
+        }}
         lineAndCurveSettings={lineAndCurveSettings}
         onChangeLineAndCurveSettings={handleUpdateLineAndCurveSettings}
         textSettings={textSettings}
@@ -1180,6 +1363,12 @@ export default function App() {
           gradientSettings={gradientSettings}
           vectorShapeSettings={vectorShapeSettings}
           onChangeVectorShapeSettings={handleUpdateVectorShapeSettings}
+          smartSettings={smartSettings}
+          onChangeSmartSettings={handleUpdateSmartSettings}
+          guideAxis={guideAxis}
+          snapEnabled={snapEnabled}
+          guidesVisible={guidesVisible}
+          onOpenSmartObject={handleOpenSmartObject}
           lineAndCurveSettings={lineAndCurveSettings}
           onChangeLineAndCurveSettings={handleUpdateLineAndCurveSettings}
           textSettings={textSettings}
@@ -1209,6 +1398,7 @@ export default function App() {
           penCloseToggleTrigger={penCloseToggleTrigger}
           onPenInfoChange={setPenInfo}
           onVectorEditKind={setVectorEditKind}
+          onPropertiesChange={handlePropertiesChange}
               onVectorSelectionChange={bumpEngineRevision}
           vectorEditRequest={vectorEditRequest}
           onShowToast={showToast}
@@ -1223,6 +1413,9 @@ export default function App() {
             // (sesje gradientu, wiadra i figur odświeżają się same, bo zależą od koloru)
             onChangePrimaryColor={setPrimaryColor}
             onChangeSecondaryColor={setSecondaryColor}
+            tab={rightTab}
+            onChangeTab={setRightTab}
+            propsContent={<PropertiesPanel desc={propsState.desc} api={propsState.api} />}
           />
 
           <LayersPanel
@@ -1330,7 +1523,7 @@ export default function App() {
             selectedVectorObjects={engine.vec.getSelection()}
             pendingVectorObject={(() => {
               const act = engine.getActiveLayer();
-              if (!isLiveVectorSessionActive || !act?.isVector || engine.vec.editing) return null;
+              if (!isLiveVectorSessionActive || !act?.vectorTarget || engine.vec.editing) return null;
               const names: Record<string, string> = { line: 'Linia', bezier: 'Krzywa', shapes: 'Kształt', text: 'Tekst', pen: 'Pisak' };
               return { layerId: act.id, label: names[activeTool] ?? 'Obiekt' };
             })()}
@@ -1341,14 +1534,16 @@ export default function App() {
               engine.vec.setSelection(engine.layers[idx]?.id ?? null, ids);
               bumpEngineRevision();
             }}
+            onOpenSmartObject={handleOpenSmartObject}
             onEditVectorObject={(idx, id) => {
               engine.setEditTarget(idx, 'pixels');
               setActiveToolRaw('vector-select');
               setVectorEditRequest((r) => ({ n: (r?.n ?? 0) + 1, layerIndex: idx, id }));
               bumpEngineRevision();
             }}
-            onToggleVectorObject={(idx, id, vis) => {
-              engine.vec.setObjectVisible(idx, id, vis);
+            onToggleVectorObject={(idx, id, vis, ids) => {
+              if (ids && ids.length > 1) engine.vec.setObjectsVisible(idx, ids, vis);
+              else engine.vec.setObjectVisible(idx, id, vis);
               bumpEngineRevision();
             }}
             onRemoveVectorObject={(idx, id) => {
@@ -1409,9 +1604,10 @@ export default function App() {
             mergeDownApplies={engine.applyEffectsMode !== 'none'}
             applyEffectsMode={engine.applyEffectsMode}
             selectedCorrection={engine.selectedCorrection}
-            onSelectCorrection={(idx, id) => {
+            selectedCorrectionIds={engine.selectedCorrectionIds}
+            onSelectCorrection={(idx, id, mode) => {
               engine.setEditTarget(idx, 'pixels');
-              engine.selectCorrection(idx, id);
+              engine.selectCorrection(idx, id, mode);
               bumpEngineRevision();
             }}
             onMoveCorrectionToStack={(from, id, target, place) => {
@@ -1423,6 +1619,7 @@ export default function App() {
               engine.moveCorrectionToStack(from, id, target, place);
               bumpEngineRevision();
             }}
+            onConvertLayer={handleConvertLayer}
             onMergeDown={() => {
               // Zaznaczony efekt / warstwa z korekcjami / korekcja w stosie: „Zastosuj efekty” wpieka je w piksele;
               // bez efektów przycisk łączy warstwę w dół
@@ -1498,6 +1695,14 @@ export default function App() {
         docHeight={engine.height}
         zoom={zoom}
         onZoomChange={setZoom}
+        unitMode={effectiveUnitMode}
+        onUnitModeChange={setUnitMode}
+        unitsLocked={!!activeTab.smart}
+        dpi={engine.dpi}
+        snapEnabled={snapEnabled}
+        onToggleSnap={() => setSnapEnabled((v) => !v)}
+        guidesVisible={guidesVisible}
+        onToggleGuides={() => setGuidesVisible((v) => !v)}
       />
 
       {/* Pływające okno korekcji (podgląd na żywo na płótnie) */}
@@ -1543,7 +1748,9 @@ export default function App() {
         onClose={() => setIsNewDocModalOpen(false)}
         onCreate={handleCreateNewDocument}
         defaultTitle={`obraz${tabs.length + 1}.fig`}
+        defaultUnit={unitMode === 'vec' ? 'mm' : 'px'}
       />
     </div>
+    </UnitsContext.Provider>
   );
 }

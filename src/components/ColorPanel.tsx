@@ -13,6 +13,9 @@ interface ColorPanelProps {
   secondaryColor: SKColor;
   onChangePrimaryColor: (color: SKColor) => void;
   onChangeSecondaryColor: (color: SKColor) => void;
+  tab?: 'color' | 'props';
+  onChangeTab?: (t: 'color' | 'props') => void;
+  propsContent?: React.ReactNode;
 }
 
 export const ColorPanel: React.FC<ColorPanelProps> = ({
@@ -20,6 +23,9 @@ export const ColorPanel: React.FC<ColorPanelProps> = ({
   secondaryColor,
   onChangePrimaryColor,
   onChangeSecondaryColor,
+  tab = 'color',
+  onChangeTab,
+  propsContent,
 }) => {
   const [activeSlot, setActiveSlot] = useState<'primary' | 'secondary'>('primary');
   const [colorMode, setColorMode] = useState<'hsv' | 'rgb'>('hsv');
@@ -45,14 +51,23 @@ export const ColorPanel: React.FC<ColorPanelProps> = ({
     <div className="bg-transparent text-xs select-none">
       {/* Pasek Zakładek (Tab Strip) */}
       <div className="flex items-center border-b border-[#333] mb-2 pb-0.5">
-        <button
-          type="button"
-          className="text-[11px] font-semibold tracking-wide text-white border-b-2 border-[#007acc] pb-1 px-0.5 focus:outline-none cursor-pointer"
-        >
-          Kolor
-        </button>
+        {(['color', 'props'] as const).map((t) => (
+          <button
+            key={t}
+            type="button"
+            onClick={() => onChangeTab?.(t)}
+            data-testid={`tab-${t}`}
+            className={`text-[11px] font-semibold tracking-wide pb-1 px-0.5 mr-3 border-b-2 focus:outline-none cursor-pointer ${tab === t ? 'text-white border-[#007acc]' : 'text-[#888] border-transparent hover:text-[#ccc]'}`}
+          >
+            {t === 'color' ? 'Kolor' : 'Właściwości'}
+          </button>
+        ))}
       </div>
 
+      {tab === 'props' ? (
+        propsContent
+      ) : (
+        <>
       {/* Górny wiersz: Podgląd Kolorów + Hex + Przycisk Metoda */}
       <div className="flex items-center justify-between gap-1 mb-2">
         <div className="flex items-center gap-1">
@@ -137,6 +152,8 @@ export const ColorPanel: React.FC<ColorPanelProps> = ({
       </div>
 
       <ColorPickerBody color={currentColor} onChange={updateCurrentColor} onChangeSecondary={onChangeSecondaryColor} />
+        </>
+      )}
     </div>
   );
 };

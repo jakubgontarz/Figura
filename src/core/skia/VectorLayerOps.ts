@@ -77,7 +77,7 @@ export class VectorLayerOps {
   /** Warstwa, do której trafia nowy obiekt (aktywna warstwa wektorowa), albo null. */
   public targetLayer(): Layer | null {
     const l = this.engine.getActiveLayer();
-    return l && l.isVector && !l.isGroup && !l.isAdjustment ? l : null;
+    return l && l.vectorTarget && !l.isGroup && !l.isAdjustment ? l : null;
   }
 
   public get editing(): boolean {
@@ -101,7 +101,7 @@ export class VectorLayerOps {
   private snapshot(layer: Layer, b: VecBounds): TileSnapshot[] {
     const r = this.docRect(b);
     if (!r) return [];
-    return layer.pixelGrid.getTilesIntersectingRect(r).map((t) => ({
+    return layer.tileGrid.getTilesIntersectingRect(r).map((t) => ({
       tx: t.tileX,
       ty: t.tileY,
       imgData: t.ctx.getImageData(0, 0, t.width, t.height),
@@ -113,7 +113,11 @@ export class VectorLayerOps {
   public rebuild(layer: Layer, b: VecBounds): void {
     const r = this.docRect(b);
     if (!r) return;
-    const tiles = layer.pixelGrid.getTilesIntersectingRect(r);
+    const onMask = layer.editMask && !!layer.maskGrid;
+    if (onMask && layer.maskRaster) return; // maska rastrowa nie jest pochodną obiektów
+    // maska warstwy wektorowej = podkład + jej obiekty; podkład zapamiętujemy przed pierwszą przebudową
+    if (onMask && !layer.maskBase) layer.maskBase = layer.maskGrid!.clone();
+    const tiles = layer.tileGrid.getTilesIntersectingRect(r);
     if (tiles.length === 0) return;
     let x0 = Infinity,
       y0 = Infinity,
@@ -136,12 +140,20 @@ export class VectorLayerOps {
     acc.width = w;
     acc.height = h;
     const actx = acc.getContext('2d')!;
+    // maska: obiekty (także w trybach mieszania, np. Ekran) są składane na podkładzie maski
+    if (onMask) {
+      for (const t of tiles) {
+        const bt = layer.maskBase!.getTile(t.tileX, t.tileY);
+        if (bt && bt.hasContent) actx.drawImage(bt.canvas, t.pixelX - x0, t.pixelY - y0);
+      }
+    }
     for (const o of hits) compositeVectorObject(actx, o, w, h, x0, y0);
 
     for (const t of tiles) {
       const tb: VecBounds = { x0: t.pixelX, y0: t.pixelY, x1: t.pixelX + t.width, y1: t.pixelY + t.height };
       t.clear();
-      const any = hits.some((o) => boundsIntersect(vectorObjectBounds(o), tb));
+      const baseHas = onMask && !!layer.maskBase!.getTile(t.tileX, t.tileY)?.hasContent;
+      const any = baseHas || hits.some((o) => boundsIntersect(vectorObjectBounds(o), tb));
       if (any) {
         t.ctx.drawImage(acc, t.pixelX - x0, t.pixelY - y0, t.width, t.height, 0, 0, t.width, t.height);
         t.hasContent = true;
@@ -180,7 +192,7 @@ export class VectorLayerOps {
       type: 'tiles',
       description,
       layerIndex: this.layerIndexOf(layer),
-      onMask: false,
+      onMask: layer.editMask && !!layer.maskGrid,
       before,
       after,
       vector: { before: objsBefore, after: cloneVectorObjects(layer.vectorObjects) },
@@ -605,6 +617,28 @@ export class VectorLayerOps {
     this.engine.markPixelsChanged();
   }
 
+  /** Zapisuje nową zawartość obiektu inteligentnego (po zamknięciu jego zakładki): jedna akcja historii. */
+  public updateSmartContent(layerId: string, id: string, fig: string, png: string): boolean {
+    this.settle();
+    const layer = this.engine.layers.find((l) => l.id === layerId);
+    if (!layer || !layer.isVector) return false;
+    const o = layer.vectorObjects.find((x) => x.id === id);
+    if (!o || o.kind !== 'smart') return false;
+    if (o.fig === fig && o.png === png) return false;
+    this.applyOp(layer, 'Edycja obiektu inteligentnego', vectorObjectBounds(o), () => {
+      o.fig = fig;
+      o.png = png;
+    });
+    return true;
+  }
+
+  /** Obiekt inteligentny o danym id (do otwarcia w zakładce). */
+  public findSmart(layerId: string, id: string): import('./VectorObjects.ts').VecSmart | null {
+    const layer = this.engine.layers.find((l) => l.id === layerId);
+    const o = layer?.vectorObjects.find((x) => x.id === id);
+    return o && o.kind === 'smart' ? o : null;
+  }
+
   public setObjectVisible(layerIndex: number, id: string, visible: boolean): void {
     this.settle();
     const layer = this.engine.layers[layerIndex];
@@ -613,6 +647,20 @@ export class VectorLayerOps {
     if (!o || o.visible === visible) return;
     const b = vectorObjectBounds(o);
     this.applyOp(layer, visible ? 'Pokazanie obiektu' : 'Ukrycie obiektu', b, () => (o.visible = visible));
+  }
+
+  /** Ukrywa / pokazuje kilka obiektów naraz jako jeden wpis w historii. */
+  public setObjectsVisible(layerIndex: number, ids: string[], visible: boolean): void {
+    this.settle();
+    const layer = this.engine.layers[layerIndex];
+    if (!layer || !layer.isVector || layer.locked) return;
+    const list = this.objectsOf(layer, ids).filter((o) => o.visible !== visible);
+    if (list.length === 0) return;
+    const rect = this.boundsOfObjects(list);
+    if (!rect) return;
+    this.applyOp(layer, visible ? 'Pokazanie obiektów' : 'Ukrycie obiektów', rect, () => {
+      for (const o of list) o.visible = visible;
+    });
   }
 
   public renameObject(layerIndex: number, id: string, name: string): void {
@@ -678,6 +726,14 @@ export class VectorLayerOps {
 
   /** Przebudowuje całą warstwę (po wczytaniu pliku bez pikseli, po zmianie rozmiaru dokumentu). */
   public rebuildAll(layer: Layer): void {
-    this.rebuild(layer, { x0: 0, y0: 0, x1: this.engine.width, y1: this.engine.height });
+    const all: VecBounds = { x0: 0, y0: 0, x1: this.engine.width, y1: this.engine.height };
+    const was = layer.editMask;
+    layer.editMask = false;
+    this.rebuild(layer, all);
+    if (layer.maskGrid && layer.maskObjects.length > 0) {
+      layer.editMask = true;
+      this.rebuild(layer, all);
+    }
+    layer.editMask = was;
   }
 }

@@ -36,6 +36,7 @@ import {
   StrokeLineCap,
   PathFillMode,
   VectorShapeSettings,
+  SmartObjectSettings,
   TextToolSettings,
 } from '../core/skia/types.ts';
 import { TextOptions } from './TextOptions.tsx';
@@ -63,6 +64,12 @@ interface ToolOptionsBarProps {
   onChangeGradientSettings?: (newSettings: Partial<GradientSettings>) => void;
   vectorShapeSettings: VectorShapeSettings;
   onChangeVectorShapeSettings: (newSettings: Partial<VectorShapeSettings>) => void;
+  smartSettings?: SmartObjectSettings;
+  guideAxis?: 'h' | 'v';
+  onChangeGuideAxis?: (a: 'h' | 'v') => void;
+  guideCount?: number;
+  onClearGuides?: () => void;
+  onChangeSmartSettings?: (n: Partial<SmartObjectSettings>) => void;
   lineAndCurveSettings: LineAndCurveSettings;
   onChangeLineAndCurveSettings: (newSettings: Partial<LineAndCurveSettings>) => void;
   primaryColor?: SKColor;
@@ -106,6 +113,8 @@ function spacingToSlider(spacing: number): number {
   const norm = Math.pow((clean - 1) / 499, 1 / 2.2);
   return Math.round(norm * 1000);
 }
+
+import { LengthField, UnitLabel, useUnits } from './Units.tsx';
 
 export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
   brushSettings,
@@ -157,6 +166,12 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
   onChangeGradientSettings,
   vectorShapeSettings,
   onChangeVectorShapeSettings,
+  smartSettings = { width: 400, height: 300, blendMode: 'SrcOver' },
+  guideAxis = 'v',
+  onChangeGuideAxis,
+  guideCount = 0,
+  onClearGuides,
+  onChangeSmartSettings,
   lineAndCurveSettings,
   onChangeLineAndCurveSettings,
   primaryColor,
@@ -175,6 +190,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
   penInfo,
   onTogglePenClosed,
 }) => {
+  const vecUnits = useUnits().mode === 'vec';
   const isSelectionTool =
     activeTool === 'select-rect' ||
     activeTool === 'select-ellipse' ||
@@ -194,20 +210,15 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
           {/* Grubość linii */}
           <div className="flex items-center gap-1.5 flex-shrink-0">
             <label className="text-[11px] whitespace-nowrap text-[#aaa]">Grubość:</label>
-            <input
-              type="number"
-              min={activeTool === 'bezier' ? 0 : 1}
-              max="200"
-              value={lineAndCurveSettings.strokeWidth}
-              onChange={(e) => {
-                const val = parseInt(e.target.value);
-                if (!isNaN(val)) {
-                  onChangeLineAndCurveSettings({ strokeWidth: Math.max(activeTool === 'bezier' ? 0 : 1, Math.min(200, val)) });
-                }
-              }}
-              className="w-12 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white focus:outline-none focus:border-[#007acc] font-mono"
+            <LengthField
+              valuePx={lineAndCurveSettings.strokeWidth}
+              minPx={activeTool === 'bezier' ? 0 : 1}
+              maxPx={200}
+              integerPx={!vecUnits}
+              onCommitPx={(v) => onChangeLineAndCurveSettings({ strokeWidth: v })}
+              className="w-14 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white focus:outline-none focus:border-[#007acc] font-mono"
             />
-            <span className="text-[10px] text-[#888]">px</span>
+            <UnitLabel />
             <input
               type="range"
               min={activeTool === 'bezier' ? 0 : 1}
@@ -376,6 +387,78 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
             </select>
           </div>
         </div>
+      ) : activeTool === 'guides' ? (
+        /* Prowadnice: kierunek nowej prowadnicy */
+        <div className="flex items-center gap-3 flex-1 flex-shrink-0">
+          <div className="flex items-center gap-1.5">
+            <span className="text-[11px] text-[#aaa]">Kierunek:</span>
+            <div className="flex rounded overflow-hidden border border-[#444]">
+              {([['v', 'Pionowa'], ['h', 'Pozioma']] as const).map(([a, label]) => (
+                <button
+                  key={a}
+                  type="button"
+                  data-testid={`guide-axis-${a}`}
+                  onClick={() => onChangeGuideAxis?.(a)}
+                  className={`h-5 px-2 text-[11px] cursor-pointer ${guideAxis === a ? 'bg-[#094771] text-white' : 'bg-[#252525] text-[#aaa] hover:text-white'}`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <button
+            type="button"
+            disabled={guideCount === 0}
+            onClick={() => onClearGuides?.()}
+            className="h-5 px-2 text-[11px] bg-[#2a2a2a] border border-[#444] rounded text-[#ccc] hover:text-white cursor-pointer disabled:opacity-40 disabled:cursor-default"
+          >
+            Usuń wszystkie ({guideCount})
+          </button>
+          <span className="text-[11px] text-[#9a9a9a]">Kliknij, aby wstawić. Przeciągnij prowadnicę, aby ją przesunąć; wyciągnięcie poza obraz lub Delete usuwa. Współrzędne: panel Właściwości.</span>
+        </div>
+      ) : activeTool === 'smart-object' ? (
+        /* Obiekt inteligentny: rozmiar płótna obiektu (zawsze w pikselach) i tryb mieszania */
+        <div className="flex items-center gap-3 flex-1 flex-shrink-0">
+          <div className="flex items-center gap-1.5 bg-[#1e1e1e] px-1.5 py-0.5 rounded border border-[#3e3e3e]">
+            <label className="text-[11px] whitespace-nowrap text-[#aaa]" title="Rozmiar płótna obiektu inteligentnego">Płótno obiektu:</label>
+            <LengthField
+              forcePx
+              valuePx={smartSettings.width}
+              minPx={1}
+              maxPx={16000}
+              integerPx
+              onCommitPx={(v) => onChangeSmartSettings?.({ width: v })}
+              className="w-16 h-5 bg-[#252525] border border-[#555] rounded px-1 text-center text-xs text-white font-mono focus:outline-none focus:border-[#00bcd4]"
+            />
+            <span className="text-[11px] text-[#aaa]">px</span>
+            <label className="text-[11px] whitespace-nowrap text-[#aaa] ml-1">×</label>
+            <LengthField
+              forcePx
+              valuePx={smartSettings.height}
+              minPx={1}
+              maxPx={16000}
+              integerPx
+              onCommitPx={(v) => onChangeSmartSettings?.({ height: v })}
+              className="w-16 h-5 bg-[#252525] border border-[#555] rounded px-1 text-center text-xs text-white font-mono focus:outline-none focus:border-[#00bcd4]"
+            />
+            <span className="text-[11px] text-[#aaa]">px</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Tryb mieszania:</label>
+            <select
+              value={smartSettings.blendMode}
+              onChange={(e) => onChangeSmartSettings?.({ blendMode: e.target.value as SKBlendMode })}
+              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+            >
+              {BLEND_MODES.map((mode) => (
+                <option key={mode.id} value={mode.id}>
+                  {mode.namePl}
+                </option>
+              ))}
+            </select>
+          </div>
+          <span className="text-[11px] text-[#9a9a9a]">Kliknij lub przeciągnij (Shift – zachowaj proporcje płótna), aby wstawić. Dwuklik na obiekcie otwiera jego dokument w zakładce.</span>
+        </div>
       ) : isShapeTool ? (
         /* 2. OPCJE FIGUR GEOMETRYCZNYCH */
         <div className="flex items-center gap-3 flex-1 flex-shrink-0">
@@ -420,20 +503,15 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
           {/* Grubość obrysu */}
           <div className="flex items-center gap-1.5 flex-shrink-0">
             <label className="text-[11px] whitespace-nowrap text-[#aaa]">Obrys:</label>
-            <input
-              type="number"
-              min="0"
-              max="200"
-              value={vectorShapeSettings.strokeWidth}
-              onChange={(e) => {
-                const val = parseInt(e.target.value);
-                if (!isNaN(val)) {
-                  onChangeVectorShapeSettings({ strokeWidth: Math.max(0, Math.min(200, val)) });
-                }
-              }}
-              className="w-12 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white focus:outline-none focus:border-[#007acc] font-mono"
+            <LengthField
+              valuePx={vectorShapeSettings.strokeWidth}
+              minPx={0}
+              maxPx={200}
+              integerPx={!vecUnits}
+              onCommitPx={(v) => onChangeVectorShapeSettings({ strokeWidth: v })}
+              className="w-14 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white focus:outline-none focus:border-[#007acc] font-mono"
             />
-            <span className="text-[10px] text-[#888]">px</span>
+            <UnitLabel />
             <input
               type="range"
               min="0"
@@ -480,18 +558,15 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
           {vectorShapeSettings.shapeKind === 'round-rect' && (
             <div className="flex items-center gap-1 flex-shrink-0">
               <label className="text-[11px] whitespace-nowrap text-[#aaa]">Promień:</label>
-              <input
-                type="number"
-                min="0"
-                max="200"
-                value={vectorShapeSettings.cornerRadius}
-                onChange={(e) => {
-                  const val = parseInt(e.target.value);
-                  if (!isNaN(val)) onChangeVectorShapeSettings({ cornerRadius: Math.max(0, val) });
-                }}
-                className="w-12 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white font-mono"
+              <LengthField
+                valuePx={vectorShapeSettings.cornerRadius}
+                minPx={0}
+                maxPx={2000}
+                integerPx={!vecUnits}
+                onCommitPx={(v) => onChangeVectorShapeSettings({ cornerRadius: v })}
+                className="w-14 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white font-mono"
               />
-              <span className="text-[10px] text-[#888]">px</span>
+              <UnitLabel />
             </div>
           )}
 
@@ -1668,9 +1743,24 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
         /* W narzędziu rączka i lupa nic nie ma być w opcjach */
         <div className="flex-1"></div>
       ) : activeTool === 'vector-select' ? (
-        /* Manipulacja bez otwartego obiektu: podpowiedź zamiast opcji pędzla */
-        <div className="flex items-center flex-1 text-[11px] text-[#9a9a9a]">
-          Kliknij obiekt, aby go edytować. Przeciągnij po pustym miejscu, aby zaznaczyć kilka (Shift / Ctrl dodaje). Delete usuwa, Ctrl+C / Ctrl+V kopiuje.
+        /* Manipulacja: tryb zaznaczania obiektów jak w zaznaczaniu prostokątnym */
+        <div className="flex items-center gap-3 flex-1 flex-shrink-0">
+          <div className="flex items-center gap-1.5">
+            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Tryb:</label>
+            <select
+              value={selectionSettings.mode}
+              onChange={(e) =>
+                onChangeSelectionSettings({ mode: e.target.value as SelectionSettings['mode'] })
+              }
+              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+            >
+              <option value="replace">Zastąp zaznaczenie</option>
+              <option value="add">Dodaj do zaznaczenia (Ctrl)</option>
+              <option value="subtract">Odejmij od zaznaczenia (Alt)</option>
+              <option value="intersect">Część wspólna (Ctrl+Alt)</option>
+              <option value="invert">Odwróć zaznaczenie</option>
+            </select>
+          </div>
         </div>
       ) : (
         /* 8. PASEK OPCJI PĘDZLA I GUMKI */

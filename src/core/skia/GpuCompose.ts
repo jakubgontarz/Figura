@@ -43,6 +43,8 @@ const GRID_BUDGET = 1400 * 1024 * 1024;
 const FX_CACHE_BUDGET = 420 * 1024 * 1024;
 /** Minimalne przesunięcie siatki próbkowania (jak TIE_EPS w ViewportTileRenderer: ten sam piksel wygrywa w obu ścieżkach). */
 const TIE_EPS = 0.002;
+/** Siatka (piksele urządzenia), do której wyrównane jest okno składania w trybie Wektory (patrz composeImpl). */
+const CRISP_SNAP = 128;
 
 export interface GpuView {
   zoom: number;
@@ -68,6 +70,20 @@ export interface GpuPreviewRaster {
   canvas: HTMLCanvasElement;
   x: number;
   y: number;
+}
+
+/**
+ * Warstwy wektorowe rysowane w rozdzielczości ekranu (tryb Wektory): kompozytor składa wtedy okno w skali widoku (a nie
+ * dokumentu), a pikseli warstwy wektorowej nie próbkuje z kafelków, tylko bierze ostro narysowaną teksturę.
+ * Maski, korekcje, filtry, stylizacje, krycie i tryby mieszania działają dalej tak samo jak dla pozostałych warstw.
+ */
+export interface GpuCrispSource {
+  /** Czy warstwa jest rysowana wektorowo w rozdzielczości okna. */
+  vector: (layer: Layer) => boolean;
+  /** Klucz zawartości warstwy wektorowej (zmienia się, gdy trzeba ją narysować od nowa). */
+  key: (layer: Layer) => string;
+  /** Rysuje warstwę (kind 'layer') lub jej maskę (kind 'mask') w oknie rastra W x H; null = nie umiem. */
+  raster: (layer: Layer, win: GpuWindow, kind: 'layer' | 'mask') => HTMLCanvasElement | null;
 }
 
 export interface GpuPreviewSource {
@@ -143,6 +159,7 @@ uniform ivec2 uDoc;
 uniform vec2 uOrg;
 uniform float uS;
 uniform int uGray;
+uniform int uNear;
 uniform ivec4 uCov;
 vec4 fetchPre(ivec2 q) {
   q = clamp(q, ivec2(0), uDoc - 1);
@@ -166,6 +183,15 @@ void main() {
     return;
   }
   if (r.x < uCov.x || r.y < uCov.y || r.x >= uCov.z || r.y >= uCov.w) { o = vec4(0.0); return; }
+  if (uNear == 1) {
+    ivec2 q = clamp(ivec2(floor(uOrg + (vec2(r) + 0.5) / uS + 0.0001)), ivec2(0), uDoc - 1);
+    vec4 c = texelFetch(uSrc, q, 0);
+    if (uGray == 1) {
+      float g = floor(dot(c.rgb * 255.0, vec3(0.299, 0.587, 0.114)) * c.a + 0.5) / 255.0;
+      o = vec4(vec3(g), 1.0);
+    } else o = c;
+    return;
+  }
   vec2 d = uOrg + (vec2(r) + 0.5) / uS - 0.5;
   vec2 f0 = floor(d);
   vec2 t = d - f0;
@@ -179,6 +205,37 @@ void main() {
 }`;
 
 /** Podgląd narzędzia (tekstura z mnożeniem alfa) nałożony na zawartość (proste kolory) z trybem mieszania narzędzia. */
+const FS_RESAMPLE =
+  GL_HEAD +
+  BLEND_FN +
+  `uniform sampler2D uSrc;
+uniform ivec2 uSrcSize;
+uniform vec2 uSrcOrg;
+uniform vec2 uOrg;
+uniform float uS;
+uniform int uNear;
+uniform ivec4 uCov;
+vec4 fetchPre(ivec2 q) {
+  q = clamp(q, ivec2(0), uSrcSize - 1);
+  vec4 c = texelFetch(uSrc, q, 0);
+  return vec4(c.rgb * c.a, c.a);
+}
+void main() {
+  ivec2 r = ivec2(gl_FragCoord.xy);
+  if (r.x < uCov.x || r.y < uCov.y || r.x >= uCov.z || r.y >= uCov.w) { o = vec4(0.0); return; }
+  vec2 q = uOrg + (vec2(r) + 0.5) / uS - uSrcOrg;
+  if (uNear == 1) {
+    o = texelFetch(uSrc, clamp(ivec2(floor(q + 0.0001)), ivec2(0), uSrcSize - 1), 0);
+    return;
+  }
+  vec2 t = q - 0.5;
+  vec2 f0 = floor(t);
+  vec2 w = t - f0;
+  ivec2 i0 = ivec2(f0);
+  vec4 p = mix(mix(fetchPre(i0), fetchPre(i0 + ivec2(1, 0)), w.x), mix(fetchPre(i0 + ivec2(0, 1)), fetchPre(i0 + ivec2(1, 1)), w.x), w.y);
+  o = toStraight(p);
+}`;
+
 const FS_PREV =
   GL_HEAD +
   BLEND_FN +
@@ -255,6 +312,7 @@ uniform ivec2 uWin;
 uniform ivec2 uView;
 uniform int uKind;
 uniform vec4 uMap;
+uniform vec4 uDoc;
 out vec4 o;
 vec4 at(ivec2 q) {
   q = clamp(q, ivec2(0), uWin - 1);
@@ -262,6 +320,9 @@ vec4 at(ivec2 q) {
 }
 void main() {
   ivec2 sp = ivec2(int(gl_FragCoord.x), uView.y - 1 - int(gl_FragCoord.y));
+  // margines okna (filtry, podgląd obiektu wystającego poza płótno) nigdy nie jest pokazywany poza dokumentem
+  vec2 pc = vec2(sp) + 0.5;
+  if (pc.x < uDoc.x || pc.y < uDoc.y || pc.x >= uDoc.z || pc.y >= uDoc.w) { o = vec4(0.0); return; }
   if (uKind == 2) {
     ivec2 q = sp - ivec2(int(uMap.x), int(uMap.y));
     if (q.x < 0 || q.y < 0 || q.x >= uWin.x || q.y >= uWin.y) { o = vec4(0.0); return; }
@@ -309,6 +370,11 @@ interface FxCacheEntry {
 
 const bytesOf = (w: number, h: number, bpp: number): number => w * h * bpp;
 
+function gridHasContent(grid: TileGrid): boolean {
+  for (const row of grid.tiles) for (const t of row) if (t.hasContent) return true;
+  return false;
+}
+
 export class GpuComposer {
   private readonly eng: GraphicEngine;
   private g: GL | null = null;
@@ -320,6 +386,7 @@ export class GpuComposer {
   private frame = 0;
   private zeros: Uint8Array | null = null;
   private prevTex: Tex | null = null;
+  private vecTex = new Map<string, { tex: Tex; key: string; used: number }>();
   private broken = false;
   /** Statystyki ostatniej klatki (diagnostyka i testy). */
   public lastStats = { layers: 0, uploads: 0, chains: 0, cached: 0, w: 0, h: 0 };
@@ -343,7 +410,9 @@ export class GpuComposer {
       for (const e of this.fxCache.values()) this.del(g, e.tex);
       for (const t of this.pool.values()) this.del(g, t);
       if (this.prevTex) this.del(g, this.prevTex);
+      for (const v of this.vecTex.values()) this.del(g, v.tex);
     }
+    this.vecTex.clear();
     this.grids.clear();
     this.fxCache.clear();
     this.pool.clear();
@@ -457,6 +526,12 @@ export class GpuComposer {
         this.grids.delete(k);
       }
     }
+    for (const [k, v] of this.vecTex) {
+      if (this.frame - v.used > 240) {
+        this.del(g, v.tex);
+        this.vecTex.delete(k);
+      }
+    }
     for (const [k, v] of this.fxCache) {
       if (this.frame - v.used > 240) {
         this.del(g, v.tex);
@@ -464,6 +539,35 @@ export class GpuComposer {
         this.fxCache.delete(k);
       }
     }
+  }
+
+  /** Tekstura warstwy wektorowej (lub jej maski) w oknie rastra; wgrywana ponownie tylko przy zmianie klucza. */
+  private vecTexFor(g: GL, layer: Layer, slot: 'l' | 'm', key: string, W: number, H: number, make: () => HTMLCanvasElement | null): Tex | null {
+    const id = `${layer.id}:${slot}`;
+    let e = this.vecTex.get(id);
+    if (e && e.tex.w === W && e.tex.h === H && e.key === key) {
+      e.used = this.frame;
+      return e.tex;
+    }
+    const cv = make();
+    if (!cv || cv.width !== W || cv.height !== H) return null;
+    if (e && (e.tex.w !== W || e.tex.h !== H)) {
+      this.del(g, e.tex);
+      this.vecTex.delete(id);
+      e = undefined;
+    }
+    if (!e) {
+      e = { tex: kitMakeTex(g, W, H, 'rgba8'), key, used: this.frame };
+      this.vecTex.set(id, e);
+    }
+    g.bindTexture(g.TEXTURE_2D, e.tex.t);
+    g.pixelStorei(g.UNPACK_FLIP_Y_WEBGL, 0);
+    g.pixelStorei(g.UNPACK_PREMULTIPLY_ALPHA_WEBGL, 0);
+    g.texImage2D(g.TEXTURE_2D, 0, g.RGBA8, g.RGBA, g.UNSIGNED_BYTE, cv);
+    e.key = key;
+    e.used = this.frame;
+    this.lastStats.uploads++;
+    return e.tex;
   }
 
   // --- przebiegi ------------------------------------------------------------------------------------------------
@@ -479,7 +583,7 @@ export class GpuComposer {
     g.uniform1f(kitUni(g, p, n), v);
   }
 
-  private passSample(g: GL, gt: GridTex, dst: Tex, win: GpuWindow, gray: boolean, docW: number, docH: number): void {
+  private passSample(g: GL, gt: GridTex, dst: Tex, win: GpuWindow, gray: boolean, docW: number, docH: number, near = false): void {
     const p = this.pr(g, 'gc_sample', FS_SAMPLE);
     const s = win.s;
     // prostokąt rastra zajmowany przez dokument (zaokrąglony jak w drawLayerTiles)
@@ -494,6 +598,7 @@ export class GpuComposer {
       g.uniform2f(kitUni(g, p, 'uOrg'), win.ox, win.oy);
       this.u1f(g, p, 'uS', s);
       this.u1i(g, p, 'uGray', gray ? 1 : 0);
+      this.u1i(g, p, 'uNear', near ? 1 : 0);
       g.uniform4i(kitUni(g, p, 'uCov'), cx0, cy0, cx1, cy1);
     });
   }
@@ -541,6 +646,56 @@ export class GpuComposer {
   }
 
   /** Łańcuch efektów warstwy na teksturze `src` (RGBA8, proste kolory); wynik w teksturze puli sesji GPU albo null. */
+  /**
+   * Tryb Wektory: efekty (filtry, stylizacje i cały łańcuch korekcji) zwykłej warstwy rastrowej liczone są w pikselach
+   * dokumentu - tak samo jak w trybie Piksele - a dopiero wynik jest skalowany do okna widoku (ostre piksele przy dużym
+   * powiększeniu). Zwraca teksturę okna widoku albo null, gdy się nie da (wtedy działa nakładka 2D).
+   */
+  private docResChain(g: GL, layer: Layer, win: GpuWindow, gp: GridTex, gm: GridTex | null, gray: boolean): Tex | null {
+    const docW = this.eng.width;
+    const docH = this.eng.height;
+    const m = Math.min(1500, Math.ceil(layer.filterMargin));
+    const ax0 = Math.max(0, Math.floor(win.ox));
+    const ay0 = Math.max(0, Math.floor(win.oy));
+    const ax1 = Math.min(docW, Math.ceil(win.ox + win.W / win.s));
+    const ay1 = Math.min(docH, Math.ceil(win.oy + win.H / win.s));
+    if (ax1 <= ax0 || ay1 <= ay0) return this.poolTex(g, 't5', win.W, win.H, 'rgba8');
+    const W2 = ax1 - ax0 + 2 * m;
+    const H2 = ay1 - ay0 + 2 * m;
+    if (W2 * H2 > MAX_WIN_PX || W2 > kitMaxTex() || H2 > kitMaxTex()) return null;
+    if (!layer.gpuChainFits(W2, H2, 1)) return null;
+    const win2: GpuWindow = { ox: ax0 - m, oy: ay0 - m, s: 1, W: W2, H: H2, M: m };
+    const d1 = this.poolTex(g, 'd1', W2, H2, 'rgba8');
+    const d2 = this.poolTex(g, 'd2', W2, H2, 'rgba8');
+    const d3 = this.poolTex(g, 'd3', W2, H2, 'rgba8');
+    this.passSample(g, gp, d1, win2, gray, docW, docH, false);
+    let cur2 = d1;
+    if (gm) {
+      this.passSample(g, gm, d2, win2, false, docW, docH, false);
+      this.passMask(g, d1, d2, d3, win2);
+      cur2 = d3;
+    }
+    const out = this.runChain(layer, cur2, win2);
+    if (!out) return null;
+    const dst = this.poolTex(g, 't5', win.W, win.H, 'rgba8');
+    const p = this.pr(g, 'gc_resample', FS_RESAMPLE);
+    const cx0 = Math.round((0 - win.ox) * win.s);
+    const cy0 = Math.round((0 - win.oy) * win.s);
+    const cx1 = Math.round((docW - win.ox) * win.s);
+    const cy1 = Math.round((docH - win.oy) * win.s);
+    kitPass(g, p, dst, win.W, win.H, () => {
+      kitBind(g, 0, out);
+      this.u1i(g, p, 'uSrc', 0);
+      g.uniform2i(kitUni(g, p, 'uSrcSize'), W2, H2);
+      g.uniform2f(kitUni(g, p, 'uSrcOrg'), win2.ox, win2.oy);
+      g.uniform2f(kitUni(g, p, 'uOrg'), win.ox, win.oy);
+      this.u1f(g, p, 'uS', win.s);
+      this.u1i(g, p, 'uNear', win.s >= 2 ? 1 : 0);
+      g.uniform4i(kitUni(g, p, 'uCov'), cx0, cy0, cx1, cy1);
+    });
+    return dst;
+  }
+
   private runChain(layer: Layer, src: Tex, win: GpuWindow): Tex | null {
     if (!gpuSessionBeginTex(src, win.W, win.H)) return null;
     const docW = this.eng.width;
@@ -565,7 +720,7 @@ export class GpuComposer {
    * Składa widok. Zwraca płótno WebGL (rozmiar widoku) z wynikiem albo null, gdy tej konfiguracji nie obsługujemy.
    * Wynik trzeba skopiować (drawImage) w tym samym zadaniu.
    */
-  public compose(view: GpuView, preview: GpuPreviewSource | null): HTMLCanvasElement | null {
+  public compose(view: GpuView, preview: GpuPreviewSource | null, crisp: GpuCrispSource | null = null): HTMLCanvasElement | null {
     if (this.broken) return null;
     const g = kitGl();
     if (!g) return null;
@@ -574,7 +729,7 @@ export class GpuComposer {
       this.g = g;
     }
     try {
-      return this.composeImpl(g, view, preview);
+      return this.composeImpl(g, view, preview, crisp);
     } catch (e) {
       console.warn('GpuCompose', e);
       this.broken = true;
@@ -582,18 +737,24 @@ export class GpuComposer {
     }
   }
 
-  private composeImpl(g: GL, view: GpuView, preview: GpuPreviewSource | null): HTMLCanvasElement | null {
+  private composeImpl(g: GL, view: GpuView, preview: GpuPreviewSource | null, crisp: GpuCrispSource | null): HTMLCanvasElement | null {
     const eng = this.eng;
     this.frame++;
     this.lastStats = { layers: 0, uploads: 0, chains: 0, cached: 0, w: 0, h: 0 };
     if (g.isContextLost()) return null;
-    if (eng.renderIsolation || eng.renderHasPass) return null;
+    // tryb Wektory składa grupy izolowane w osobnym buforze (patrz crispRenderList); poza nim grupy obsługuje kompozytor CPU
+    const cl = crisp && !eng.maskView ? eng.crispRenderList : null;
+    if (crisp && !eng.maskView && !cl) return null;
+    if (!cl && (eng.renderIsolation || eng.renderHasPass)) return null;
     if (eng.transformContentSession?.other) return null;
     const docW = eng.width;
     const docH = eng.height;
     if (docW > kitMaxTex() || docH > kitMaxTex()) return null;
-    const layers = eng.renderLayers;
-    const act = eng.renderActiveIndex;
+    const layers = cl ? cl.layers : eng.renderLayers;
+    const act = cl ? cl.active : eng.renderActiveIndex;
+    const groupEnds = cl ? cl.groupEnds : null;
+    const groupStarts = new Map<number, number>(); // indeks pierwszego dziecka -> indeks nagłówka
+    if (groupEnds) for (const [h, f] of groupEnds) groupStarts.set(f, h);
     const z = view.zoom;
 
     // --- okno rastra ---
@@ -604,7 +765,7 @@ export class GpuComposer {
     let rh: number;
     let offX = 0;
     let offY = 0;
-    if (z >= 1) {
+    if (z >= 1 && !crisp) {
       s = 1;
       const x0 = Math.max(0, Math.floor(-view.left / z) - 1);
       const y0 = Math.max(0, Math.floor(-view.top / z) - 1);
@@ -614,6 +775,35 @@ export class GpuComposer {
       oy = y0;
       rw = x1 - x0;
       rh = y1 - y0;
+    } else if (crisp) {
+      // Tryb Wektory: okno rastra jest wyrównane do siatki CRISP_SNAP px (we współrzędnych dokumentu w skali widoku), więc przy
+      // przesuwaniu widoku zmienia się dopiero co CRISP_SNAP px, a nie co piksel. Dzięki temu tekstury warstw wektorowych
+      // i wyniki efektów (klucze zawierają położenie okna) są ponownie używane z pamięci podręcznej, a klatka przesunięcia
+      // kosztuje tylko złożenie gotowych tekstur i wyświetlenie.
+      s = z;
+      const left = Math.round(view.left);
+      const top = Math.round(view.top);
+      const docDW = Math.ceil(docW * z);
+      const docDH = Math.ceil(docH * z);
+      const vx0 = Math.max(0, -left);
+      const vy0 = Math.max(0, -top);
+      const vx1 = Math.min(docDW, view.width - left);
+      const vy1 = Math.min(docDH, view.height - top);
+      if (vx1 <= vx0 || vy1 <= vy0) {
+        ox = oy = 0;
+        rw = rh = 0;
+      } else {
+        const sx0 = Math.floor(vx0 / CRISP_SNAP) * CRISP_SNAP;
+        const sy0 = Math.floor(vy0 / CRISP_SNAP) * CRISP_SNAP;
+        const sx1 = Math.min(docDW, Math.ceil(vx1 / CRISP_SNAP) * CRISP_SNAP);
+        const sy1 = Math.min(docDH, Math.ceil(vy1 / CRISP_SNAP) * CRISP_SNAP);
+        ox = sx0 / z;
+        oy = sy0 / z;
+        rw = sx1 - sx0;
+        rh = sy1 - sy0;
+        offX = left + sx0;
+        offY = top + sy0;
+      }
     } else {
       s = z;
       const cx0 = Math.max(0, Math.floor(view.left));
@@ -646,7 +836,8 @@ export class GpuComposer {
     for (let i = 0; i < layers.length; i++) {
       const l = layers[i];
       if (!l.hasActiveFilters) continue;
-      if (l.isAdjustment ? !l.adjustmentActive : !l.visible || l.opacity <= 0) continue;
+      if (l.isAdjustment ? !l.adjustmentActive : !(l.isGroup ? l.ownVisible : l.visible) || l.opacity <= 0) continue;
+      if (crisp && !l.isAdjustment && !l.isVector && !l.isGroup) continue; // efekty rastra liczone w pikselach dokumentu (docResChain)
       const m = Math.ceil(l.filterMargin * s);
       if (l.isAdjustment) adjSum += m;
       else maxOwn = Math.max(maxOwn, m);
@@ -662,7 +853,8 @@ export class GpuComposer {
     // --- czy cały stos da się policzyć na GPU ---
     for (let i = 0; i < layers.length; i++) {
       const l = layers[i];
-      if (l.isAdjustment ? !l.adjustmentActive : !l.visible || l.opacity <= 0) continue;
+      if (l.isAdjustment ? !l.adjustmentActive : !(l.isGroup ? l.ownVisible : l.visible) || l.opacity <= 0) continue;
+      if (crisp && !l.isAdjustment && !l.isVector && !l.isGroup && l.hasActiveFilters) continue; // sprawdza docResChain
       if (!l.gpuChainFits(W, H, s)) return null;
     }
 
@@ -724,8 +916,55 @@ export class GpuComposer {
       alt = t;
     };
 
+    // bufory grupy izolowanej: dzieci składają się w osobnej parze akumulatorów, nagłówek nakłada wynik na stos zewnętrzny
+    let outerAcc: Tex | null = null;
+    let outerAlt: Tex | null = null;
+    let openHeader = -1;
     for (let i = 0; i < layers.length; i++) {
       const layer = layers[i];
+      const startsFor = groupStarts.get(i);
+      if (startsFor !== undefined && openHeader < 0) {
+        const gh = layers[startsFor];
+        if (gh.ownVisible && gh.opacity > 0) {
+          outerAcc = acc;
+          outerAlt = alt;
+          acc = this.poolTex(g, 'grpA', W, H, 'rgba16f');
+          alt = this.poolTex(g, 'grpB', W, H, 'rgba16f');
+          g.bindFramebuffer(g.FRAMEBUFFER, acc.fbo);
+          g.viewport(0, 0, W, H);
+          g.clearColor(0, 0, 0, 0);
+          g.clear(g.COLOR_BUFFER_BIT);
+          openHeader = startsFor;
+        } else {
+          i = startsFor; // ukryta grupa: pomijamy dzieci i nagłówek
+          continue;
+        }
+      }
+      if (i === openHeader) {
+        // nagłówek grupy izolowanej: bufor dzieci -> maska grupy -> korekcje grupy -> nałożenie z jej krytem i trybem
+        const grpAcc = acc;
+        acc = outerAcc!;
+        alt = outerAlt!;
+        openHeader = -1;
+        this.passTwo(g, 'gc_tostr', FS_TO_STRAIGHT, grpAcc, t1, win, 'uAcc');
+        let gcur: Tex = t1;
+        const gmg = layer.maskGrid;
+        if (gmg && layer.maskEnabled) {
+          const gmt = this.syncGrid(g, gmg, dx0, dy0, dx1, dy1);
+          if (!gmt) return null;
+          this.passSample(g, gmt, t3, win, false, docW, docH, !!crisp && s >= 2);
+          this.passMask(g, gcur, t3, t4, win);
+          gcur = t4;
+        }
+        if (layer.hasActiveCorrections) {
+          const out = this.runChain(layer, gcur, win);
+          if (!out) return null;
+          gcur = out;
+        }
+        this.passComposite(g, acc, gcur, alt, win, layer.opacity, modeId(layer.blendMode));
+        swapAcc();
+        continue;
+      }
       if (layer.isAdjustment) {
         if (!layer.adjustmentActive) continue;
         this.passTwo(g, 'gc_tostr', FS_TO_STRAIGHT, acc, t1, win, 'uAcc');
@@ -747,18 +986,42 @@ export class GpuComposer {
       const corr = layer.hasActiveCorrections;
       const withPreview = isActive && !!preview;
 
-      const gp = this.syncGrid(g, grid, dx0, dy0, dx1, dy1);
-      if (!gp) return null;
+      // tryb Wektory: pusta zwykła warstwa rastrowa (bez efektów i maski) niczego nie zmienia - oszczędzamy jej przebiegi
+      if (crisp && !layer.isVector && !corr && !hasMask && !withPreview && !gray && !gridHasContent(grid)) continue;
+
+      // warstwa wektorowa w trybie Wektory: ostra tekstura w skali okna zamiast kafelków dokumentu
+      const vecCrisp = !!crisp && layer.isVector && crisp.vector(layer) && !gray && !editingMask;
+      const near = !!crisp && s >= 2;
+      // zwykła warstwa rastrowa z filtrami / stylizacjami: cały łańcuch efektów w pikselach dokumentu, jak w trybie Piksele
+      const docRes = !!crisp && !layer.isVector && layer.hasActiveFilters && !editingMask && !withPreview && !gray;
+      let vk = '';
+      let vtex: Tex | null = null;
+      let vmask: Tex | null = null;
+      let gp: GridTex | null = null;
       let gm: GridTex | null = null;
-      if (hasMask) {
-        gm = this.syncGrid(g, mg!, dx0, dy0, dx1, dy1);
-        if (!gm) return null;
+      if (vecCrisp) {
+        vk = `${wkey}|${crisp!.key(layer)}`;
+        vtex = this.vecTexFor(g, layer, 'l', vk, W, H, () => crisp!.raster(layer, win, 'layer'));
+        if (!vtex) return null;
+        if (hasMask) {
+          vmask = this.vecTexFor(g, layer, 'm', vk, W, H, () => crisp!.raster(layer, win, 'mask'));
+          if (!vmask) return null;
+        }
+      } else {
+        gp = this.syncGrid(g, grid, dx0, dy0, dx1, dy1);
+        if (!gp) return null;
+        if (hasMask) {
+          gm = this.syncGrid(g, mg!, dx0, dy0, dx1, dy1);
+          if (!gm) return null;
+        }
       }
 
       // nieaktywna warstwa z efektami: wynik w pamięci podręcznej (zmienia się tylko przy zmianie warstwy albo widoku)
       let fxKey = '';
-      if (!isActive && corr) {
-        fxKey = `${gp.rev}|${gm ? gm.rev : '-'}|${layer.correctionsSignature}|${wkey}|${gray ? 1 : 0}`;
+      // aktywna warstwa też trafia do pamięci podręcznej, gdy w trybie Wektory nie ma na niej podglądu narzędzia: jej treść
+      // (wersje tekstur, klucz obiektów, sesja na żywo) i korekcje są w kluczu, więc nie przeliczamy efektów przy każdym przesunięciu
+      if ((!isActive || (!!crisp && !withPreview && !editingMask)) && corr) {
+        fxKey = `${vecCrisp ? vk : gp!.rev}|${gm ? gm.rev : '-'}|${layer.correctionsSignature}|${wkey}|${gray ? 1 : 0}`;
         const hit = this.fxCache.get(layer);
         if (hit && hit.key === fxKey && hit.tex.w === W && hit.tex.h === H) {
           hit.used = this.frame;
@@ -769,11 +1032,22 @@ export class GpuComposer {
         }
       }
 
-      this.passSample(g, gp, t1, win, gray, docW, docH);
-      let cur: Tex = t1;
-      if (editingMask && gm) {
+      let cur: Tex;
+      let chained: Tex | null = null;
+      if (docRes) {
+        chained = this.docResChain(g, layer, win, gp!, hasMask ? gm : null, gray);
+        if (!chained) return null;
+        cur = chained;
+      } else if (vecCrisp) cur = vtex!;
+      else {
+        this.passSample(g, gp!, t1, win, gray, docW, docH, near);
+        cur = t1;
+      }
+      if (docRes) {
+        // maska i efekty już uwzględnione
+      } else if (editingMask && gm) {
         // podgląd narzędzia nanoszony na MASKĘ, a dopiero ona (jako alfa) na piksele warstwy
-        this.passSample(g, gm, t2, win, false, docW, docH);
+        this.passSample(g, gm, t2, win, false, docW, docH, near);
         let mt = t2;
         if (withPreview && loadPreview()) {
           this.passPrev(g, t2, t3, win, prevRect!, modeId(preview!.blendMode));
@@ -783,19 +1057,24 @@ export class GpuComposer {
         cur = t4;
       } else {
         if (withPreview && loadPreview()) {
-          this.passPrev(g, t1, t2, win, prevRect!, modeId(preview!.blendMode));
+          this.passPrev(g, cur, t2, win, prevRect!, modeId(preview!.blendMode));
           cur = t2;
         }
-        if (hasMask && gm) {
-          this.passSample(g, gm, t3, win, false, docW, docH);
-          this.passMask(g, cur, t3, t4, win);
+        if (hasMask && (gm || vmask)) {
+          let mt: Tex;
+          if (vmask) mt = vmask;
+          else {
+            this.passSample(g, gm!, t3, win, false, docW, docH, near);
+            mt = t3;
+          }
+          this.passMask(g, cur, mt, t4, win);
           cur = t4;
         }
       }
       void maskedPixels;
 
       if (corr) {
-        const out = this.runChain(layer, cur, win);
+        const out = docRes ? chained : this.runChain(layer, cur, win);
         if (!out) return null;
         if (fxKey && this.fxBytes + bytesOf(W, H, 4) <= FX_CACHE_BUDGET) {
           let e = this.fxCache.get(layer);
@@ -829,7 +1108,8 @@ export class GpuComposer {
     this.u1i(g, dp, 'uAcc', 0);
     g.uniform2i(kitUni(g, dp, 'uWin'), W, H);
     g.uniform2i(kitUni(g, dp, 'uView'), view.width, view.height);
-    if (z >= 1) {
+    g.uniform4f(kitUni(g, dp, 'uDoc'), view.left, view.top, view.left + docW * z, view.top + docH * z);
+    if (z >= 1 && !crisp) {
       this.u1i(g, dp, 'uKind', z < 2 ? 1 : 0);
       g.uniform4f(kitUni(g, dp, 'uMap'), view.left + TIE_EPS + win.ox * z, view.top + TIE_EPS + win.oy * z, z, 0);
     } else {

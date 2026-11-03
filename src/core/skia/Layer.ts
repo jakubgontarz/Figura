@@ -150,14 +150,44 @@ export class Layer {
    * więc narzędzia rastrowe jej nie dotykają, a korekcje, filtry, maska i style działają jak na zwykłej warstwie.
    */
   public isVector: boolean = false;
-  /** Obiekty warstwy wektorowej od najniższego do najwyższego (kolejność rysowania). */
-  public vectorObjects: VectorObject[] = [];
+  /** Obiekty samej warstwy wektorowej od najniższego do najwyższego (kolejność rysowania). */
+  public layerObjects: VectorObject[] = [];
+  /** Obiekty maski warstwy wektorowej (osobna lista): maska = `maskBase` + te obiekty narysowane na niej w kolejności. */
+  public maskObjects: VectorObject[] = [];
+  /** Zawartość maski z chwili pierwszej edycji obiektami (podkład, na którym rysowane są obiekty maski). */
+  public maskBase: TileGrid | null = null;
+  /**
+   * Maska warstwy wektorowej jest rastrowa (edytuje się ją narzędziami rastrowymi, nie obiektami). Domyślnie maska
+   * warstwy wektorowej jest wektorowa. Dla warstw rastrowych znacznik nie ma znaczenia.
+   */
+  public maskRaster: boolean = false;
+  /** Czy aktualnie edytowany cel (warstwa albo jej maska) składa się z obiektów wektorowych. */
+  public get vectorTarget(): boolean {
+    return this.isVector && !(this.editMask && !!this.maskGrid && this.maskRaster);
+  }
+  /**
+   * Lista obiektów, którą aktualnie edytujemy: obiekty maski, gdy edytowana jest maska warstwy wektorowej,
+   * w przeciwnym razie obiekty warstwy. Dzięki temu cała obsługa obiektów działa na „celu edycji” (jak `tileGrid`).
+   */
+  public get vectorObjects(): VectorObject[] {
+    return this.editMask && this.maskGrid ? this.maskObjects : this.layerObjects;
+  }
+  public set vectorObjects(v: VectorObject[]) {
+    if (this.editMask && this.maskGrid) this.maskObjects = v;
+    else this.layerObjects = v;
+  }
+  /** Czy maska jest zbudowana z obiektów (wtedy jej piksele są pochodną `maskBase` i `maskObjects`). */
+  public get maskIsVector(): boolean {
+    return this.isVector && !!this.maskGrid && this.maskObjects.length > 0;
+  }
   /** Id nagłówka grupy, do której należy warstwa (null = poziom główny). */
   public groupId: string | null = null;
   /** Grupa rozwinięta (dzieci widoczne na liście). */
   public expanded: boolean = true;
   /** Ustawiane przez silnik: grupa nadrzędna jest ukryta / zablokowana. */
   public groupHidden: boolean = false;
+  /** Tylko widok: warstwa wektorowa jest rysowana osobno w rozdzielczości ekranu (tryb Wektory), więc kompozyt dokumentu ją pomija. */
+  public viewHidden: boolean = false;
   public groupLocked: boolean = false;
 
   /**
@@ -166,6 +196,12 @@ export class Layer {
    */
   public get visible(): boolean {
     if (this.isAdjustment) return false; // nie ma pikseli: narzędzia rysujące jej nie dotykają
+    if (this.isGroup) return this._visible && this.editMask && !!this.maskGrid;
+    return this._visible && !this.groupHidden && !this.viewHidden;
+  }
+  /** Jak `visible`, ale ignoruje tymczasowe ukrycie przez widok (tryb Wektory): do sprawdzania, czy narzędzia mogą rysować. */
+  public get paintable(): boolean {
+    if (this.isAdjustment) return false;
     if (this.isGroup) return this._visible && this.editMask && !!this.maskGrid;
     return this._visible && !this.groupHidden;
   }
@@ -730,7 +766,10 @@ export class Layer {
     copy.isGroup = this.isGroup;
     copy.isAdjustment = this.isAdjustment;
     copy.isVector = this.isVector;
-    copy.vectorObjects = cloneVectorObjects(this.vectorObjects);
+    copy.layerObjects = cloneVectorObjects(this.layerObjects);
+    copy.maskObjects = cloneVectorObjects(this.maskObjects);
+    copy.maskBase = this.maskBase ? this.maskBase.clone() : null;
+    copy.maskRaster = this.maskRaster;
     copy.groupId = this.groupId;
     copy.expanded = this.expanded;
     copy.groupHidden = this.groupHidden;
@@ -774,6 +813,9 @@ export class Layer {
     const mw = docW ?? this.pixelGrid.width;
     const mh = docH ?? this.pixelGrid.height;
     const g = new TileGrid(mw, mh, this.pixelGrid.tileSize);
+    this.maskObjects = [];
+    this.maskBase = null;
+    this.maskRaster = false;
 
     // Miniatura maski (i grupy) musi odzwierciedlać proporcje dokumentu/maski
     const ratio = mw / Math.max(1, mh);
@@ -870,6 +912,10 @@ export class Layer {
     }
 
     this.maskGrid = g;
+    this.maskObjects = [];
+    this.maskBase = null;
+    // warstwa rastrowa przeniesiona na wektorową daje maskę rastrową; wektorowa na wektorową zostaje wektorowa (obiekty dodaje silnik)
+    this.maskRaster = this.isVector && !sourceLayer.isVector;
     this.maskEnabled = true;
     this.editMask = true;
     this.maskLinked = true;
@@ -879,6 +925,9 @@ export class Layer {
   /** Usuwa maskę (bez wpływu na piksele). */
   public dropMask(): void {
     this.maskGrid = null;
+    this.maskObjects = [];
+    this.maskBase = null;
+    this.maskRaster = false;
     this.editMask = false;
     this.maskEnabled = true;
     this.updateThumbnail(true);
@@ -887,6 +936,8 @@ export class Layer {
   /** Wpieka maskę w piksele warstwy i usuwa ją. */
   public applyMask(): void {
     if (!this.maskGrid) return;
+    this.maskObjects = [];
+    this.maskBase = null;
     for (const row of this.pixelGrid.tiles) {
       for (const t of row) {
         if (!t.hasContent) continue;

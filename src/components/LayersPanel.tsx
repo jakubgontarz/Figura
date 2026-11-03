@@ -22,6 +22,7 @@ import {
   Link2,
   Link2Off,
   Lock,
+  ImagePlus,
   Minus,
   PenTool,
   Shapes,
@@ -56,19 +57,25 @@ interface LayersPanelProps {
   pendingVectorObject?: { layerId: string; label: string } | null;
   onSelectVectorObjects?: (layerIndex: number, ids: string[]) => void;
   onEditVectorObject?: (layerIndex: number, id: string) => void;
-  onToggleVectorObject?: (layerIndex: number, id: string, visible: boolean) => void;
+  /** Dwuklik na obiekcie inteligentnym: otwiera jego dokument w zakładce. */
+  onOpenSmartObject?: (layerId: string, id: string) => void;
+  onToggleVectorObject?: (layerIndex: number, id: string, visible: boolean, ids?: string[]) => void;
   onRemoveVectorObject?: (layerIndex: number, id: string) => void;
   onRenameVectorObject?: (layerIndex: number, id: string, name: string) => void;
   onMoveVectorObject?: (fromLayerIndex: number, id: string, toLayerIndex: number, toPos: number) => void;
   onRemoveLayer: () => void;
   onDuplicateLayer: () => void;
   onMergeDown: () => void;
+  /** Przekształć warstwę: wektorowa -> rastrowa, rastrowa -> wektorowa z obiektem inteligentnym. */
+  onConvertLayer?: () => void;
   /** Aktywna warstwa ma korekcje: przycisk „Połącz w dół” działa jako „Zastosuj efekty” (wpieka korekcje bez łączenia). */
   mergeDownApplies?: boolean;
   applyEffectsMode?: 'none' | 'layer' | 'correction' | 'stack';
   /** Zaznaczony efekt wewnątrz warstwy (podświetlenie wiersza) */
   selectedCorrection?: { layerId: string; id: string } | null;
-  onSelectCorrection?: (layerIndex: number, id: string) => void;
+  /** Ctrl = dodaj / odejmij efekt od zaznaczenia, Shift = zakres od ostatnio klikniętego. */
+  onSelectCorrection?: (layerIndex: number, id: string, mode?: 'single' | 'toggle' | 'range') => void;
+  selectedCorrectionIds?: string[];
   /** Korekcja z listy wewnątrz warstwy -> samodzielny wpis stosu (before = nad, after = pod, into = szczyt grupy) */
   onMoveAdjustmentToLayer?: (adjIndex: number, toLayerIndex: number, insertIndex: number) => void;
   onMoveCorrectionToStack?: (fromLayerIndex: number, id: string, targetIndex: number, place: 'before' | 'after' | 'into') => void;
@@ -170,6 +177,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
   onAddVectorLayer,
   editingVectorObject,
   onEditVectorObject,
+  onOpenSmartObject,
   selectedVectorObjects,
   pendingVectorObject,
   onSelectVectorObjects,
@@ -180,9 +188,11 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
   onRemoveLayer,
   onDuplicateLayer,
   onMergeDown,
+  onConvertLayer,
   mergeDownApplies,
   applyEffectsMode,
   selectedCorrection,
+  selectedCorrectionIds,
   onSelectCorrection,
   onMoveCorrectionToStack,
   onMoveAdjustmentToLayer,
@@ -501,7 +511,22 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
         >
           {mergeDownApplies && !activeLayer?.isGroup ? <Wand2 size={12} /> : <GitMerge size={12} />}
         </IconBtn>
-        <IconBtn title="Przekształć warstwę (rasteryzuj / obiekt inteligentny) - wkrótce" placeholder>
+        <IconBtn
+          title={
+            activeLayer?.isVector && activeLayer.editMask && activeLayer.hasMask
+              ? activeLayer.maskRaster
+                ? 'Maska tej warstwy wektorowej jest już rastrowa'
+                : 'Przekształć maskę: zrasteryzuj maskę wektorową (warstwa zostaje wektorowa)'
+              : activeLayer?.isVector
+                ? 'Przekształć warstwę: zrasteryzuj warstwę wektorową razem z maską (obiekty zamieniają się w piksele)'
+                : 'Przekształć warstwę: zamień na warstwę wektorową z jednym obiektem inteligentnym'
+          }
+          onClick={onConvertLayer}
+          disabled={
+            !activeLayer || activeLayer.isGroup || activeLayer.isAdjustment || !onConvertLayer ||
+            (activeLayer.isVector && activeLayer.editMask && activeLayer.hasMask && activeLayer.maskRaster)
+          }
+        >
           <Component size={12} />
         </IconBtn>
         <div className="flex-1" />
@@ -599,7 +624,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
               onDragEnd={handleDragEnd}
               onClick={() => onSelectLayer(index)}
               style={isChild ? { marginLeft: 14 } : undefined}
-              className={`relative flex items-center gap-1 p-1 rounded cursor-pointer border transition-all ${
+              className={`group/layer relative flex items-center gap-1 p-1 rounded cursor-pointer border transition-all ${
                 isSelected
                   ? 'bg-[#10549c] border-[#2980b9] text-white shadow-sm'
                   : 'bg-[#1e1e1e] hover:bg-[#282828] border-transparent text-[#cccccc]'
@@ -658,9 +683,9 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                         ? layer.ownVisible ? 'Ukryj grupę' : 'Pokaż grupę'
                         : layer.ownVisible ? 'Ukryj warstwę' : 'Pokaż warstwę'
                     }
-                    className={`p-0.5 rounded transition-colors cursor-pointer shadow-xs ${
+                    className={`p-0.5 rounded transition-opacity cursor-pointer shadow-xs ${
                       layer.ownVisible
-                        ? 'bg-black/70 hover:bg-black/90 text-white'
+                        ? 'bg-black/70 hover:bg-black/90 text-white opacity-0 group-hover/layer:opacity-100 focus-visible:opacity-100'
                         : 'bg-black/85 text-[#ff6666]'
                     }`}
                   >
@@ -683,12 +708,12 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                         ? layer.ownLocked ? 'Odblokuj grupę' : 'Zablokuj grupę (blokuje wszystkie jej warstwy)'
                         : layer.ownLocked ? 'Odblokuj warstwę' : 'Zablokuj warstwę'
                     }
-                    className={`p-0.5 rounded transition-colors cursor-pointer shadow-xs ${
+                    className={`p-0.5 rounded transition-opacity cursor-pointer shadow-xs ${
                       layer.ownLocked
                         ? 'bg-amber-600/90 text-white'
                         : layer.groupLocked
                           ? 'bg-amber-900/70 text-[#e8c46a]'
-                          : 'bg-black/60 hover:bg-black/90 text-[#ccc]'
+                          : 'bg-black/60 hover:bg-black/90 text-[#ccc] opacity-0 group-hover/layer:opacity-100 focus-visible:opacity-100'
                     }`}
                   >
                     {layer.ownLocked || layer.groupLocked ? (
@@ -740,8 +765,8 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                     }}
                     onDoubleClick={(e) => e.stopPropagation()}
                     title={layer.maskEnabled ? 'Wyłącz maskę (pokaż warstwę bez maski)' : 'Włącz maskę'}
-                    className={`absolute bottom-0.5 left-0.5 p-0.5 rounded cursor-pointer z-10 shadow-xs ${
-                      layer.maskEnabled ? 'bg-black/70 hover:bg-black/90 text-white' : 'bg-black/85 text-[#ff6666]'
+                    className={`absolute bottom-0.5 left-0.5 p-0.5 rounded cursor-pointer z-10 shadow-xs transition-opacity ${
+                      layer.maskEnabled ? 'bg-black/70 hover:bg-black/90 text-white opacity-0 group-hover/layer:opacity-100 focus-visible:opacity-100' : 'bg-black/85 text-[#ff6666]'
                     }`}
                   >
                     {layer.maskEnabled ? <Eye size={10} strokeWidth={2.2} /> : <EyeOff size={10} strokeWidth={2.2} />}
@@ -758,8 +783,8 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                         ? 'Powiązana: przekształcenia zawartości zaznaczenia obejmują piksele i maskę (kliknij, aby rozłączyć)'
                         : 'Rozłączona: przekształcenia dotyczą tylko edytowanego elementu (kliknij, aby powiązać)'
                     }
-                    className={`absolute bottom-0.5 right-0.5 p-0.5 rounded cursor-pointer z-10 shadow-xs bg-black/70 hover:bg-black/90 ${
-                      layer.maskLinked ? 'text-[#9cdcfe]' : 'text-[#999]'
+                    className={`absolute bottom-0.5 right-0.5 p-0.5 rounded cursor-pointer z-10 shadow-xs bg-black/70 hover:bg-black/90 transition-opacity ${
+                      layer.maskLinked ? 'text-[#9cdcfe] opacity-0 group-hover/layer:opacity-100 focus-visible:opacity-100' : 'text-[#ff6666]'
                     }`}
                   >
                     {layer.maskLinked ? <Link2 size={10} strokeWidth={2.2} /> : <Link2Off size={10} strokeWidth={2.2} />}
@@ -796,7 +821,9 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                 </div>
 
                 {(showBlend || hasCorr || isGroup || nStyles > 0 || isVec) && (
-                  <div className="flex items-center gap-1.5 h-[16px] min-w-0">
+                  <div className="flex flex-wrap items-center gap-x-1 gap-y-0.5 min-w-0" data-testid="layer-row2">
+                    {/* Znaczniki (tryb, maska, korekcje, filtry) w jednym wierszu; gdy się nie mieszczą z przyciskami, przyciski spadają niżej */}
+                    <div className="flex flex-nowrap items-center gap-x-1.5 min-h-[20px] max-w-full min-w-0 overflow-hidden">
                     {showBlend && (
                       <span className="bg-[#000]/40 px-1 py-0.5 rounded text-[8.5px] uppercase font-mono opacity-75 shrink-0" title={`Tryb mieszania: ${layer.blendMode}`}>
                         {layer.blendMode.slice(0, 3)}
@@ -817,7 +844,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                         className="flex items-center gap-0.5 text-[9px] text-[#9cdcfe] shrink-0 opacity-90"
                       >
                         <SlidersHorizontal size={9} strokeWidth={2.2} />
-                        <span className="hidden @min-[150px]:inline">{layer.corrections.filter((c) => !isFilterType(c.type)).length}</span>
+                        <span>{layer.corrections.filter((c) => !isFilterType(c.type)).length}</span>
                       </span>
                     )}
                     {hasCorr && layer.corrections.some((c) => isFilterType(c.type)) && (
@@ -826,9 +853,12 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                         className="flex items-center gap-0.5 text-[9px] text-[#9cdcfe] shrink-0 opacity-90"
                       >
                         <Filter size={9} strokeWidth={2.2} />
-                        <span className="hidden @min-[150px]:inline">{layer.corrections.filter((c) => isFilterType(c.type)).length}</span>
+                        <span>{layer.corrections.filter((c) => isFilterType(c.type)).length}</span>
                       </span>
                     )}
+                    </div>
+                    {/* Przyciski po prawej nigdy nie wyjeżdżają za pasek warstwy: znaczniki z lewej się przycinają, te mają stałą szerokość */}
+                    <div className="flex items-center gap-0.5 shrink-0 ml-auto">
                     {nStyles > 0 && (
                       <span className="flex items-center gap-0.5 shrink-0">
                         <button
@@ -840,12 +870,12 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                           }}
                           onDoubleClick={(e) => e.stopPropagation()}
                           title={`Stylizacje warstwy: ${nStyles}. Kliknij, aby edytować`}
-                          className={`flex items-center gap-0.5 px-0.5 rounded text-[9px] cursor-pointer hover:bg-black/40 ${
+                          className={`flex items-center justify-center gap-1 h-[18px] min-w-[26px] px-1 rounded text-[10px] font-medium cursor-pointer bg-black/35 hover:bg-black/60 ${
                             layer.styles?.visible === false ? 'text-[#777]' : 'text-[#ffd479]'
-                          } ${editingStylesLayerId === layer.id ? 'bg-black/40' : ''}`}
+                          } ${editingStylesLayerId === layer.id ? 'bg-black/70 ring-1 ring-[#ffd479]/60' : ''}`}
                         >
-                          <Sparkles size={9} strokeWidth={2.2} />
-                          <span className="hidden @min-[150px]:inline">{nStyles}</span>
+                          <Sparkles size={13} strokeWidth={2.2} />
+                          <span>{nStyles}</span>
                         </button>
                         <button
                           type="button"
@@ -855,13 +885,12 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                           }}
                           onDoubleClick={(e) => e.stopPropagation()}
                           title={layer.styles?.visible === false ? 'Pokaż stylizacje warstwy' : 'Ukryj stylizacje warstwy'}
-                          className="p-0.5 rounded text-[#ddd] hover:bg-black/40 cursor-pointer"
+                          className="flex items-center justify-center w-[18px] h-[18px] rounded text-[#ddd] bg-black/35 hover:bg-black/60 cursor-pointer"
                         >
-                          {layer.styles?.visible === false ? <EyeOff size={10} strokeWidth={2.2} /> : <Eye size={10} strokeWidth={2.2} />}
+                          {layer.styles?.visible === false ? <EyeOff size={12} strokeWidth={2.2} /> : <Eye size={12} strokeWidth={2.2} />}
                         </button>
                       </span>
                     )}
-                    <div className="flex-1" />
                     {/* Rozwiń / zwiń grupę */}
                     {isGroup && (
                       <button
@@ -872,9 +901,9 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                         }}
                         onDoubleClick={(e) => e.stopPropagation()}
                         title={layer.expanded ? 'Zwiń grupę' : 'Rozwiń grupę'}
-                        className="p-0.5 rounded bg-black/40 hover:bg-black/70 text-[#ddd] cursor-pointer shrink-0"
+                        className="flex items-center justify-center w-[18px] h-[18px] rounded bg-black/40 hover:bg-black/70 text-[#ddd] cursor-pointer shrink-0"
                       >
-                        {layer.expanded ? <ChevronDown size={11} strokeWidth={2.4} /> : <ChevronRight size={11} strokeWidth={2.4} />}
+                        {layer.expanded ? <ChevronDown size={13} strokeWidth={2.4} /> : <ChevronRight size={13} strokeWidth={2.4} />}
                       </button>
                     )}
                     {/* Rozwiń / zwiń listę korekcji warstwy (ten sam przycisk co przy grupach) */}
@@ -887,11 +916,12 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                         }}
                         onDoubleClick={(e) => e.stopPropagation()}
                         title={layer.correctionsExpanded ? (isVec ? 'Zwiń listę obiektów i efektów' : 'Zwiń listę korekcji') : isVec ? 'Rozwiń listę obiektów i efektów' : 'Rozwiń listę korekcji'}
-                        className="p-0.5 rounded bg-black/40 hover:bg-black/70 text-[#ddd] cursor-pointer shrink-0"
+                        className="flex items-center justify-center w-[18px] h-[18px] rounded bg-black/40 hover:bg-black/70 text-[#ddd] cursor-pointer shrink-0"
                       >
-                        {layer.correctionsExpanded ? <ChevronDown size={11} strokeWidth={2.4} /> : <ChevronRight size={11} strokeWidth={2.4} />}
+                        {layer.correctionsExpanded ? <ChevronDown size={13} strokeWidth={2.4} /> : <ChevronRight size={13} strokeWidth={2.4} />}
                       </button>
                     )}
+                    </div>
                   </div>
                 )}
               </div>
@@ -919,7 +949,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                     const over = corrOver && corrOver.layerIndex === index && corrOver.id === c.id ? corrOver.place : null;
                     const beingDragged = !!corrDrag && corrDrag.layerIndex === index && corrDrag.id === c.id;
                     const editing = editingCorrectionId === c.id;
-                    const picked = !!selectedCorrection && selectedCorrection.layerId === layer.id && selectedCorrection.id === c.id;
+                    const picked = !!selectedCorrection && selectedCorrection.layerId === layer.id && (selectedCorrectionIds ? selectedCorrectionIds.includes(c.id) : selectedCorrection.id === c.id);
                     return (
                       <div
                         key={c.id}
@@ -973,9 +1003,9 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                           setCorrOver(null);
                         }}
                         onDragEnd={handleDragEnd}
-                        onClick={() => {
+                        onClick={(e) => {
                           if (index !== activeLayerIndex) onSelectLayer(index);
-                          onSelectCorrection?.(index, c.id);
+                          onSelectCorrection?.(index, c.id, e.shiftKey ? 'range' : e.ctrlKey || e.metaKey ? 'toggle' : 'single');
                         }}
                         onDoubleClick={() => onEditCorrection(index, c.id)}
                         title="Dwukrotne kliknięcie: edytuj. Przeciągnij, aby zmienić kolejność lub przenieść na inną warstwę"
@@ -1030,7 +1060,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                     const over = objOver && objOver.layerIndex === index && objOver.id === o.id ? objOver.place : null;
                     const beingDragged = !!objDrag && objDrag.layerIndex === index && objDrag.id === o.id;
                     const editing = !!selectedVectorObjects && selectedVectorObjects.layerId === layer.id && selectedVectorObjects.ids.includes(o.id);
-                    const KindIcon = o.kind === 'line' ? Minus : o.kind === 'path' ? Spline : o.kind === 'shape' ? Shapes : Type;
+                    const KindIcon = o.kind === 'line' ? Minus : o.kind === 'path' ? Spline : o.kind === 'shape' ? Shapes : o.kind === 'smart' ? ImagePlus : Type;
                     return (
                       <div
                         key={o.id}
@@ -1085,7 +1115,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                           onEditVectorObject?.(index, o.id);
                         }}
                         onDoubleClick={() => setRenamingObj({ id: o.id, name: vectorObjectLabel(o) })}
-                        title="Kliknij: edytuj obiekt. Ctrl / Shift + klik: zaznacz wiele. Dwukrotne kliknięcie: zmień nazwę. Przeciągnij, aby zmienić kolejność lub przenieść na inną warstwę wektorową"
+                        title="Kliknij: edytuj obiekt. Ctrl / Shift + klik: zaznacz wiele. Dwukrotne kliknięcie na nazwie: zmień nazwę (obiekt inteligentny: dwuklik na ikonie otwiera jego płótno). Przeciągnij, aby zmienić kolejność lub przenieść na inną warstwę wektorową"
                         className={`group flex items-center gap-1.5 h-[22px] pl-1 pr-0.5 rounded border cursor-pointer text-[10.5px] ${
                           editing ? 'border-[#e0b84a] bg-[#3a3217] text-white' : 'border-[#2a2a2a] bg-[#191919] hover:bg-[#242424]'
                         } ${beingDragged ? 'opacity-40' : ''} ${over === 'before' ? 'border-t-2 border-t-[#00ffcc]' : ''} ${over === 'after' ? 'border-b-2 border-b-[#00ffcc]' : ''}`}
@@ -1094,7 +1124,9 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                           type="button"
                           onClick={(e) => {
                             e.stopPropagation();
-                            onToggleVectorObject?.(index, o.id, !o.visible);
+                            // oko jednego z zaznaczonych obiektów przełącza wszystkie zaznaczone
+                            const grp = editing && selectedVectorObjects ? selectedVectorObjects.ids : undefined;
+                            onToggleVectorObject?.(index, o.id, !o.visible, grp);
                           }}
                           onDoubleClick={(e) => e.stopPropagation()}
                           title={o.visible ? 'Ukryj obiekt' : 'Pokaż obiekt'}
@@ -1102,7 +1134,21 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                         >
                           {o.visible ? <Eye size={10} strokeWidth={2.2} /> : <EyeOff size={10} strokeWidth={2.2} />}
                         </button>
-                        <KindIcon size={10} strokeWidth={2.2} className="shrink-0 text-[#e0b84a] opacity-90" />
+                        {o.kind === 'smart' && onOpenSmartObject ? (
+                          <span
+                            data-testid="smart-icon"
+                            title="Dwuklik: edytuj płótno obiektu inteligentnego"
+                            onDoubleClick={(e) => {
+                              e.stopPropagation();
+                              onOpenSmartObject(layer.id, o.id);
+                            }}
+                            className="shrink-0 flex items-center cursor-pointer"
+                          >
+                            <KindIcon size={10} strokeWidth={2.2} className="text-[#e0b84a] opacity-90" />
+                          </span>
+                        ) : (
+                          <KindIcon size={10} strokeWidth={2.2} className="shrink-0 text-[#e0b84a] opacity-90" />
+                        )}
                         {renamingObj?.id === o.id ? (
                           <input
                             autoFocus

@@ -15,6 +15,7 @@ import {
   Superscript,
   Underline,
 } from 'lucide-react';
+import { LengthField, UnitLabel, useUnits } from './Units.tsx';
 import { getAllFontFamilies } from '../core/skia/FontCatalog.ts';
 import {
   BLEND_MODES,
@@ -97,7 +98,13 @@ const ToggleBtn: React.FC<{
   </button>
 );
 
-export const TextOptions: React.FC<TextOptionsProps> = ({
+export const TextOptions: React.FC<TextOptionsProps> = (props) => {
+  const vecUnits = useUnits().mode === 'vec';
+  return <TextOptionsInner {...props} vecUnits={vecUnits} />;
+};
+
+const TextOptionsInner: React.FC<TextOptionsProps & { vecUnits: boolean }> = ({
+  vecUnits,
   settings,
   onChange,
   onRequestFocus,
@@ -136,14 +143,16 @@ export const TextOptions: React.FC<TextOptionsProps> = ({
       {/* Rozmiar */}
       <div className="flex items-center gap-1 flex-shrink-0">
         <label className={labelCls}>Rozmiar:</label>
-        <NumField
-          value={Math.round(settings.fontSize * 10) / 10}
-          min={1}
-          max={2000}
-          onCommit={(v) => onChange({ fontSize: v })}
+        <LengthField
+          valuePx={Math.round(settings.fontSize * 100) / 100}
+          minPx={1}
+          maxPx={2000}
+          integerPx={false}
+          onCommitPx={(v) => onChange({ fontSize: v })}
           onEnter={onRequestFocus}
+          className={`w-14 ${inputCls} px-1 text-center font-mono`}
         />
-        <span className="text-[10px] text-[#888]">px</span>
+        <UnitLabel />
       </div>
 
       {/* B / I / U / indeksy */}
@@ -200,14 +209,16 @@ export const TextOptions: React.FC<TextOptionsProps> = ({
       </div>
       <div className="flex items-center gap-1 flex-shrink-0">
         <label className={labelCls} title="Odstęp poziomy (między znakami)">Poziom:</label>
-        <NumField
-          value={settings.letterSpacing}
-          min={-10}
-          max={50}
-          onCommit={(v) => onChange({ letterSpacing: Math.round(v * 10) / 10 })}
+        <LengthField
+          valuePx={settings.letterSpacing}
+          minPx={-10}
+          maxPx={50}
+          integerPx={false}
+          onCommitPx={(v) => onChange({ letterSpacing: Math.round(v * 100) / 100 })}
           onEnter={onRequestFocus}
+          className={`w-14 ${inputCls} px-1 text-center font-mono`}
         />
-        <span className="text-[10px] text-[#888]">px</span>
+        <UnitLabel />
       </div>
 
       {/* Wypełnienie liter */}
@@ -235,14 +246,16 @@ export const TextOptions: React.FC<TextOptionsProps> = ({
       {/* Obrys liter */}
       <div className="flex items-center gap-1.5 flex-shrink-0">
         <label className={labelCls} title="Grubość obramowania liter">Obrys:</label>
-        <NumField
-          value={settings.strokeWidth}
-          min={0}
-          max={200}
-          onCommit={(v) => onChange({ strokeWidth: Math.round(v) })}
+        <LengthField
+          valuePx={settings.strokeWidth}
+          minPx={0}
+          maxPx={200}
+          integerPx={!vecUnits}
+          onCommitPx={(v) => onChange({ strokeWidth: vecUnits ? Math.round(v * 100) / 100 : Math.round(v) })}
           onEnter={onRequestFocus}
+          className={`w-14 ${inputCls} px-1 text-center font-mono`}
         />
-        <span className="text-[10px] text-[#888]">px</span>
+        <UnitLabel />
         <input
           type="range"
           min="0"
