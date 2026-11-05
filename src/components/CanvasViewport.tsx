@@ -99,6 +99,7 @@ import type { Layer } from '../core/skia/Layer.ts';
 import { grayToAlpha } from '../core/skia/Layer.ts';
 import { compileCorrections, isFilterType } from '../core/skia/Corrections.ts';
 import type { GpuCrispSource, GpuWindow } from '../core/skia/GpuCompose.ts';
+import { VectorView } from '../core/skia/VectorView.ts';
 
 interface CanvasViewportProps {
   engine: GraphicEngine;
@@ -544,6 +545,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   const crispSigRef = useRef('');
   // tryb Wektory na GPU: kompozytor WebGL składa cały stos (z warstwami wektorowymi w rozdzielczości ekranu)
   const gpuCrispCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const vectorViewsRef = useRef<Map<string, VectorView>>(new Map());
   const gpuCrispActiveRef = useRef(false);
   const gpuCrispSigRef = useRef('');
   const gpuCrispFailRef = useRef('');
@@ -3894,6 +3896,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
 
   /** Pokazuje zwykłe płótna dokumentu (kafelki / płótno główne) i chowa wynik GPU trybu Wektory. */
   const restoreBaseCanvases = () => {
+    vectorViewsRef.current.clear(); // bufory widoku wektorów (okno x kilka) - zwalniamy poza trybem Wektory
     if (!gpuCrispActiveRef.current) return;
     gpuCrispActiveRef.current = false;
     gpuCrispSigRef.current = '';
@@ -3911,6 +3914,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   const tryGpuCrisp = (): boolean => {
     crispSourceRef.current = null;
     engine.vec.deferLiveRebuild = false;
+    for (const id of [...vectorViewsRef.current.keys()]) if (!engine.layers.some((l) => l.id === id && l.isVector)) vectorViewsRef.current.delete(id);
     const container = containerRef.current;
     const tr = tileRendererRef.current;
     const tv = tileViewRef.current;
@@ -3932,11 +3936,13 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
           if (!g) return;
           for (const row of g.tiles) for (const t of row) h = (h * 31 + t.version * 2 + (t.hasContent ? 1 : 0)) | 0;
         };
-        add(l.pixelGrid);
+        if (l.isVector) h = l.vecRev | 0; // piksele warstwy wektorowej są pochodną obiektów (nie czytamy ich: leniwe)
+        else add(l.pixelGrid);
         add(l.maskGrid);
         return `${h}|${l.layerObjects.length}|${l.maskObjects.length}|${l.maskEnabled ? 1 : 0}|${act === l ? liveKey + '|' + (editing?.id ?? '') : ''}`;
       },
       raster: (l, win, kind) => rasterVectorForGpu(l, win, kind, act === l ? live : null, editing?.layerId === l.id ? editing.id : null, source.key(l), baseKeyOf(l)),
+      takeDirty: (l) => vectorViewsRef.current.get(l.id)?.takeDirty() ?? null,
     };
     crispSourceRef.current = source;
     // sesje rastrowe (pędzel, gradient, wiadro, transformacja, narzędzia wektorowe na rastrze) składa kafelkowy podgląd z ostrymi wektorami
@@ -3950,7 +3956,8 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       for (const row of g.tiles) for (const t of row) lsig = (lsig * 31 + t.version * 2 + (t.hasContent ? 1 : 0)) | 0;
     };
     for (const l of engine.layers) {
-      tileSig(l.pixelGrid);
+      if (l.isVector) lsig = (lsig * 31 + (l.vecRev | 0)) | 0;
+      else tileSig(l.pixelGrid);
       tileSig(l.maskGrid);
     }
     const sig = `${engine.getBaseSignature()}|${engine.correctionSessionSignature}|${lsig}|${tv.zoom}|${tv.left},${tv.top}|${tv.width}x${tv.height}|${liveKey}|${editing?.id ?? ''}`;
@@ -4125,8 +4132,33 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     const S = win.s;
     const left = Math.round(-win.ox * S);
     const top = Math.round(-win.oy * S);
+    if (kind === 'layer') {
+      // warstwa: sprite'y obiektów w skali widoku, podział „pod / edytowane / nad”, zmiany tylko w odświeżanym prostokącie
+      const profV0 = performance.now();
+      let view = vectorViewsRef.current.get(layer.id);
+      if (!view) vectorViewsRef.current.set(layer.id, (view = new VectorView()));
+      let vobjs = layer.layerObjects.filter((o) => o.visible);
+      const liveIds = new Set<string>(engine.vec.liveIdsOf(layer) ?? []);
+      // podczas edycji maski obiekt na żywo trafia do maski (kind 'mask'), nie do warstwy
+      if (live && !(layer.editMask && layer.maskGrid)) {
+        if (editingId) {
+          const at = vobjs.findIndex((o) => o.id === editingId);
+          const lv = { ...live, id: editingId } as VectorObject;
+          vobjs = at >= 0 ? vobjs.map((o, i) => (i === at ? lv : o)) : [...vobjs, lv];
+          liveIds.add(editingId);
+        } else {
+          vobjs = [...vobjs, { ...live, id: '__live' } as VectorObject];
+          liveIds.add('__live');
+        }
+      }
+      const cvv = view.produce(vobjs, liveIds, { S, left, top, W, H, docW: engine.width, docH: engine.height });
+      const pv = ((globalThis as { __figuraProf?: { vecRaster: number; vecCalls: number } }).__figuraProf ??= { vecRaster: 0, vecCalls: 0 });
+      pv.vecRaster += performance.now() - profV0;
+      pv.vecCalls++;
+      return cvv;
+    }
     const bufs = gpuRasterBufRef.current;
-    const slot = kind === 'layer' ? 'l' : 'm';
+    const slot = 'm';
     let cv = bufs[slot];
     if (!cv) cv = bufs[slot] = document.createElement('canvas');
     if (cv.width !== W || cv.height !== H) {
@@ -4140,51 +4172,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     ctx.globalAlpha = 1;
     ctx.clearRect(0, 0, W, H);
     const profT0 = performance.now();
-    if (kind === 'layer') {
-      let objs = layer.layerObjects.filter((o) => o.visible);
-      // sesja na żywo: obiekty poniżej (i powyżej) edytowanego są stałe i idą z pamięci kafelków, na żywo rysujemy tylko jeden obiekt
-      let split: { below: VectorObject[]; lv: VectorObject; above: VectorObject[]; at: number } | null = null;
-      // podczas edycji maski obiekt na żywo trafia do maski (kind 'mask'), nie do warstwy
-      if (live && !(layer.editMask && layer.maskGrid)) {
-        if (editingId) {
-          const at = objs.findIndex((o) => o.id === editingId);
-          const lv = { ...live, id: editingId };
-          if (at >= 0) {
-            const above = objs.slice(at + 1);
-            if (above.every((o) => vectorObjectBlend(scaleVectorObject(o, 1, 0, 0)) === 'SrcOver')) split = { below: objs.slice(0, at), lv, above, at };
-          }
-          objs = at >= 0 ? objs.map((o, i) => (i === at ? lv : o)) : [...objs, lv];
-        } else {
-          split = { below: objs, lv: live, above: [], at: objs.length };
-          objs = [...objs, live];
-        }
-      }
-      if (split && (globalThis as { __figuraVecTiles?: boolean }).__figuraVecTiles !== false) {
-        const sp = split;
-        const bk = `${baseKey}|${sp.at}|${sp.above.length}`;
-        drawVectorTiles(ctx, layer, sp.below, S, left, top, W, H, bk);
-        const so = scaleVectorObject(sp.lv, S, left, top);
-        const b = vectorObjectBounds(so);
-        if (!(b.x1 < 0 || b.y1 < 0 || b.x0 > W || b.y0 > H)) {
-          if (vectorObjectBlend(so) === 'SrcOver') drawVectorObject(ctx, so);
-          else compositeVectorObject(ctx, so, W, H, 0, 0, true);
-        }
-        if (sp.above.length) drawVectorTiles(ctx, layer, sp.above, S, left, top, W, H, bk, layer.id + '^a');
-      } else if ((globalThis as { __figuraVecTiles?: boolean }).__figuraVecTiles === false) {
-        for (const o of objs) {
-          const so = scaleVectorObject(o, S, left, top);
-          const b = vectorObjectBounds(so);
-          if (b.x1 < 0 || b.y1 < 0 || b.x0 > W || b.y0 > H) continue;
-          if (vectorObjectBlend(so) === 'SrcOver') drawVectorObject(ctx, so);
-          else compositeVectorObject(ctx, so, W, H, 0, 0, true);
-        }
-      } else {
-        const pt0 = performance.now();
-        drawVectorTiles(ctx, layer, objs, S, left, top, W, H, layerKey);
-        const pf = ((globalThis as { __figuraProf?: Record<string, number> }).__figuraProf ??= { vecRaster: 0, vecCalls: 0 });
-        pf.tiles = (pf.tiles ?? 0) + (performance.now() - pt0);
-      }
-    } else if (layer.maskGrid) {
+    if (layer.maskGrid) {
       const vecMask = layer.maskObjects.length > 0 && !!layer.maskBase;
       const baseGrid = vecMask ? layer.maskBase! : layer.maskGrid;
       ctx.imageSmoothingEnabled = false;
@@ -4282,6 +4270,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       for (let ci = 0; ci < l.correctionsSignature.length; ci++) rasterSig = (rasterSig * 31 + l.correctionsSignature.charCodeAt(ci)) | 0;
       rasterSig = (rasterSig * 31 + Math.round(l.opacity * 1000)) | 0;
       if (l.isVector) {
+        rasterSig = (rasterSig * 31 + (l.vecRev | 0)) | 0; // piksele wektorowej są leniwą pochodną obiektów (nie czytamy ich)
         if (l.maskGrid) {
           rasterSig = (rasterSig * 31 + (l.maskEnabled ? 1 : 2) + l.maskObjects.length * 7) | 0;
           for (const row of l.maskGrid.tiles) for (const t of row) rasterSig = (rasterSig * 31 + t.version * 2 + (t.hasContent ? 1 : 0)) | 0;

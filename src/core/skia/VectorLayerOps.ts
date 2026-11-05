@@ -5,14 +5,13 @@
 
 import type { GraphicEngine } from './GraphicEngine.ts';
 import type { Layer } from './Layer.ts';
-import type { TileSnapshot } from './TileGrid.ts';
+import type { TileGrid, TileSnapshot } from './TileGrid.ts';
 import {
   VecBounds,
   VectorObject,
   boundsIntersect,
   cloneVectorObject,
   cloneVectorObjects,
-  compositeVectorObject,
   hitTestVectorObject,
   newVectorId,
   translateVectorObject,
@@ -22,25 +21,21 @@ import {
   vectorObjectTightBounds,
   vectorObjectKey,
   vectorObjectsEqual,
+  invalidateVectorObject,
 } from './VectorObjects.ts';
+import { compositeObjectsRegion } from './VectorSprites.ts';
+import { CpuStack } from './VectorStackCache.ts';
 
 /**
  * Stan edycji istniejącego obiektu (Manipulacja). Obiekt NIE opuszcza listy warstwy ani swojego miejsca w kolejności.
- * Tryb `live` (nad obiektem leżą inne): piksele warstwy są przebudowywane przy każdej zmianie obiektu, więc kolejność,
- * tryby mieszania i efekty są takie jak po zatwierdzeniu. Tryb sprite (obiekt na samej górze): obiekt jest pominięty w pikselach,
- * a podgląd rysuje nakładka (jak przy nowym obiekcie).
+ * Tryb `live` (nad obiektem leżą inne): obiekt jest na bieżąco podmieniany w liście, a obraz warstwy składany ze sprite'ów
+ * w kolejności listy (tryby mieszania i efekty jak po zatwierdzeniu). Tryb sprite (obiekt na samej górze): obiekt jest
+ * pominięty w pikselach, a podgląd rysuje nakładka (jak przy nowym obiekcie).
+ *
+ * Piksele dokumentu warstwy są tylko leniwą pochodną (patrz `Layer.pixelGrid`): zmiana obiektu zapisuje „brudny”
+ * prostokąt i nic nie przebudowuje, dopóki ktoś nie odczyta pikseli.
  */
-interface LiveCache {
-  below: HTMLCanvasElement;
-  above: HTMLCanvasElement;
-  filled: Set<number>;
-  belowList: VectorObject[];
-  aboveList: VectorObject[];
-}
-
-const CHUNK = 512;
-/** Powyżej tylu pikseli dokumentu pamięci podręcznej sesji nie tworzymy (dwa bufory pełnego rozmiaru) */
-const LIVE_CACHE_MAX_PIXELS = 16_000_000;
+const BAND_PX = 4_000_000;
 
 interface VectorEdit {
   layerId: string;
@@ -49,10 +44,8 @@ interface VectorEdit {
   original: VectorObject;
   objsBefore: VectorObject[];
   live: boolean;
-  /** piksele warstwy nie nadążają za obiektem (przebudowa odroczona do zatwierdzenia) */
-  deferred?: boolean;
-  /** pamięć podręczna sesji: obiekty pod edytowanym i nad nim złożone osobno, wypełniana kawałkami przy pierwszym użyciu */
-  cache?: LiveCache | null;
+  /** Podział stosu "pod / edytowany / nad" użyty przy uzupełnianiu pikseli (tworzony leniwie). */
+  stack?: CpuStack | null;
   /** Kafelki z chwili przed pierwszą zmianą pikseli (stan do cofnięcia), klucz ty*65536+tx. */
   saved: Map<number, TileSnapshot>;
   /** Suma obszarów, w których piksele mogły się zmienić. */
@@ -70,6 +63,7 @@ interface GroupMove {
   touched: VecBounds;
   dx: number;
   dy: number;
+  stack?: CpuStack | null;
 }
 
 /**
@@ -124,20 +118,92 @@ export class VectorLayerOps {
     return [];
   }
 
-  /** Przebudowuje piksele warstwy w kafelkach przecinających prostokąt, rysując wszystkie widoczne obiekty od dołu do góry. */
+  /** Wiązanie wywołania uzupełniania pikseli (przekazywane warstwie przy pierwszym oznaczeniu jako brudnej). */
+  private readonly flushBound = (layer: Layer): void => this.flushPixels(layer);
+
+  /**
+   * Zgłasza zmianę listy obiektów w prostokącie dokumentu. Piksele warstwy (cel: warstwa) NIE są przebudowywane od razu:
+   * zapisujemy tylko „brudny” prostokąt i podnosimy rewizję (klucz podglądu). Uzupełnienie nastąpi przy pierwszym odczycie
+   * pikseli (`Layer.pixelGrid`), a podgląd w trybie Wektory w ogóle ich nie czyta. Maska wektorowa jest uzupełniana od razu
+   * (jest mała i rzadka).
+   */
   public rebuild(layer: Layer, b: VecBounds): void {
     const r = this.docRect(b);
     if (!r) return;
     const onMask = layer.editMask && !!layer.maskGrid;
     if (onMask && layer.maskRaster) return; // maska rastrowa nie jest pochodną obiektów
-    // maska warstwy wektorowej = podkład + jej obiekty; podkład zapamiętujemy przed pierwszą przebudową
-    if (onMask && !layer.maskBase) layer.maskBase = layer.maskGrid!.clone();
-    const tiles = layer.tileGrid.getTilesIntersectingRect(r);
+    if (onMask) {
+      // maska warstwy wektorowej = podkład + jej obiekty; podkład zapamiętujemy przed pierwszą przebudową
+      if (!layer.maskBase) layer.maskBase = layer.maskGrid!.clone();
+      this.paint(layer, layer.maskGrid!, layer.maskObjects.filter((o) => o.visible), layer.maskBase, r, null);
+      layer.updateThumbnail();
+      return;
+    }
+    layer.markVecDirty({ x0: r.left, y0: r.top, x1: r.right, y1: r.bottom }, this.flushBound);
+    layer.updateThumbnail();
+  }
+
+  /** Uzupełnia piksele warstwy w „brudnym” prostokącie z listy obiektów (woła `Layer.pixelGrid` przy pierwszym odczycie). */
+  public flushPixels(layer: Layer): void {
+    const p = layer.vecPending;
+    if (!p) return;
+    layer.vecPending = null;
+    if (!layer.isVector) return;
+    const r = this.docRect(p);
+    if (!r) return;
+    const ed = this.edit;
+    const hideId = ed && !ed.live && ed.layerId === layer.id ? ed.original.id : null;
+    const list = layer.layerObjects.filter((o) => o.visible && o.id !== hideId);
+    this.paint(layer, layer.pixelGridPeek, list, null, r, this.stackFor(layer));
+  }
+
+  /** Podział stosu dla trwającej edycji / przesuwania na tej warstwie (null = zwykłe składanie wszystkich obiektów). */
+  private stackFor(layer: Layer): CpuStack | null {
+    const ed = this.edit;
+    if (ed && ed.live && ed.layerId === layer.id) {
+      if (ed.stack === undefined) ed.stack = new CpuStack(layer.layerObjects.filter((o) => o.visible), new Set([ed.original.id]), this.engine.width, this.engine.height);
+      return ed.stack;
+    }
+    const g = this.group;
+    if (g && g.layerId === layer.id) {
+      if (g.stack === undefined) g.stack = new CpuStack(layer.layerObjects.filter((o) => o.visible), new Set(g.originals.keys()), this.engine.width, this.engine.height);
+      return g.stack;
+    }
+    return null;
+  }
+
+  private scratch: HTMLCanvasElement | null = null;
+
+  /**
+   * Maluje kafelki `grid` przecinające prostokąt `r` z obiektów `objs` (sprite'y) na podkładzie `base`. Duże obszary
+   * składamy pasami kafelków, żeby bufor roboczy miał ograniczony rozmiar.
+   */
+  private paint(layer: Layer, grid: TileGrid, objs: VectorObject[], base: TileGrid | null, r: { left: number; top: number; right: number; bottom: number }, stack: CpuStack | null): void {
+    const tiles = grid.getTilesIntersectingRect({ ...r, width: r.right - r.left, height: r.bottom - r.top });
     if (tiles.length === 0) return;
-    let x0 = Infinity,
-      y0 = Infinity,
-      x1 = -Infinity,
-      y1 = -Infinity;
+    let minTx = Infinity;
+    let maxTx = -Infinity;
+    for (const t of tiles) {
+      if (t.tileX < minTx) minTx = t.tileX;
+      if (t.tileX > maxTx) maxTx = t.tileX;
+    }
+    const perRow = Math.max(1, maxTx - minTx + 1);
+    const rowsPerBand = Math.max(1, Math.floor(BAND_PX / (perRow * grid.tileSize * grid.tileSize)));
+    const bands = new Map<number, typeof tiles>();
+    for (const t of tiles) {
+      const k = Math.floor(t.tileY / rowsPerBand);
+      let a = bands.get(k);
+      if (!a) bands.set(k, (a = []));
+      a.push(t);
+    }
+    for (const bt of bands.values()) this.paintBand(grid, objs, base, bt, stack, layer);
+  }
+
+  private paintBand(grid: TileGrid, objs: VectorObject[], base: TileGrid | null, tiles: ReturnType<TileGrid['getTilesIntersectingRect']>, stack: CpuStack | null, layer: Layer): void {
+    let x0 = Infinity;
+    let y0 = Infinity;
+    let x1 = -Infinity;
+    let y1 = -Infinity;
     for (const t of tiles) {
       x0 = Math.min(x0, t.pixelX);
       y0 = Math.min(y0, t.pixelY);
@@ -147,110 +213,62 @@ export class VectorLayerOps {
     const w = x1 - x0;
     const h = y1 - y0;
     const region: VecBounds = { x0, y0, x1, y1 };
-    const hideId = this.edit && !this.edit.live && this.edit.layerId === layer.id ? this.edit.original.id : null;
-    const list = layer.vectorObjects.filter((o) => o.visible && o.id !== hideId);
-    const hits = list.filter((o) => boundsIntersect(vectorObjectBounds(o), region));
+    const hits = objs.filter((o) => boundsIntersect(vectorObjectBounds(o), region));
 
-    const acc = document.createElement('canvas');
-    acc.width = w;
-    acc.height = h;
-    const actx = acc.getContext('2d', { willReadFrequently: true })!;
-    const lc = !onMask ? this.liveCache(layer) : null;
-    if (lc) {
-      // edycja obiektu leżącego pod innymi: obiekty poniżej i powyżej są gotowe w buforach, rysujemy tylko edytowany
-      this.fillLiveCache(lc, x0, y0, x1, y1);
-      actx.drawImage(lc.below, x0, y0, w, h, 0, 0, w, h);
-      const eo = layer.vectorObjects.find((o) => o.id === this.edit!.original.id);
-      if (eo && eo.visible) {
-        const ob = vectorObjectBounds(eo);
-        if (boundsIntersect(ob, region)) compositeVectorObject(actx, eo, w, h, x0, y0, (ob.x1 - ob.x0) * (ob.y1 - ob.y0) > 4 * w * h, true);
-      }
-      actx.drawImage(lc.above, x0, y0, w, h, 0, 0, w, h);
+    let acc = this.scratch;
+    if (!acc) acc = this.scratch = document.createElement('canvas');
+    if (acc.width !== w || acc.height !== h) {
+      acc.width = w;
+      acc.height = h;
     }
-    // maska: obiekty (także w trybach mieszania, np. Ekran) są składane na podkładzie maski
-    if (onMask) {
+    const actx = acc.getContext('2d', { willReadFrequently: true })!;
+    actx.setTransform(1, 0, 0, 1, 0, 0);
+    actx.globalCompositeOperation = 'source-over';
+    actx.globalAlpha = 1;
+    actx.clearRect(0, 0, w, h);
+    if (base) {
       for (const t of tiles) {
-        const bt = layer.maskBase!.getTile(t.tileX, t.tileY);
+        const bt = base.getTile(t.tileX, t.tileY);
         if (bt && bt.hasContent) actx.drawImage(bt.canvas, t.pixelX - x0, t.pixelY - y0);
       }
     }
-    // Obiekt wielokrotnie większy od przebudowywanego obszaru (np. tło na całe płótno) rasteryzujemy tylko w tym obszarze,
-    // a nie w całości przy każdej klatce edycji. Pozostałe jak dawniej (przycięcie minimalnie zmienia brzegi niektórych ścieżek).
-    if (!lc) {
-      for (const o of hits) {
-        const ob = vectorObjectBounds(o);
-        const huge = (ob.x1 - ob.x0) * (ob.y1 - ob.y0) > 4 * w * h;
-        compositeVectorObject(actx, o, w, h, x0, y0, huge, true);
-      }
-    }
+    if (stack) stack.compose(actx, x0, y0, w, h, layer.layerObjects);
+    else compositeObjectsRegion(actx, hits, x0, y0, w, h);
 
+    // które kafelki pasa mają jakąkolwiek zawartość (zachowawczo: ramka obiektu dotyka kafelka)
+    const ts = grid.tileSize;
+    const tx0 = Math.floor(x0 / ts);
+    const ty0 = Math.floor(y0 / ts);
+    const cols = Math.ceil(w / ts);
+    const rows = Math.ceil(h / ts);
+    const touched = new Uint8Array(cols * rows);
+    for (const o of hits) {
+      const ob = vectorObjectBounds(o);
+      const a0 = Math.max(0, Math.floor(ob.x0 / ts) - tx0);
+      const a1 = Math.min(cols - 1, Math.floor((ob.x1 - 1e-6) / ts) - tx0);
+      const b0 = Math.max(0, Math.floor(ob.y0 / ts) - ty0);
+      const b1 = Math.min(rows - 1, Math.floor((ob.y1 - 1e-6) / ts) - ty0);
+      for (let yy = b0; yy <= b1; yy++) for (let xx = a0; xx <= a1; xx++) touched[yy * cols + xx] = 1;
+    }
     for (const t of tiles) {
-      const tb: VecBounds = { x0: t.pixelX, y0: t.pixelY, x1: t.pixelX + t.width, y1: t.pixelY + t.height };
       t.clear();
-      const baseHas = onMask && !!layer.maskBase!.getTile(t.tileX, t.tileY)?.hasContent;
-      const any = baseHas || hits.some((o) => boundsIntersect(vectorObjectBounds(o), tb));
+      const baseHas = !!base && !!base.getTile(t.tileX, t.tileY)?.hasContent;
+      const any = baseHas || touched[(t.tileY - ty0) * cols + (t.tileX - tx0)] === 1;
       if (any) {
         t.ctx.drawImage(acc, t.pixelX - x0, t.pixelY - y0, t.width, t.height, 0, 0, t.width, t.height);
         t.hasContent = true;
         t.isDirty = true;
       }
     }
-    layer.updateThumbnail();
   }
 
-  /** Pamięć podręczna sesji edycji na żywo (tylko gdy nad edytowanym leżą wyłącznie zwykłe obiekty, a dokument nie jest ogromny). */
-  private liveCache(layer: Layer): LiveCache | null {
+  /** Id obiektów edytowanych / przesuwanych w tej chwili na warstwie (puste = brak sesji): podział stosu w podglądzie GPU. */
+  public liveIdsOf(layer: Layer): ReadonlySet<string> | null {
     const ed = this.edit;
-    if (!ed || !ed.live || ed.layerId !== layer.id) return null;
-    if (ed.cache !== undefined) return ed.cache;
-    ed.cache = null;
-    if (this.engine.width * this.engine.height > LIVE_CACHE_MAX_PIXELS) return null;
-    const idx = layer.vectorObjects.findIndex((o) => o.id === ed.original.id);
-    if (idx < 0) return null;
-    const vis = (o: VectorObject) => o.visible;
-    const aboveList = layer.vectorObjects.slice(idx + 1).filter(vis);
-    if (aboveList.some((o) => vectorObjectBlend(o) !== 'SrcOver')) return null;
-    const mk = () => {
-      const c = document.createElement('canvas');
-      c.width = this.engine.width;
-      c.height = this.engine.height;
-      return c;
-    };
-    ed.cache = { below: mk(), above: mk(), filled: new Set(), belowList: layer.vectorObjects.slice(0, idx).filter(vis), aboveList };
-    return ed.cache;
-  }
-
-  /** Wypełnia kawałki (CHUNK x CHUNK) buforów pamięci podręcznej, które przecina prostokąt. */
-  private fillLiveCache(lc: LiveCache, x0: number, y0: number, x1: number, y1: number): void {
-    const W = this.engine.width;
-    const H = this.engine.height;
-    const perRow = Math.ceil(W / CHUNK);
-    for (let cy = Math.floor(y0 / CHUNK); cy <= Math.floor((y1 - 1) / CHUNK); cy++) {
-      for (let cx = Math.floor(x0 / CHUNK); cx <= Math.floor((x1 - 1) / CHUNK); cx++) {
-        const id = cy * perRow + cx;
-        if (lc.filled.has(id)) continue;
-        lc.filled.add(id);
-        const px = cx * CHUNK;
-        const py = cy * CHUNK;
-        const cw = Math.min(CHUNK, W - px);
-        const ch = Math.min(CHUNK, H - py);
-        if (cw <= 0 || ch <= 0) continue;
-        const rect: VecBounds = { x0: px, y0: py, x1: px + cw, y1: py + ch };
-        for (const [list, target] of [[lc.belowList, lc.below], [lc.aboveList, lc.above]] as const) {
-          const hits = list.filter((o) => boundsIntersect(vectorObjectBounds(o), rect));
-          if (hits.length === 0) continue;
-          const c = document.createElement('canvas');
-          c.width = cw;
-          c.height = ch;
-          const cctx = c.getContext('2d', { willReadFrequently: true })!;
-          for (const o of hits) {
-            const ob = vectorObjectBounds(o);
-            compositeVectorObject(cctx, o, cw, ch, px, py, (ob.x1 - ob.x0) * (ob.y1 - ob.y0) > 4 * cw * ch, true);
-          }
-          target.getContext('2d', { willReadFrequently: true })!.drawImage(c, px, py);
-        }
-      }
-    }
+    if (ed && ed.layerId === layer.id) return new Set([ed.original.id]);
+    const g = this.group;
+    if (g && g.layerId === layer.id) return new Set(g.originals.keys());
+    return null;
   }
 
   private layerIndexOf(layer: Layer): number {
@@ -380,29 +398,22 @@ export class VectorLayerOps {
       version: 0,
     };
     this.setSelection(layer.id, [id]);
+    layer.vecHold = true; // miniatura nie odczytuje pikseli w trakcie edycji
     if (!live) this.rebuild(layer, rect); // obiekt na wierzchu: piksele bez niego, podgląd rysuje nakładka
     this.engine.markPixelsChanged();
     return cloneVectorObject(original);
   }
 
-  /** Czy edytowany obiekt jest odtwarzany w pikselach warstwy na bieżąco (a nie nakładką). */
-  /** Ustawiane przez widok, gdy podgląd na żywo rysuje wektory bez pikseli warstwy (tryb Wektory, GPU). */
+  /**
+   * Zachowane dla zgodności: piksele warstwy są teraz zawsze leniwą pochodną obiektów, więc odroczenie przebudowy
+   * (dawniej włączane przez widok GPU) nie jest potrzebne.
+   */
   public deferLiveRebuild = false;
-
-  /** Czy piksele edytowanej warstwy zostały w tyle za obiektem (odroczona przebudowa). */
   public get hasDeferred(): boolean {
-    return !!this.edit?.deferred;
+    return false;
   }
-
-  /** Dogania piksele warstwy z edytowanym obiektem (gdy widok przestaje rysować wektory sam). */
   public flushDeferred(): void {
-    const ed = this.edit;
-    if (!ed || !ed.deferred) return;
-    const layer = this.findEditLayer();
-    ed.deferred = false;
-    if (!layer) return;
-    this.rebuild(layer, ed.touched);
-    this.engine.markPixelsChanged();
+    /* nic: nie ma zaległej przebudowy, piksele uzupełniają się przy odczycie */
   }
 
   public get liveEditing(): boolean {
@@ -433,13 +444,8 @@ export class VectorLayerOps {
     this.saveTiles(ed.saved, layer, region);
     layer.vectorObjects[idx] = o;
     ed.touched = unionBounds(ed.touched, region);
-    if (this.deferLiveRebuild) {
-      // widok wektorowy (GPU) rysuje obiekty z listy, więc piksele warstwy są zbędne do czasu zatwierdzenia (wtedy jedna przebudowa)
-      ed.deferred = true;
-    } else {
-      this.rebuild(layer, ed.deferred ? ed.touched : region);
-      ed.deferred = false;
-    }
+    // tylko zapis „brudnego” prostokąta: obraz warstwy składa się z obiektów dopiero wtedy, gdy ktoś go potrzebuje
+    this.rebuild(layer, region);
     ed.version++;
     this.engine.markPixelsChanged();
   }
@@ -450,6 +456,7 @@ export class VectorLayerOps {
     this.edit = null;
     const layer = this.engine.layers.find((l) => l.id === ed.layerId);
     if (!layer) return;
+    layer.vecHold = false;
     const idx = layer.vectorObjects.findIndex((o) => o.id === ed.original.id);
     if (idx >= 0) layer.vectorObjects[idx] = cloneVectorObject(ed.original);
     else layer.vectorObjects.splice(Math.min(ed.index, layer.vectorObjects.length), 0, cloneVectorObject(ed.original));
@@ -462,6 +469,7 @@ export class VectorLayerOps {
     this.edit = null;
     const layer = this.engine.layers.find((l) => l.id === ed.layerId);
     if (!layer) return false;
+    layer.vecHold = false;
     const o = cloneVectorObject(obj);
     o.id = ed.original.id;
     o.name = ed.original.name;
@@ -492,6 +500,7 @@ export class VectorLayerOps {
     this.edit = null;
     const layer = this.engine.layers.find((l) => l.id === ed.layerId);
     if (!layer) return;
+    layer.vecHold = false;
     const idx = layer.vectorObjects.findIndex((o) => o.id === ed.original.id);
     if (idx >= 0) layer.vectorObjects.splice(idx, 1);
     this.setSelection(null, []);
@@ -662,6 +671,7 @@ export class VectorLayerOps {
     const saved = new Map<number, TileSnapshot>();
     this.saveTiles(saved, layer, rect);
     this.group = { layerId: layer.id, originals, objsBefore: cloneVectorObjects(layer.vectorObjects), saved, touched: rect, dx: 0, dy: 0 };
+    layer.vecHold = true;
     return true;
   }
 
@@ -703,7 +713,11 @@ export class VectorLayerOps {
     this.group = null;
     const layer = this.engine.layers.find((l) => l.id === g.layerId);
     if (!layer) return false;
-    if (g.dx === 0 && g.dy === 0) return true;
+    layer.vecHold = false;
+    if (g.dx === 0 && g.dy === 0) {
+      layer.updateThumbnail();
+      return true;
+    }
     const before = this.mergedBefore(layer, g.saved, g.touched);
     this.finish(layer, g.originals.size > 1 ? 'Przesunięcie obiektów' : 'Przesunięcie obiektu', g.objsBefore, g.touched, before);
     return true;
@@ -715,6 +729,7 @@ export class VectorLayerOps {
     this.group = null;
     const layer = this.engine.layers.find((l) => l.id === g.layerId);
     if (!layer) return;
+    layer.vecHold = false;
     layer.vectorObjects = layer.vectorObjects.map((o) => g.originals.get(o.id) ?? o).map(cloneVectorObject);
     this.rebuild(layer, g.touched);
     this.engine.markPixelsChanged();
@@ -731,6 +746,7 @@ export class VectorLayerOps {
     this.applyOp(layer, 'Edycja obiektu inteligentnego', vectorObjectBounds(o), () => {
       o.fig = fig;
       o.png = png;
+      invalidateVectorObject(o);
     });
     return true;
   }
@@ -827,7 +843,7 @@ export class VectorLayerOps {
     return null;
   }
 
-  /** Przebudowuje całą warstwę (po wczytaniu pliku bez pikseli, po zmianie rozmiaru dokumentu). */
+  /** Odtwarza całą warstwę (po wczytaniu pliku bez pikseli, po zmianie rozmiaru dokumentu): piksele leniwie, maska od razu. */
   public rebuildAll(layer: Layer): void {
     const all: VecBounds = { x0: 0, y0: 0, x1: this.engine.width, y1: this.engine.height };
     const was = layer.editMask;

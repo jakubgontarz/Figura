@@ -517,7 +517,7 @@ export class GraphicEngine {
         break;
       case 'layers':
         for (const l of a.layers) {
-          for (const row of l.pixelGrid.tiles) for (const t of row) if (t.hasContent) n += t.width * t.height * 4;
+          for (const row of l.pixelGridPeek.tiles) for (const t of row) if (t.hasContent) n += t.width * t.height * 4;
           if (l.maskGrid) for (const row of l.maskGrid.tiles) for (const t of row) if (t.hasContent) n += t.width * t.height * 4;
         }
         for (const l of a.layers) n += (l.layerObjects.length + l.maskObjects.length) * 1024;
@@ -5398,6 +5398,7 @@ export class GraphicEngine {
     if (layer.isVector) {
       this.saveFullSnapshot('Rasteryzacja warstwy wektorowej');
       this.vec.clearSelection();
+      layer.ensurePixels(); // piksele są leniwą pochodną obiektów: uzupełniamy je, zanim obiekty znikną
       layer.isVector = false;
       layer.layerObjects = [];
       layer.maskObjects = [];

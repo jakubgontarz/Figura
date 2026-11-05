@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { VectorObject, cloneVectorObjects } from './VectorObjects.ts';
+import { VectorObject, cloneVectorObjects, compositeVectorObject, drawVectorObject, scaleVectorObject, vectorObjectBlend } from './VectorObjects.ts';
 import { TileGrid } from './TileGrid.ts';
 import { Tile } from './Tile.ts';
 import { SKBlendMode, SKColor } from './types.ts';
@@ -133,6 +133,9 @@ export function grayToAlpha(d: Uint8ClampedArray): void {
  * Każda warstwa posiada własną siatkę kafelków (TileGrid),
  * parametry przezroczystości (opacity) oraz tryb mieszania (blendMode).
  */
+/** Globalny licznik rewizji list obiektów: rewizje różnych warstw / migawek nigdy się nie powtarzają (klucze podglądu GPU). */
+let vecRevSeq = 0;
+
 export class Layer {
   public id: string;
   public name: string;
@@ -229,8 +232,47 @@ export class Layer {
   }
   public opacity: number = 1.0; // 0.0 .. 1.0
   public blendMode: SKBlendMode = 'SrcOver';
-  /** Piksele warstwy (zawsze); `tileGrid` to cel edycji: piksele albo maska (patrz `editMask`). */
-  public pixelGrid!: TileGrid;
+  /**
+   * Piksele warstwy (zawsze); `tileGrid` to cel edycji: piksele albo maska (patrz `editMask`).
+   *
+   * Dla warstwy wektorowej piksele są tylko POCHODNĄ listy obiektów (pamięcią podręczną): edycja obiektu nie przebudowuje
+   * ich od razu, tylko zapisuje „brudny” prostokąt (`markVecDirty`). Dopiero pierwszy odczyt (`pixelGrid` / `tileGrid`
+   * - eksport, tryb Piksele, pipeta, różdżka, miniatura) uzupełnia brakujący fragment z obiektów (`vecFlush`).
+   * Podgląd w trybie Wektory składa warstwę wprost z obiektów i pikseli dokumentu w ogóle nie potrzebuje.
+   */
+  public get pixelGrid(): TileGrid {
+    if (this.vecPending !== null && this.vecFlush) this.vecFlush(this);
+    return this._pixelGrid;
+  }
+  public set pixelGrid(g: TileGrid) {
+    this._pixelGrid = g;
+  }
+  private _pixelGrid!: TileGrid;
+  /** Siatka pikseli BEZ uzupełniania zaległości (do kluczy, podpisów i samego uzupełniania). */
+  public get pixelGridPeek(): TileGrid {
+    return this._pixelGrid;
+  }
+  /** Prostokąt pikseli dokumentu, w którym bitmapa warstwy wektorowej jest nieaktualna względem listy obiektów (null = aktualna). */
+  public vecPending: { x0: number; y0: number; x1: number; y1: number } | null = null;
+  /** Uzupełnia `vecPending` (ustawiane przez VectorLayerOps przy pierwszym oznaczeniu). */
+  public vecFlush: ((layer: Layer) => void) | null = null;
+  /** Trwa edycja / przesuwanie obiektów warstwy: miniatura nie odczytuje pikseli (zostaje nieaktualna do końca sesji). */
+  public vecHold: boolean = false;
+  /** Rewizja listy obiektów warstwy: rośnie przy każdej zmianie obiektów (klucze kompozycji bez skanowania kafelków). */
+  public vecRev: number = 0;
+  /** Oznacza prostokąt bitmapy jako nieaktualny i podnosi rewizję. */
+  public markVecDirty(b: { x0: number; y0: number; x1: number; y1: number }, flush: (layer: Layer) => void): void {
+    this.vecFlush = flush;
+    this.vecRev = ++vecRevSeq;
+    const p = this.vecPending;
+    this.vecPending = p
+      ? { x0: Math.min(p.x0, b.x0), y0: Math.min(p.y0, b.y0), x1: Math.max(p.x1, b.x1), y1: Math.max(p.y1, b.y1) }
+      : { x0: b.x0, y0: b.y0, x1: b.x1, y1: b.y1 };
+  }
+  /** Wymusza aktualność pikseli (np. przed zmianą listy obiektów, która nie zostawia śladu w prostokątach). */
+  public ensurePixels(): void {
+    if (this.vecPending !== null && this.vecFlush) this.vecFlush(this);
+  }
   /** Maska przezroczystości: skala szarości zapisana w RGB (wartość = luminancja * alfa / 255); biel = widoczne, czerń = ukryte. */
   public maskGrid: TileGrid | null = null;
   /** true = narzędzia i operacje na „aktywnej warstwie” działają na masce. */
@@ -674,6 +716,7 @@ export class Layer {
   /** Natychmiastowe przerysowanie miniatury (używane przez harmonogram). */
   public refreshThumbnail(): void {
     if (!this.thumbDirty || !this.thumbnailCtx) return;
+    if (this.vecHold) return; // sesja edycji obiektów: miniatura odświeży się po jej zakończeniu
     this.thumbDirty = false;
 
     const tw = this.thumbW;
@@ -694,7 +737,18 @@ export class Layer {
     px.width = tw;
     px.height = th;
     const pctx = px.getContext('2d')!;
-    this.pixelGrid.drawThumbnail(pctx, tw, th);
+    if (this.isVector && this.vecFlush) {
+      // miniatura warstwy wektorowej powstaje wprost z obiektów (bez odtwarzania pikseli całego dokumentu)
+      const k = tw / Math.max(1, this._pixelGrid.width);
+      for (const o of this.layerObjects) {
+        if (!o.visible) continue;
+        const so = scaleVectorObject(o, k, 0, 0);
+        if (vectorObjectBlend(so) === 'SrcOver') drawVectorObject(pctx, so);
+        else compositeVectorObject(pctx, so, tw, th, 0, 0, true);
+      }
+    } else {
+      this.pixelGrid.drawThumbnail(pctx, tw, th);
+    }
     // Miniatura pokazuje warstwę z włączonymi korekcjami (tak jak na płótnie)
     this.applyCorrectionsToCanvas(px, tw, th, 0, 0, {
       scale: tw / Math.max(1, this.pixelGrid.width),
@@ -778,7 +832,14 @@ export class Layer {
     copy.groupLocked = this.groupLocked;
     copy.opacity = this.opacity;
     copy.blendMode = this.blendMode;
-    copy.pixelGrid = this.pixelGrid.clone();
+    if (this.isVector && this.vecFlush) {
+      // piksele warstwy wektorowej to pochodna obiektów: kopia odtworzy je leniwie, bez kopiowania kafelków
+      copy.vecFlush = this.vecFlush;
+      copy.vecPending = { x0: 0, y0: 0, x1: this._pixelGrid.width, y1: this._pixelGrid.height };
+      copy.vecRev = this.vecRev;
+    } else {
+      copy.pixelGrid = this.pixelGrid.clone();
+    }
     copy.maskGrid = this.maskGrid ? this.maskGrid.clone() : null;
     copy.corrections = cloneCorrections(this.corrections);
     copy.styles = this.styles ? cloneStyles(this.styles) : null;

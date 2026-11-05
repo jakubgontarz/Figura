@@ -36,8 +36,38 @@ export class Tile {
   public readonly width: number;
   public readonly height: number;
 
-  public canvas: HTMLCanvasElement;
-  public ctx: CanvasRenderingContext2D;
+  /**
+   * Bufor rastrowy kafelka powstaje dopiero przy pierwszym użyciu (`canvas` / `ctx`). Dokument 10000x10000 ma ~25 tys.
+   * kafelków na warstwę, a większość z nich jest pusta, więc eager-alokacja canvasów zajmowała setki MB i sekundy
+   * przy tworzeniu dokumentu, warstwy albo migawki historii.
+   */
+  private _canvas: HTMLCanvasElement | null = null;
+  private _ctx: CanvasRenderingContext2D | null = null;
+  public get canvas(): HTMLCanvasElement {
+    return this.alloc().canvas;
+  }
+  public get ctx(): CanvasRenderingContext2D {
+    return this.alloc().ctx;
+  }
+  /** Czy bufor został już utworzony (pusty kafelek, którego nikt nie dotknął, nie ma bufora). */
+  public get allocated(): boolean {
+    return this._canvas !== null;
+  }
+  private alloc(): { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D } {
+    if (!this._canvas || !this._ctx) {
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, this.width);
+      canvas.height = Math.max(1, this.height);
+      const context = canvas.getContext('2d', { willReadFrequently: true });
+      if (!context) {
+        throw new Error('Nie można zainicjalizować kontekstu 2D dla kafelka');
+      }
+      context.imageSmoothingEnabled = true;
+      this._canvas = canvas;
+      this._ctx = context;
+    }
+    return { canvas: this._canvas, ctx: this._ctx };
+  }
   private dirty: boolean = false;
   public get isDirty(): boolean {
     return this.dirty;
@@ -63,23 +93,14 @@ export class Tile {
     this.width = Math.min(tileSize, Math.max(0, docWidth - this.pixelX));
     this.height = Math.min(tileSize, Math.max(0, docHeight - this.pixelY));
 
-    this.canvas = document.createElement('canvas');
-    this.canvas.width = Math.max(1, this.width);
-    this.canvas.height = Math.max(1, this.height);
-
-    const context = this.canvas.getContext('2d', { willReadFrequently: true });
-    if (!context) {
-      throw new Error('Nie można zainicjalizować kontekstu 2D dla kafelka');
-    }
-    this.ctx = context;
-    this.ctx.imageSmoothingEnabled = true;
   }
 
   /**
    * Czyści zawartość kafelka (przezroczystość)
    */
   public clear(): void {
-    this.ctx.clearRect(0, 0, this.width, this.height);
+    // kafelek bez bufora jest już pusty: nie alokujemy go tylko po to, żeby go wyczyścić
+    if (this._ctx) this._ctx.clearRect(0, 0, this.width, this.height);
     this.hasContent = false;
     this.isDirty = true;
   }

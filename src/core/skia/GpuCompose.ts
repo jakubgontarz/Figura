@@ -84,6 +84,11 @@ export interface GpuCrispSource {
   key: (layer: Layer) => string;
   /** Rysuje warstwę (kind 'layer') lub jej maskę (kind 'mask') w oknie rastra W x H; null = nie umiem. */
   raster: (layer: Layer, win: GpuWindow, kind: 'layer' | 'mask') => HTMLCanvasElement | null;
+  /**
+   * Opcjonalnie: prostokąt (piksele okna), który zmienił się w buforze zwróconym przez ostatnie `raster(layer, win, 'layer')`
+   * od poprzedniego wgrania. null = wgraj całość; prostokąt o szerokości 0 = nic się nie zmieniło. Wywoływane po każdym `raster`.
+   */
+  takeDirty?: (layer: Layer) => { x: number; y: number; w: number; h: number } | null;
 }
 
 export interface GpuPreviewSource {
@@ -397,7 +402,7 @@ export class GpuComposer {
   private frame = 0;
   private zeros: Uint8Array | null = null;
   private prevTex: Tex | null = null;
-  private vecTex = new Map<string, { tex: Tex; key: string; used: number }>();
+  private vecTex = new Map<string, { tex: Tex; key: string; used: number; uploaded?: boolean }>();
   private broken = false;
   /** Statystyki ostatniej klatki (diagnostyka i testy). */
   public lastStats = { layers: 0, uploads: 0, chains: 0, cached: 0, w: 0, h: 0 };
@@ -553,7 +558,7 @@ export class GpuComposer {
   }
 
   /** Tekstura warstwy wektorowej (lub jej maski) w oknie rastra; wgrywana ponownie tylko przy zmianie klucza. */
-  private vecTexFor(g: GL, layer: Layer, slot: 'l' | 'm', key: string, W: number, H: number, make: () => HTMLCanvasElement | null): Tex | null {
+  private vecTexFor(g: GL, layer: Layer, slot: 'l' | 'm', key: string, W: number, H: number, make: () => HTMLCanvasElement | null, take?: () => { x: number; y: number; w: number; h: number } | null): Tex | null {
     const id = `${layer.id}:${slot}`;
     let e = this.vecTex.get(id);
     if (e && e.tex.w === W && e.tex.h === H && e.key === key) {
@@ -571,15 +576,36 @@ export class GpuComposer {
       e = { tex: kitMakeTex(g, W, H, 'rgba8'), key, used: this.frame };
       this.vecTex.set(id, e);
     }
+    // częściowe wgranie: tylko prostokąt zmieniony od ostatniego wgrania (edycja obiektu na dużym oknie)
+    const fresh = e.uploaded === true;
+    const dirty = take ? take() : null;
     g.bindTexture(g.TEXTURE_2D, e.tex.t);
     g.pixelStorei(g.UNPACK_FLIP_Y_WEBGL, 0);
     g.pixelStorei(g.UNPACK_PREMULTIPLY_ALPHA_WEBGL, 0);
-    g.texImage2D(g.TEXTURE_2D, 0, g.RGBA8, g.RGBA, g.UNSIGNED_BYTE, cv);
+    if (fresh && dirty && dirty.w === 0) {
+      /* bez zmian */
+    } else if (fresh && dirty && dirty.w * dirty.h < W * H * 0.6) {
+      let st = this.vecStage;
+      if (!st) st = this.vecStage = document.createElement('canvas');
+      if (st.width !== dirty.w || st.height !== dirty.h) {
+        st.width = dirty.w;
+        st.height = dirty.h;
+      }
+      const sctx = st.getContext('2d', { willReadFrequently: true })!;
+      sctx.globalCompositeOperation = 'copy';
+      sctx.drawImage(cv, dirty.x, dirty.y, dirty.w, dirty.h, 0, 0, dirty.w, dirty.h);
+      g.texSubImage2D(g.TEXTURE_2D, 0, dirty.x, dirty.y, g.RGBA, g.UNSIGNED_BYTE, st);
+      this.lastStats.uploads++;
+    } else {
+      g.texImage2D(g.TEXTURE_2D, 0, g.RGBA8, g.RGBA, g.UNSIGNED_BYTE, cv);
+      this.lastStats.uploads++;
+    }
+    e.uploaded = true;
     e.key = key;
     e.used = this.frame;
-    this.lastStats.uploads++;
     return e.tex;
   }
+  private vecStage: HTMLCanvasElement | null = null;
 
   // --- przebiegi ------------------------------------------------------------------------------------------------
 
@@ -987,7 +1013,8 @@ export class GpuComposer {
       if (!layer.visible || layer.opacity <= 0) continue;
       this.lastStats.layers++;
       const isActive = i === act;
-      const grid = layer.pixelGrid;
+      // piksele warstwy wektorowej są leniwą pochodną obiektów: nie czytamy ich, gdy warstwa idzie ostrą ścieżką (patrz niżej)
+      const grid = layer.pixelGridPeek;
       if (grid.width !== docW || grid.height !== docH) return null;
       const gray = layer.grayView;
       const mg = layer.maskGrid;
@@ -1020,13 +1047,14 @@ export class GpuComposer {
         if (!vmask) return null;
       } else if (vecCrisp) {
         vk = `${wkey}|${crisp!.key(layer)}`;
-        vtex = this.vecTexFor(g, layer, 'l', vk, W, H, () => crisp!.raster(layer, win, 'layer'));
+        vtex = this.vecTexFor(g, layer, 'l', vk, W, H, () => crisp!.raster(layer, win, 'layer'), crisp.takeDirty ? () => crisp!.takeDirty!(layer) : undefined);
         if (!vtex) return null;
         if (hasMask) {
           vmask = this.vecTexFor(g, layer, 'm', vk, W, H, () => crisp!.raster(layer, win, 'mask'));
           if (!vmask) return null;
         }
       } else {
+        if (layer.isVector) layer.ensurePixels();
         gp = this.syncGrid(g, grid, dx0, dy0, dx1, dy1);
         if (!gp) return null;
         if (hasMask) {

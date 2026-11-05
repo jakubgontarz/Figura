@@ -247,8 +247,52 @@ export function compositeVectorObject(acc: CanvasRenderingContext2D, o: VectorOb
   acc.restore();
 }
 
-/** Zachowawczy prostokąt (piksele dokumentu), poza którym obiekt niczego nie rysuje. */
+/**
+ * Metadane obiektu zapamiętane przy jego tożsamości (WeakMap): ramka i podpisy rastra. Obiekty listy warstwy są
+ * niezmienne w sensie rastra (edycja = nowy obiekt, patrz VectorLayerOps), więc ramki i sprite'y liczymy raz.
+ * Jedyne miejsca zmieniające obiekt w miejscu to `translateVectorObject` i zapis obiektu inteligentnego:
+ * wołają `invalidateVectorObject`.
+ */
+export interface VectorObjectMeta {
+  bounds?: VecBounds;
+  /** Dane rastrowe obiektu dla danej skali (klucz = skala): patrz VectorSprites. */
+  raster?: Map<number, unknown>;
+}
+const objectMetaMap = new WeakMap<VectorObject, VectorObjectMeta>();
+export function vectorObjectMeta(o: VectorObject): VectorObjectMeta {
+  let m = objectMetaMap.get(o);
+  if (!m) {
+    m = {};
+    objectMetaMap.set(o, m);
+  }
+  return m;
+}
+/** Unieważnia zapamiętane ramki i rastry obiektu po zmianie go w miejscu. */
+export function invalidateVectorObject(o: VectorObject): void {
+  objectMetaMap.delete(o);
+  serialVer.set(o, (serialVer.get(o) ?? 0) + 1);
+}
+
+const serialUid = new WeakMap<VectorObject, number>();
+const serialVer = new WeakMap<VectorObject, number>();
+let serialSeq = 1;
+/**
+ * Tożsamość „wersji” obiektu: zmienia się, gdy obiekt zostanie podmieniony (nowy egzemplarz) albo zmieniony w miejscu.
+ * Tania w porównaniach (podglądy GPU i pamięci podręczne rozpoznają po niej niezmienione obiekty bez porównywania treści).
+ */
+export function vectorObjectSerial(o: VectorObject): string {
+  let u = serialUid.get(o);
+  if (u === undefined) serialUid.set(o, (u = serialSeq++));
+  return `${u}.${serialVer.get(o) ?? 0}`;
+}
+
+/** Zachowawczy prostokąt (piksele dokumentu), poza którym obiekt niczego nie rysuje (zapamiętany przy obiekcie). */
 export function vectorObjectBounds(o: VectorObject): VecBounds {
+  const m = vectorObjectMeta(o);
+  return m.bounds ?? (m.bounds = computeVectorObjectBounds(o));
+}
+
+function computeVectorObjectBounds(o: VectorObject): VecBounds {
   switch (o.kind) {
     case 'line': {
       const sw = o.settings.strokeWidth * (o.settings.markerSize || 1) * 4;
@@ -416,6 +460,7 @@ export function translateVectorObject<T extends VectorObject>(o: T, dx: number, 
       mv(o.center);
       break;
   }
+  invalidateVectorObject(o);
   return o;
 }
 
