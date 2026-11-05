@@ -402,6 +402,8 @@ export interface FiguraProjectFile {
     blendMode: SKBlendMode;
     dataUrl: string;
     maskDataUrl?: string;
+    /** Maska wektorowa warstwy wektorowej: bez bitmapy, piksele powstają z `maskBaseDataUrl` i `maskObjects` przy otwarciu */
+    maskDerived?: boolean;
     maskEnabled?: boolean;
     maskLinked?: boolean;
     locked?: boolean;
@@ -409,7 +411,7 @@ export interface FiguraProjectFile {
     isGroup?: boolean;
     /** Korekcja samodzielna w stosie (jedna korekcja w `corrections`, bez pikseli) */
     isAdjustment?: boolean;
-    /** Warstwa wektorowa: lista obiektów (piksele w `dataUrl` są ich renderem) */
+    /** Warstwa wektorowa: lista obiektów (`dataUrl` puste - bitmapa jest renderowana przy otwarciu; starsze pliki mają tam PNG) */
     isVector?: boolean;
     vectorObjects?: unknown;
     /** Obiekty maski warstwy wektorowej i podkład maski (PNG), na którym są rysowane */

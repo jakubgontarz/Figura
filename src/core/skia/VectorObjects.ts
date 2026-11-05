@@ -68,6 +68,8 @@ export interface VecText extends Base {
   runs: TextRun[];
   settings: TextToolSettings;
   fallback: TextCharStyle;
+  /** tylko kopie przeskalowane do rysowania: oryginał w jednostkach dokumentu i łączna skala (układ tekstu liczymy w dokumencie) */
+  docSrc?: { obj: VecText; S: number };
 }
 
 /** Obiekt inteligentny: bitmapa wewnętrznego dokumentu w ramce jak kształt. */
@@ -185,7 +187,26 @@ export function drawVectorObject(ctx: CanvasRenderingContext2D, o: VectorObject)
       renderVectorShape(ctx, o.center, o.width, o.height, o.angle, { ...o.settings, blendMode: 'SrcOver' }, o.flipX, o.flipY);
       break;
     case 'text':
-      renderVectorText(ctx, o.center, o.width, o.height, o.angle, vectorRichText(o), o.settings, undefined, o.fallback);
+      renderVectorText(
+        ctx,
+        o.center,
+        o.width,
+        o.height,
+        o.angle,
+        vectorRichText(o),
+        o.settings,
+        undefined,
+        o.fallback,
+        o.docSrc
+          ? {
+              S: o.docSrc.S,
+              layout: () => {
+                const d = o.docSrc!.obj;
+                return layoutText(vectorRichText(d), getTextInnerWidth(d.width, d.settings), getTextLayoutOptions(d.settings, d.fallback ?? pickCharStyle(d.settings)));
+              },
+            }
+          : undefined
+      );
       break;
     case 'smart':
       drawSmartBitmap(ctx, getSmartBitmap(o.png), o.center, o.width, o.height, o.angle, o.flipX, o.flipY);
@@ -195,13 +216,23 @@ export function drawVectorObject(ctx: CanvasRenderingContext2D, o: VectorObject)
 
 /** Nakłada obiekt na kontekst akumulacji tak jak przy zatwierdzaniu na warstwie rastrowej (obiekt osobno, potem tryb mieszania). */
 let scratchCanvas: HTMLCanvasElement | null = null;
-export function compositeVectorObject(acc: CanvasRenderingContext2D, o: VectorObject, w: number, h: number, ox: number, oy: number, windowed = false): void {
-  if (!scratchCanvas) scratchCanvas = document.createElement('canvas');
-  if (scratchCanvas.width !== w || scratchCanvas.height !== h) {
-    scratchCanvas.width = w;
-    scratchCanvas.height = h;
+let scratchCanvasCpu: HTMLCanvasElement | null = null;
+/**
+ * `cpu` = bufor programowy (willReadFrequently): gdy wynik trafia do kafelków warstwy (CPU), bufor na GPU wymuszałby
+ * synchroniczny odczyt przy każdym przebudowaniu fragmentu (edycja obiektu w środku stosu).
+ */
+export function compositeVectorObject(acc: CanvasRenderingContext2D, o: VectorObject, w: number, h: number, ox: number, oy: number, windowed = false, cpu = false): void {
+  let cv = cpu ? scratchCanvasCpu : scratchCanvas;
+  if (!cv) {
+    cv = document.createElement('canvas');
+    if (cpu) scratchCanvasCpu = cv;
+    else scratchCanvas = cv;
   }
-  const sctx = scratchCanvas.getContext('2d')!;
+  if (cv.width !== w || cv.height !== h) {
+    cv.width = w;
+    cv.height = h;
+  }
+  const sctx = cpu ? cv.getContext('2d', { willReadFrequently: true })! : cv.getContext('2d')!;
   // windowed = rysowanie w skali ekranu: renderery przycinają obiekt do bufora (w x h) zamiast rasteryzować go w całości
   if (windowed) markWindowedContext(sctx);
   else unmarkWindowedContext(sctx);
@@ -212,7 +243,7 @@ export function compositeVectorObject(acc: CanvasRenderingContext2D, o: VectorOb
   sctx.setTransform(1, 0, 0, 1, 0, 0);
   acc.save();
   acc.globalCompositeOperation = getCanvasCompositeOperation(vectorObjectBlend(o));
-  acc.drawImage(scratchCanvas, 0, 0);
+  acc.drawImage(cv, 0, 0);
   acc.restore();
 }
 
@@ -504,6 +535,8 @@ export function scaleVectorObject(o: VectorObject, S: number, dx = 0, dy = 0): V
       if (c.settings.padding) c.settings.padding *= S;
       c.fallback.fontSize *= S;
       for (const r of c.runs) r.style.fontSize *= S;
+      // układ (łamanie wierszy, położenie wyrazów) liczymy w jednostkach dokumentu, tak jak w wersji pikselowej, a dopiero potem skalujemy
+      c.docSrc = { obj: o.kind === 'text' && o.docSrc ? o.docSrc.obj : (o as VecText), S: (o.kind === 'text' && o.docSrc ? o.docSrc.S : 1) * S };
       break;
   }
   return c;

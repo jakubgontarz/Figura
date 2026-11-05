@@ -4,18 +4,21 @@
  */
 
 import React, { createContext, useContext, useEffect, useState } from 'react';
-import { DEFAULT_DPI, UnitMode, fmtMm, mmToPx, pxToMm } from '../core/skia/Units.ts';
+import { DEFAULT_DPI, LengthUnit, UNIT_LABEL, UnitMode, fmtMm, fmtUnit, pxToMm, pxToUnit, unitToPx } from '../core/skia/Units.ts';
 
 export interface UnitsValue {
+  /** tryb wyświetlania (Piksele / Wektory) */
   mode: UnitMode;
+  /** jednostka pól liczbowych i współrzędnych */
+  unit: LengthUnit;
   dpi: number;
 }
 
-export const UnitsContext = createContext<UnitsValue>({ mode: 'px', dpi: DEFAULT_DPI });
+export const UnitsContext = createContext<UnitsValue>({ mode: 'px', unit: 'px', dpi: DEFAULT_DPI });
 export const useUnits = (): UnitsValue => useContext(UnitsContext);
 
 /**
- * Pole długości: wartość w pikselach dokumentu, a w trybie wektorowym wyświetlana i wpisywana w milimetrach (2 miejsca).
+ * Pole długości: wartość w pikselach dokumentu, wyświetlana i wpisywana w wybranej jednostce (px, mm, cm, cal).
  * Lokalny tekst pozwala swobodnie kasować i wpisywać; wartość jest zatwierdzana na bieżąco, gdy da się ją odczytać.
  */
 export const LengthField: React.FC<{
@@ -31,9 +34,12 @@ export const LengthField: React.FC<{
   title?: string;
   onEnter?: () => void;
 }> = ({ valuePx, minPx, maxPx, onCommitPx, integerPx = true, forcePx, className, title, onEnter }) => {
-  const { mode, dpi } = useUnits();
-  const mm = mode === 'vec' && !forcePx;
-  const shown = mm ? fmtMm(valuePx, dpi) : String(integerPx ? Math.round(valuePx) : Math.round(valuePx * 100) / 100);
+  const { mode, unit: ctxUnit, dpi } = useUnits();
+  const unit: LengthUnit = forcePx ? 'px' : ctxUnit;
+  const mm = unit !== 'px';
+  // piksele całkowite tylko w trybie Piksele; w trybie Wektory położenia i wymiary mogą być ułamkowe
+  const intPx = integerPx && (forcePx || mode !== 'vec');
+  const shown = mm ? fmtUnit(valuePx, unit, dpi) : String(intPx ? Math.round(valuePx) : Math.round(valuePx * 100) / 100);
   const [text, setText] = useState(shown);
   const [focused, setFocused] = useState(false);
   useEffect(() => {
@@ -42,7 +48,7 @@ export const LengthField: React.FC<{
   return (
     <input
       type="number"
-      step={mm ? 0.01 : 1}
+      step={mm ? (unit === 'mm' ? 0.01 : 0.001) : intPx ? 1 : 0.01}
       title={title}
       value={focused ? text : shown}
       onFocus={() => {
@@ -53,8 +59,8 @@ export const LengthField: React.FC<{
         setText(e.target.value);
         const v = parseFloat(e.target.value);
         if (isNaN(v)) return;
-        let px = mm ? mmToPx(v, dpi) : v;
-        if (!mm && integerPx) px = Math.round(px);
+        let px = mm ? unitToPx(v, unit, dpi) : v;
+        if (!mm && intPx) px = Math.round(px);
         onCommitPx(Math.max(minPx, Math.min(maxPx, px)));
       }}
       onBlur={() => {
@@ -75,8 +81,8 @@ export const LengthField: React.FC<{
 
 /** Etykieta jednostki obok pola długości. */
 export const UnitLabel: React.FC<{ forcePx?: boolean }> = ({ forcePx }) => {
-  const { mode } = useUnits();
-  return <span className="text-[10px] text-[#888]">{mode === 'vec' && !forcePx ? 'mm' : 'px'}</span>;
+  const { unit } = useUnits();
+  return <span className="text-[10px] text-[#888]">{forcePx ? 'px' : UNIT_LABEL[unit]}</span>;
 };
 
-export { fmtMm, pxToMm };
+export { fmtMm, pxToMm, pxToUnit };

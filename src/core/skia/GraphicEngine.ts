@@ -168,6 +168,19 @@ interface LayerUnit {
 
 type TileSnapshotLike = { tx: number; ty: number; imgData: ImageData; hasContent: boolean };
 
+/** Szacunek pamięci listy obiektów wektorowych w historii (obiekty inteligentne niosą dane obrazu jako tekst). */
+function vectorListBytes(list: ReadonlyArray<{ kind: string }>): number {
+  let n = 0;
+  for (const o of list) {
+    n += 1024;
+    if (o.kind === 'smart') {
+      const sm = o as unknown as { fig?: string; png?: string };
+      n += (sm.fig?.length ?? 0) * 2 + (sm.png?.length ?? 0) * 2;
+    }
+  }
+  return n;
+}
+
 export type HistoryAction =
   | {
       type: 'tiles';
@@ -181,6 +194,8 @@ export type HistoryAction =
       after: { tx: number; ty: number; imgData: ImageData; hasContent: boolean }[];
       /** warstwa wektorowa: lista obiektów przed / po zmianie (wraca razem z pikselami) */
       vector?: { before: VectorObject[]; after: VectorObject[] };
+      /** warstwa wektorowa: obszar (px dokumentu), który po zmianie listy obiektów trzeba odtworzyć z obiektów (zamiast kafelków) */
+      rebuildRect?: { x0: number; y0: number; x1: number; y1: number };
     }
   | {
       type: 'layerProperty';
@@ -339,9 +354,10 @@ export class GraphicEngine {
 
   private undoStack: HistoryAction[] = [];
   private redoStack: HistoryAction[] = [];
-  private maxHistory: number = 30;
-  /** Limit pamięci historii (migawki pikseli); najstarsze akcje są usuwane po jego przekroczeniu. */
-  public maxHistoryBytes: number = 512 * 1024 * 1024;
+  /** Tylko bezpiecznik (żeby tablica nie rosła w nieskończoność przy samych drobnych akcjach); realnym limitem jest pamięć. */
+  private maxHistory: number = 20000;
+  /** Limit pamięci historii (migawki pikseli i szacunek reszty); najstarsze akcje są usuwane po jego przekroczeniu. */
+  public maxHistoryBytes: number = 1024 * 1024 * 1024;
   private historyBytesCache = new WeakMap<object, number>();
 
   public lastDirtyRect: SKRectI | null = null;
@@ -490,6 +506,8 @@ export class GraphicEngine {
     switch (a.type) {
       case 'tiles':
         n = snapshotBytes(a.before, a.after);
+        if (a.other) n += snapshotBytes(a.other.before as TileSnapshot[], a.other.after as TileSnapshot[]);
+        if (a.vector) n += vectorListBytes(a.vector.before) + vectorListBytes(a.vector.after);
         break;
       case 'transformContent':
         n = snapshotBytes(a.tilesBefore, a.tilesAfter) + selBytes(a.selectionBefore) + selBytes(a.selectionAfter);
@@ -502,10 +520,13 @@ export class GraphicEngine {
           for (const row of l.pixelGrid.tiles) for (const t of row) if (t.hasContent) n += t.width * t.height * 4;
           if (l.maskGrid) for (const row of l.maskGrid.tiles) for (const t of row) if (t.hasContent) n += t.width * t.height * 4;
         }
+        for (const l of a.layers) n += (l.layerObjects.length + l.maskObjects.length) * 1024;
         break;
       default:
         n = 0;
     }
+    // narzut każdej akcji (obiekty, opisy, style): drobne zmiany też coś kosztują, więc ich tysiące wlicza się do limitu
+    n += 2048;
     this.historyBytesCache.set(a, n);
     return n;
   }
@@ -518,8 +539,18 @@ export class GraphicEngine {
     return total;
   }
 
+  /** Zmienia limit pamięci historii (w bajtach) i od razu przycina najstarsze wpisy. */
+  public setHistoryLimitBytes(bytes: number): void {
+    this.maxHistoryBytes = Math.max(64 * 1024 * 1024, bytes);
+    this.trimHistory();
+  }
+
   private finishHistoryPush(): void {
     this.redoStack = [];
+    this.trimHistory();
+  }
+
+  private trimHistory(): void {
     while (this.undoStack.length > this.maxHistory) this.undoStack.shift();
     let total = this.getHistoryBytes();
     // Zawsze zostaje ostatnia akcja, nawet jeśli sama przekracza limit
@@ -585,6 +616,17 @@ export class GraphicEngine {
     }
   }
 
+  /** Odtwarza fragment warstwy wektorowej (piksele albo maskę) z jej obiektów - cofnięcie / ponowienie bez bitmap w historii. */
+  private rebuildVectorRegion(layer: Layer, r: { x0: number; y0: number; x1: number; y1: number }, onMask: boolean): void {
+    const was = layer.editMask;
+    layer.editMask = onMask && !!layer.maskGrid;
+    try {
+      this.vec.rebuild(layer, r);
+    } finally {
+      layer.editMask = was;
+    }
+  }
+
   /** Siatka, której dotyczy zapisana akcja historii (piksele albo maska). */
   private historyGrid(layer: Layer, onMask?: boolean): TileGrid {
     return onMask && layer.maskGrid ? layer.maskGrid : layer.pixelGrid;
@@ -647,6 +689,7 @@ export class GraphicEngine {
         if (action.vector) {
           if (action.onMask && layer.maskGrid) layer.maskObjects = cloneVectorObjects(action.vector.before);
           else layer.layerObjects = cloneVectorObjects(action.vector.before);
+          if (action.rebuildRect) this.rebuildVectorRegion(layer, action.rebuildRect, !!action.onMask);
         }
         layer.updateThumbnail();
       }
@@ -749,6 +792,7 @@ export class GraphicEngine {
         if (action.vector) {
           if (action.onMask && layer.maskGrid) layer.maskObjects = cloneVectorObjects(action.vector.after);
           else layer.layerObjects = cloneVectorObjects(action.vector.after);
+          if (action.rebuildRect) this.rebuildVectorRegion(layer, action.rebuildRect, !!action.onMask);
         }
         layer.updateThumbnail();
       }
@@ -1098,6 +1142,7 @@ export class GraphicEngine {
           px = new Layer(`mv_${mv.id}`, mv.name, this.width, this.height, this.tileSize);
           px.pixelGrid = mv.maskGrid;
           px.grayView = true;
+          px.grayOf = mv;
           this.maskViewProxy = px;
         }
         return [px];
@@ -5866,6 +5911,7 @@ export class GraphicEngine {
   public saveToFigFile(): string {
     if (this.gradientPreview) this.commitGradientSession();
     if (this.bucketSeedPoint) this.commitPaintBucketSession();
+    const derivedMask = (l: Layer) => l.isVector && l.maskObjects.length > 0 && !!l.maskBase && !l.maskRaster;
     const project: FiguraProjectFile = {
       format: 'FIGURA_PROJECT',
       version: '1.0',
@@ -5892,8 +5938,11 @@ export class GraphicEngine {
         expanded: l.isGroup ? l.expanded : undefined,
         opacity: l.opacity,
         blendMode: l.blendMode,
-        dataUrl: l.isGroup || l.isAdjustment ? '' : l.pixelGrid.compositeToFlatCanvas().toDataURL('image/png'),
-        maskDataUrl: l.maskGrid ? l.maskGrid.compositeToFlatCanvas().toDataURL('image/png') : undefined,
+        // warstwa wektorowa: zapisujemy tylko obiekty - jej bitmapa jest pochodną i program odtwarza ją przy otwarciu pliku
+        dataUrl: l.isGroup || l.isAdjustment || l.isVector ? '' : l.pixelGrid.compositeToFlatCanvas().toDataURL('image/png'),
+        // maska wektorowa (podkład + obiekty) też jest pochodną; maska rastrowa to prawdziwe dane i jest zapisywana
+        maskDataUrl: l.maskGrid && !derivedMask(l) ? l.maskGrid.compositeToFlatCanvas().toDataURL('image/png') : undefined,
+        maskDerived: l.maskGrid && derivedMask(l) ? true : undefined,
         maskEnabled: l.maskGrid ? l.maskEnabled : undefined,
         maskLinked: l.maskGrid ? l.maskLinked : undefined,
         corrections: l.corrections.length > 0 ? cloneCorrections(l.corrections) : undefined,
@@ -5986,14 +6035,20 @@ export class GraphicEngine {
           });
         }
 
-        if (lData.maskDataUrl) {
-          await new Promise<void>((resolve) => {
-            const img = new Image();
-            img.onload = () => {
-              layer.createMask(null, this.width, this.height);
-              layer.editMask = false;
-              const mg = layer.maskGrid!;
-              for (const row of mg.tiles) {
+        if (lData.maskDataUrl || lData.maskDerived === true) {
+          const img: HTMLImageElement | null = lData.maskDataUrl
+            ? await new Promise<HTMLImageElement | null>((resolve) => {
+                const im = new Image();
+                im.onload = () => resolve(im);
+                im.onerror = () => resolve(null);
+                im.src = lData.maskDataUrl;
+              })
+            : null;
+          if (img || lData.maskDerived === true) {
+            layer.createMask(null, this.width, this.height);
+            layer.editMask = false;
+            if (img) {
+              for (const row of layer.maskGrid!.tiles) {
                 for (const tile of row) {
                   tile.ctx.clearRect(0, 0, tile.width, tile.height);
                   tile.ctx.drawImage(img, tile.pixelX, tile.pixelY, tile.width, tile.height, 0, 0, tile.width, tile.height);
@@ -6001,38 +6056,40 @@ export class GraphicEngine {
                   tile.isDirty = true;
                 }
               }
-              layer.maskEnabled = lData.maskEnabled !== false;
-              layer.maskLinked = lData.maskLinked !== false;
-              layer.maskRaster = layer.isVector && lData.maskRaster === true;
-              if (layer.isVector && Array.isArray(lData.maskObjects) && lData.maskObjects.length > 0 && lData.maskBaseDataUrl) {
-                layer.maskObjects = reviveVectorObjects(lData.maskObjects);
-                const bimg = new Image();
-                bimg.onload = () => {
-                  const bg = new TileGrid(this.width, this.height, this.tileSize);
-                  for (const brow of bg.tiles) {
-                    for (const bt of brow) {
-                      bt.ctx.drawImage(bimg, bt.pixelX, bt.pixelY, bt.width, bt.height, 0, 0, bt.width, bt.height);
-                      bt.hasContent = true;
-                      bt.isDirty = true;
-                    }
+            }
+            layer.maskEnabled = lData.maskEnabled !== false;
+            layer.maskLinked = lData.maskLinked !== false;
+            layer.maskRaster = layer.isVector && lData.maskRaster === true;
+            if (layer.isVector && Array.isArray(lData.maskObjects) && lData.maskObjects.length > 0 && lData.maskBaseDataUrl) {
+              layer.maskObjects = reviveVectorObjects(lData.maskObjects);
+              const bimg = await new Promise<HTMLImageElement | null>((resolve) => {
+                const im = new Image();
+                im.onload = () => resolve(im);
+                im.onerror = () => resolve(null);
+                im.src = lData.maskBaseDataUrl;
+              });
+              if (bimg) {
+                const bg = new TileGrid(this.width, this.height, this.tileSize);
+                for (const brow of bg.tiles) {
+                  for (const bt of brow) {
+                    bt.ctx.drawImage(bimg, bt.pixelX, bt.pixelY, bt.width, bt.height, 0, 0, bt.width, bt.height);
+                    bt.hasContent = true;
+                    bt.isDirty = true;
                   }
-                  layer.maskBase = bg;
-                  layer.updateThumbnail();
-                  resolve();
-                };
-                bimg.onerror = () => {
-                  layer.maskObjects = [];
-                  resolve();
-                };
-                bimg.src = lData.maskBaseDataUrl;
-                return;
-              }
-              layer.updateThumbnail();
-              resolve();
-            };
-            img.onerror = () => resolve();
-            img.src = lData.maskDataUrl;
-          });
+                }
+                layer.maskBase = bg;
+              } else layer.maskObjects = [];
+            }
+            layer.updateThumbnail();
+          }
+        }
+
+        // pliki bez bitmap warstw wektorowych (oraz z maską wektorową bez bitmapy): render z obiektów
+        if (layer.isVector && (!lData.dataUrl || (lData.maskDerived === true && layer.maskObjects.length > 0))) {
+          if (!lData.dataUrl) {
+            for (const vo of layer.maskObjects) if (vo.kind === 'smart' && vo.png) await ensureSmartBitmap(vo.png);
+          }
+          this.vec.rebuildAll(layer);
         }
 
         loadedLayers.push(layer);

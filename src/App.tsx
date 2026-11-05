@@ -35,7 +35,7 @@ import { PropertiesPanel, PropsDescriptor, PropsApi } from './components/Propert
 import { ColorPanel } from './components/ColorPanel.tsx';
 import { LayersPanel } from './components/LayersPanel.tsx';
 import { UnitsContext } from './components/Units.tsx';
-import type { UnitMode } from './core/skia/Units.ts';
+import type { LengthUnit, UnitMode } from './core/skia/Units.ts';
 import { StatusBar } from './components/StatusBar.tsx';
 import { NewDocumentModal } from './components/NewDocumentModal.tsx';
 import { CorrectionDialog } from './components/CorrectionDialog.tsx';
@@ -67,6 +67,8 @@ export default function App() {
   const [activeTabId, setActiveTabId] = useState<string>('tab_1');
   /** Przełącznik na pasku stanu: Piksele (domyślnie) albo Wektory (wymiary w mm). Dokumenty obiektów inteligentnych zawsze w pikselach. */
   const [unitMode, setUnitMode] = useState<UnitMode>('px');
+  /** Jednostka wymiarów i pól liczbowych (px / mm / cm / cal), niezależna od trybu wyświetlania. */
+  const [lengthUnit, setLengthUnit] = useState<LengthUnit>('px');
   const tabsRef = useRef<DocumentTab[]>([]);
   tabsRef.current = tabs;
   const activeTabIdRef = useRef('tab_1');
@@ -74,6 +76,7 @@ export default function App() {
   const activeTab = tabs.find((t) => t.id === activeTabId) || tabs[0];
   const engine = activeTab.engine;
   const effectiveUnitMode: UnitMode = activeTab.smart ? 'px' : unitMode;
+  const effectiveUnit: LengthUnit = activeTab.smart ? 'px' : lengthUnit;
 
   const [engineRevision, setEngineRevision] = useState(0);
   const bumpEngineRevision = useCallback(() => {
@@ -1249,7 +1252,7 @@ export default function App() {
   };
 
   return (
-    <UnitsContext.Provider value={{ mode: effectiveUnitMode, dpi: engine.dpi }}>
+    <UnitsContext.Provider value={{ mode: effectiveUnitMode, unit: effectiveUnit, dpi: engine.dpi }}>
     <div className="flex flex-col h-screen w-screen overflow-hidden bg-[#1e1e1e] text-[#dddddd] font-sans">
       <input
         ref={fileInputRef}
@@ -1528,7 +1531,8 @@ export default function App() {
               return { layerId: act.id, label: names[activeTool] ?? 'Obiekt' };
             })()}
             onSelectVectorObjects={(idx, ids) => {
-              engine.setEditTarget(idx, 'pixels');
+              // lista pokazuje obiekty bieżącego celu edycji warstwy (maska albo warstwa) - cel zostaje, nie wracamy do warstwy
+              engine.setEditTarget(idx, engine.layers[idx]?.editMask && engine.layers[idx]?.hasMask ? 'mask' : 'pixels');
               setActiveToolRaw('vector-select');
               engine.vec.settle();
               engine.vec.setSelection(engine.layers[idx]?.id ?? null, ids);
@@ -1536,7 +1540,8 @@ export default function App() {
             }}
             onOpenSmartObject={handleOpenSmartObject}
             onEditVectorObject={(idx, id) => {
-              engine.setEditTarget(idx, 'pixels');
+              // lista pokazuje obiekty bieżącego celu edycji warstwy (maska albo warstwa) - cel zostaje, nie wracamy do warstwy
+              engine.setEditTarget(idx, engine.layers[idx]?.editMask && engine.layers[idx]?.hasMask ? 'mask' : 'pixels');
               setActiveToolRaw('vector-select');
               setVectorEditRequest((r) => ({ n: (r?.n ?? 0) + 1, layerIndex: idx, id }));
               bumpEngineRevision();
@@ -1690,13 +1695,15 @@ export default function App() {
 
       {/* 5. Dolny pasek stanu */}
       <StatusBar
-        statusText="Gotowy"
+        statusText=""
         docWidth={engine.width}
         docHeight={engine.height}
         zoom={zoom}
         onZoomChange={setZoom}
         unitMode={effectiveUnitMode}
         onUnitModeChange={setUnitMode}
+        unit={effectiveUnit}
+        onUnitChange={setLengthUnit}
         unitsLocked={!!activeTab.smart}
         dpi={engine.dpi}
         snapEnabled={snapEnabled}
@@ -1748,7 +1755,7 @@ export default function App() {
         onClose={() => setIsNewDocModalOpen(false)}
         onCreate={handleCreateNewDocument}
         defaultTitle={`obraz${tabs.length + 1}.fig`}
-        defaultUnit={unitMode === 'vec' ? 'mm' : 'px'}
+        defaultUnit={lengthUnit === 'px' ? 'px' : 'mm'}
       />
     </div>
     </UnitsContext.Provider>

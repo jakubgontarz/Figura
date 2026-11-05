@@ -241,6 +241,8 @@ export class Layer {
   public maskLinked: boolean = true;
   /** Tryb pomocniczy: warstwa-pośrednik pokazuje maskę w skali szarości (używane przy podglądzie maski na płótnie). */
   public grayView: boolean = false;
+  /** Pośrednik podglądu maski: warstwa, której maskę pokazuje (pozwala narysować maskę wektorową z obiektów) */
+  public grayOf: Layer | null = null;
   /**
    * Korekcje nieniszczące (kolejność tablicy = kolejność stosowania; ostatnia działa na wynik poprzednich).
    * Po KAŻDEJ zmianie tablicy lub parametrów trzeba wywołać `touchCorrections()` (silnik robi to w swoich metodach).

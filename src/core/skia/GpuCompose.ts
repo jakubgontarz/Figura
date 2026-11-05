@@ -269,6 +269,17 @@ void main() {
   o = ra > 0.0 ? vec4(l.rgb, ra) : vec4(0.0);
 }`;
 
+/** Podgląd maski: szarość (jak grayToAlpha) jako nieprzezroczysty obraz, czarne tło pod niepokrytymi pikselami. */
+const FS_GRAY =
+  GL_HEAD +
+  `uniform sampler2D uSrc;
+void main() {
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  vec4 m = texelFetch(uSrc, p, 0);
+  float a = floor(dot(m.rgb * 255.0, vec3(0.299, 0.587, 0.114)) * m.a + 0.5) / 255.0;
+  o = vec4(a, a, a, 1.0);
+}`;
+
 const FS_TO_STRAIGHT =
   GL_HEAD +
   BLEND_FN +
@@ -990,7 +1001,8 @@ export class GpuComposer {
       if (crisp && !layer.isVector && !corr && !hasMask && !withPreview && !gray && !gridHasContent(grid)) continue;
 
       // warstwa wektorowa w trybie Wektory: ostra tekstura w skali okna zamiast kafelków dokumentu
-      const vecCrisp = !!crisp && layer.isVector && crisp.vector(layer) && !gray && !editingMask;
+      // edycja maski warstwy wektorowej też zostaje w trybie wektorowym (maska liczona z obiektów; bez podglądu rastrowych narzędzi)
+      const vecCrisp = !!crisp && layer.isVector && crisp.vector(layer) && !gray && (!editingMask || !withPreview);
       const near = !!crisp && s >= 2;
       // zwykła warstwa rastrowa z filtrami / stylizacjami: cały łańcuch efektów w pikselach dokumentu, jak w trybie Piksele
       const docRes = !!crisp && !layer.isVector && layer.hasActiveFilters && !editingMask && !withPreview && !gray;
@@ -999,7 +1011,14 @@ export class GpuComposer {
       let vmask: Tex | null = null;
       let gp: GridTex | null = null;
       let gm: GridTex | null = null;
-      if (vecCrisp) {
+      // podgląd maski (dwuklik na masce) wektorowej warstwy w trybie Wektory: szarość liczona z obiektów, nie z bitmapy
+      const gsrc = gray ? layer.grayOf : null;
+      const vecGray = !!crisp && !!gsrc && gsrc.isVector && !!gsrc.maskGrid && !gsrc.maskRaster && crisp.vector(gsrc);
+      if (vecGray) {
+        vk = `${wkey}|${crisp!.key(gsrc!)}`;
+        vmask = this.vecTexFor(g, gsrc!, 'm', vk, W, H, () => crisp!.raster(gsrc!, win, 'mask'));
+        if (!vmask) return null;
+      } else if (vecCrisp) {
         vk = `${wkey}|${crisp!.key(layer)}`;
         vtex = this.vecTexFor(g, layer, 'l', vk, W, H, () => crisp!.raster(layer, win, 'layer'));
         if (!vtex) return null;
@@ -1039,13 +1058,16 @@ export class GpuComposer {
         if (!chained) return null;
         cur = chained;
       } else if (vecCrisp) cur = vtex!;
-      else {
+      else if (vecGray) {
+        this.passTwo(g, 'gc_gray', FS_GRAY, vmask!, t1, win, 'uSrc');
+        cur = t1;
+      } else {
         this.passSample(g, gp!, t1, win, gray, docW, docH, near);
         cur = t1;
       }
       if (docRes) {
         // maska i efekty już uwzględnione
-      } else if (editingMask && gm) {
+      } else if (editingMask && gm && !vecCrisp) {
         // podgląd narzędzia nanoszony na MASKĘ, a dopiero ona (jako alfa) na piksele warstwy
         this.passSample(g, gm, t2, win, false, docW, docH, near);
         let mt = t2;

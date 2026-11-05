@@ -190,7 +190,8 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
   penInfo,
   onTogglePenClosed,
 }) => {
-  const vecUnits = useUnits().mode === 'vec';
+  const uctx = useUnits();
+  const vecUnits = uctx.mode === 'vec' || uctx.unit !== 'px';
   const isSelectionTool =
     activeTool === 'select-rect' ||
     activeTool === 'select-ellipse' ||

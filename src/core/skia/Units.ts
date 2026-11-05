@@ -3,8 +3,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-/** Tryb jednostek widoku: piksele płótna albo wymiary wektorowe w milimetrach (z rozdzielczością dokumentu w dpi). */
+/** Tryb wyświetlania: piksele (kafelki) albo wektory (obiekty wektorowe rysowane wektorowo, położenia bez zaokrąglania do pikseli). */
 export type UnitMode = 'px' | 'vec';
+
+/** Jednostka długości pól liczbowych, współrzędnych kursora i wymiarów obrazu (niezależna od trybu wyświetlania). */
+export type LengthUnit = 'px' | 'mm' | 'cm' | 'in';
+export const LENGTH_UNITS: LengthUnit[] = ['px', 'mm', 'cm', 'in'];
+export const UNIT_LABEL: Record<LengthUnit, string> = { px: 'px', mm: 'mm', cm: 'cm', in: 'cal' };
 
 export const MM_PER_INCH = 25.4;
 export const DEFAULT_DPI = 96;
@@ -48,3 +53,15 @@ export const MM_PRESETS: DocPreset[] = [
 ];
 
 export const DPI_CHOICES = [72, 96, 150, 300, 600];
+
+/** Ile pikseli dokumentu mieści się w jednej jednostce (przy danej rozdzielczości). */
+export const pxPerUnit = (unit: LengthUnit, dpi: number): number =>
+  unit === 'px' ? 1 : unit === 'mm' ? dpi / MM_PER_INCH : unit === 'cm' ? dpi / (MM_PER_INCH / 10) : dpi;
+export const pxToUnit = (px: number, unit: LengthUnit, dpi: number): number => px / pxPerUnit(unit, dpi);
+export const unitToPx = (v: number, unit: LengthUnit, dpi: number): number => v * pxPerUnit(unit, dpi);
+
+const UNIT_DECIMALS: Record<LengthUnit, number> = { px: 2, mm: 2, cm: 3, in: 3 };
+
+/** Napis z wartością w jednostce; piksele w całkowitej liczbie, gdy `intPx` (domyślnie), inaczej do 2 miejsc. */
+export const fmtUnit = (px: number, unit: LengthUnit, dpi: number, intPx = true): string =>
+  unit === 'px' && intPx ? String(Math.round(px)) : pxToUnit(px, unit, dpi).toFixed(UNIT_DECIMALS[unit]);

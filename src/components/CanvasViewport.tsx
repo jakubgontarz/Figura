@@ -40,7 +40,7 @@ import {
   skColorToRgbaString,
 } from '../core/skia/types.ts';
 import { useUnits } from './Units.tsx';
-import { UnitMode, fmtMm, quantizeCoord } from '../core/skia/Units.ts';
+import { UNIT_LABEL, UnitMode, fmtUnit, quantizeCoord } from '../core/skia/Units.ts';
 import { compositeVectorObject, drawVectorObject, scaleVectorObject, vectorObjectBlend, vectorObjectBounds } from '../core/skia/VectorObjects.ts';
 import { drawSmartBitmap, getSmartBitmap, smartBitmapId } from '../core/skia/SmartObjects.ts';
 import { TransformSelectionState } from '../core/skia/SelectionManager.ts';
@@ -554,6 +554,11 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
    * początku dokumentu w skali widoku. Kafelek jest rysowany ponownie tylko wtedy, gdy zmieniły się obiekty, które go dotykają
    * (albo skala), więc przesuwanie widoku i edycja jednego obiektu nie rasteryzują całego okna.
    */
+  /** Czas ostatniego złożenia trybu Wektory (ms) i moment ostatniej zmiany powiększenia: przy ciężkiej scenie zoom pokazuje tymczasowo zwykły podgląd. */
+  const gpuCrispCostRef = useRef(0);
+  const zoomChangedAtRef = useRef(0);
+  const lastZoomSeenRef = useRef(0);
+  const zoomRefineTimerRef = useRef<number | null>(null);
   const vecTileCacheRef = useRef<{
     layers: Map<string, { S: number; contentKey: string; infos: VecTileInfo[]; tiles: Map<number, { cv: HTMLCanvasElement | null; h: number; used: number }> }>;
     frame: number;
@@ -2103,13 +2108,10 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     const el = document.getElementById('status-bar-cursor-pos');
     if (el) {
       const u = unitsRef.current;
-      el.textContent = u.mode === 'vec'
-        ? pt
-          ? `Pozycja: ${fmtMm(pt.x, u.dpi)}, ${fmtMm(pt.y, u.dpi)} mm`
-          : 'Pozycja: 0.00, 0.00 mm'
-        : pt
-          ? `Pozycja: ${Math.floor(pt.x)}, ${Math.floor(pt.y)}`
-          : 'Pozycja: 0, 0';
+      const lab = UNIT_LABEL[u.unit];
+      // piksele: całkowite w trybie Piksele, w trybie Wektory z dokładnością do 0,01
+      const f = (v: number) => (u.unit === 'px' && u.mode !== 'vec' ? String(Math.floor(v)) : fmtUnit(v, u.unit, u.dpi, false));
+      el.textContent = pt ? `Pozycja: ${f(pt.x)}, ${f(pt.y)} ${lab}` : `Pozycja: ${f(0)}, ${f(0)} ${lab}`;
     }
   };
 
@@ -3908,6 +3910,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
    */
   const tryGpuCrisp = (): boolean => {
     crispSourceRef.current = null;
+    engine.vec.deferLiveRebuild = false;
     const container = containerRef.current;
     const tr = tileRendererRef.current;
     const tv = tileViewRef.current;
@@ -3920,6 +3923,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     const live = act && act.isVector && isAnyVectorSessionActiveRef.current ? liveSessionObjectRef.current() : null;
     const liveKey = live ? JSON.stringify(live) : '';
     const editing = engine.vec.editingInfo;
+    const baseKeyOf = (l: Layer) => source.key(l).split('|').slice(0, 4).join('|');
     const source: GpuCrispSource = {
       vector: (l) => l.isVector,
       key: (l) => {
@@ -3932,11 +3936,12 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         add(l.maskGrid);
         return `${h}|${l.layerObjects.length}|${l.maskObjects.length}|${l.maskEnabled ? 1 : 0}|${act === l ? liveKey + '|' + (editing?.id ?? '') : ''}`;
       },
-      raster: (l, win, kind) => rasterVectorForGpu(l, win, kind, act === l ? live : null, editing?.layerId === l.id ? editing.id : null, source.key(l)),
+      raster: (l, win, kind) => rasterVectorForGpu(l, win, kind, act === l ? live : null, editing?.layerId === l.id ? editing.id : null, source.key(l), baseKeyOf(l)),
     };
     crispSourceRef.current = source;
     // sesje rastrowe (pędzel, gradient, wiadro, transformacja, narzędzia wektorowe na rastrze) składa kafelkowy podgląd z ostrymi wektorami
-    if (pointerDownRef.current && act && !act.isVector) return false;
+    // (także edycja rastrowej maski warstwy wektorowej: jej pociągnięcia to sesja rastrowa)
+    if (pointerDownRef.current && act && !act.vectorTarget) return false;
     if (engine.gradientPreview || engine.getBucketPreview() || engine.transformContentSession) return false;
     if (act && !act.isVector && isAnyVectorSessionActiveRef.current) return false;
     let lsig = 0;
@@ -3949,12 +3954,21 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       tileSig(l.maskGrid);
     }
     const sig = `${engine.getBaseSignature()}|${engine.correctionSessionSignature}|${lsig}|${tv.zoom}|${tv.left},${tv.top}|${tv.width}x${tv.height}|${liveKey}|${editing?.id ?? ''}`;
-    if (sig === gpuCrispSigRef.current && gpuCrispActiveRef.current) return true;
+    if (sig === gpuCrispSigRef.current && gpuCrispActiveRef.current) {
+      engine.vec.deferLiveRebuild = true;
+      return true;
+    }
     if (sig === gpuCrispFailRef.current) {
       crispSourceRef.current = null; // kompozytor GPU tego nie obsługuje: nakładka 2D
       return false;
     }
+    const tc0 = performance.now();
+    const tr0 = (globalThis as { __figuraProf?: Record<string, number> }).__figuraProf?.tilesRastered ?? 0;
     const glc = gpu.compose(tv, null, source);
+    // koszt "zimnego" złożenia (z rastrowaniem kafelków) - to on decyduje, czy zoom ma przejść przez tymczasowy zwykły podgląd;
+    // złożenia z gotowej pamięci kafelków (np. kolejne ruchy edytowanego obiektu) są tanie i nie mówią nic o koszcie zmiany powiększenia
+    const rastered = ((globalThis as { __figuraProf?: Record<string, number> }).__figuraProf?.tilesRastered ?? 0) - tr0;
+    if (rastered > 2) gpuCrispCostRef.current = performance.now() - tc0;
     if (!glc) {
       crispSourceRef.current = null;
       gpuCrispFailRef.current = sig;
@@ -3985,6 +3999,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     if (tileCanvasRef.current) tileCanvasRef.current.style.opacity = '0';
     gpuCrispActiveRef.current = true;
     gpuCrispSigRef.current = sig;
+    engine.vec.deferLiveRebuild = true;
     return true;
   };
 
@@ -3998,16 +4013,17 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     top: number,
     W: number,
     H: number,
-    layerKey: string
+    layerKey: string,
+    cacheId: string = layer.id
   ) => {
     const T = VEC_TILE;
     const cache = vecTileCacheRef.current;
     cache.frame++;
-    let tl = cache.layers.get(layer.id);
+    let tl = cache.layers.get(cacheId);
     if (!tl || tl.S !== S) {
       if (tl) for (const t of tl.tiles.values()) if (t.cv) cache.pool.push(t.cv);
       tl = { S, contentKey: '', infos: [], tiles: new Map() };
-      cache.layers.set(layer.id, tl);
+      cache.layers.set(cacheId, tl);
     }
     // klucz zawartości warstwy (wersje kafelków dokumentu, liczba obiektów, sesja na żywo) zmienia się przy każdej edycji;
     // dopiero wtedy liczymy podpisy obiektów i porównujemy kafelki
@@ -4090,7 +4106,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     }
     if (cache.layers.size > 40) {
       const live = new Set(engine.layers.map((l) => l.id));
-      for (const id of Array.from(cache.layers.keys())) if (!live.has(id)) cache.layers.delete(id);
+      for (const id of Array.from(cache.layers.keys())) if (!live.has(id.split('^')[0])) cache.layers.delete(id);
     }
   };
 
@@ -4101,7 +4117,8 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     kind: 'layer' | 'mask',
     live: ReturnType<typeof liveSessionObjectRef.current> | null,
     editingId: string | null,
-    layerKey: string
+    layerKey: string,
+    baseKey: string
   ): HTMLCanvasElement | null => {
     const W = win.W;
     const H = win.H;
@@ -4125,14 +4142,35 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     const profT0 = performance.now();
     if (kind === 'layer') {
       let objs = layer.layerObjects.filter((o) => o.visible);
-      if (live) {
+      // sesja na żywo: obiekty poniżej (i powyżej) edytowanego są stałe i idą z pamięci kafelków, na żywo rysujemy tylko jeden obiekt
+      let split: { below: VectorObject[]; lv: VectorObject; above: VectorObject[]; at: number } | null = null;
+      // podczas edycji maski obiekt na żywo trafia do maski (kind 'mask'), nie do warstwy
+      if (live && !(layer.editMask && layer.maskGrid)) {
         if (editingId) {
           const at = objs.findIndex((o) => o.id === editingId);
           const lv = { ...live, id: editingId };
+          if (at >= 0) {
+            const above = objs.slice(at + 1);
+            if (above.every((o) => vectorObjectBlend(scaleVectorObject(o, 1, 0, 0)) === 'SrcOver')) split = { below: objs.slice(0, at), lv, above, at };
+          }
           objs = at >= 0 ? objs.map((o, i) => (i === at ? lv : o)) : [...objs, lv];
-        } else objs = [...objs, live];
+        } else {
+          split = { below: objs, lv: live, above: [], at: objs.length };
+          objs = [...objs, live];
+        }
       }
-      if ((globalThis as { __figuraVecTiles?: boolean }).__figuraVecTiles === false) {
+      if (split && (globalThis as { __figuraVecTiles?: boolean }).__figuraVecTiles !== false) {
+        const sp = split;
+        const bk = `${baseKey}|${sp.at}|${sp.above.length}`;
+        drawVectorTiles(ctx, layer, sp.below, S, left, top, W, H, bk);
+        const so = scaleVectorObject(sp.lv, S, left, top);
+        const b = vectorObjectBounds(so);
+        if (!(b.x1 < 0 || b.y1 < 0 || b.x0 > W || b.y0 > H)) {
+          if (vectorObjectBlend(so) === 'SrcOver') drawVectorObject(ctx, so);
+          else compositeVectorObject(ctx, so, W, H, 0, 0, true);
+        }
+        if (sp.above.length) drawVectorTiles(ctx, layer, sp.above, S, left, top, W, H, bk, layer.id + '^a');
+      } else if ((globalThis as { __figuraVecTiles?: boolean }).__figuraVecTiles === false) {
         for (const o of objs) {
           const so = scaleVectorObject(o, S, left, top);
           const b = vectorObjectBounds(so);
@@ -4151,9 +4189,16 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       const baseGrid = vecMask ? layer.maskBase! : layer.maskGrid;
       ctx.imageSmoothingEnabled = false;
       ctx.drawImage(baseGrid.compositeToFlatCanvas(), left, top, engine.width * S, engine.height * S);
-      if (vecMask) {
-        for (const o of layer.maskObjects) {
-          if (!o.visible) continue;
+      if (vecMask || (live && layer.editMask)) {
+        let mobjs = layer.maskObjects.filter((o) => o.visible);
+        if (live && layer.editMask) {
+          if (editingId) {
+            const at = mobjs.findIndex((o) => o.id === editingId);
+            const lv = { ...live, id: editingId };
+            mobjs = at >= 0 ? mobjs.map((o, i) => (i === at ? lv : o)) : [...mobjs, lv];
+          } else mobjs = [...mobjs, live];
+        }
+        for (const o of mobjs) {
           const so = scaleVectorObject(o, S, left, top);
           const b = vectorObjectBounds(so);
           if (b.x1 < 0 || b.y1 < 0 || b.x0 > W || b.y0 > H) continue;
@@ -4179,11 +4224,37 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   const syncCrispVectors = () => {
     const container = containerRef.current;
     if (!container) return;
-    const wantCrisp = unitsRef.current.mode === 'vec';
+    let wantCrisp = unitsRef.current.mode === 'vec';
+    // zoomowanie (kółko, +/-) przy ciężkiej scenie: na czas serii zmian pokazujemy zwykły (nieostry) podgląd, ostry wektorowy wraca po chwili spokoju
+    if (lastZoomSeenRef.current !== zoomRef.current) {
+      lastZoomSeenRef.current = zoomRef.current;
+      zoomChangedAtRef.current = performance.now();
+    }
+    if (wantCrisp && gpuCrispCostRef.current > 60 && performance.now() - zoomChangedAtRef.current < 220) {
+      wantCrisp = false;
+      // piksele warstwy edytowanego obiektu są w tyle (tryb Wektory ich nie odświeża): najpierw je doganiamy, a przez ten czas zostaje na ekranie
+      // poprzedni (aktualny) obraz wektorowy; zwykły podgląd pokazujemy dopiero w następnej klatce, gdy jest już odświeżony
+      if (engine.vec.hasDeferred && gpuCrispActiveRef.current) {
+        engine.vec.flushDeferred();
+        zoomChangedAtRef.current = performance.now();
+        requestAnimationFrame(() => requestAnimationFrame(() => syncCrispRef.current()));
+        return;
+      }
+      if (zoomRefineTimerRef.current != null) window.clearTimeout(zoomRefineTimerRef.current);
+      zoomRefineTimerRef.current = window.setTimeout(() => {
+        zoomRefineTimerRef.current = null;
+        crispSigRef.current = '';
+        syncCrispRef.current();
+      }, 240);
+    }
     const actRaw = engine.getActiveLayer();
     // najpierw ścieżka GPU (cały stos w kompozytorze WebGL); gdy jej nie da się użyć, działa nakładka 2D
     const gpuOn = wantCrisp && tryGpuCrisp();
-    if (!gpuOn) restoreBaseCanvases();
+    if (!gpuOn) {
+      engine.vec.deferLiveRebuild = false;
+      engine.vec.flushDeferred();
+      restoreBaseCanvases();
+    }
     {
       const trc = tileRendererRef.current;
       if (trc) trc.crisp = wantCrisp && !gpuOn ? crispSourceRef.current : null;

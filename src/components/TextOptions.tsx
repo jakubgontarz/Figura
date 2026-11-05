@@ -99,7 +99,8 @@ const ToggleBtn: React.FC<{
 );
 
 export const TextOptions: React.FC<TextOptionsProps> = (props) => {
-  const vecUnits = useUnits().mode === 'vec';
+  const uctx = useUnits();
+  const vecUnits = uctx.mode === 'vec' || uctx.unit !== 'px';
   return <TextOptionsInner {...props} vecUnits={vecUnits} />;
 };
 

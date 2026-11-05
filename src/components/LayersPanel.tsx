@@ -7,7 +7,7 @@ import React, { useState, useRef, useEffect, useLayoutEffect } from 'react';
 import {
   ArrowDown,
   ArrowUp,
-  Component,
+  BoxesLinked,
   Copy,
   ChevronDown,
   ChevronRight,
@@ -18,7 +18,7 @@ import {
   FolderOpen,
   Folder,
   FolderPlus,
-  GitMerge,
+  LayerArrowDown,
   Link2,
   Link2Off,
   Lock,
@@ -31,10 +31,10 @@ import {
   SlidersHorizontal,
   Sparkles,
   Split,
-  SquareDashed,
   Trash2,
   Unlock,
   Wand2,
+  Drama
 } from 'lucide-react';
 import { Layer, subscribeThumbnails } from '../core/skia/Layer.ts';
 import { BLEND_MODES, SKBlendMode } from '../core/skia/types.ts';
@@ -424,11 +424,6 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
       {/* Opcje aktywnej warstwy: Tryb mieszania i Krycie */}
       <div
         className="space-y-1.5 mb-2 bg-[#181818] p-1.5 rounded border border-[#2a2a2a] shrink-0 w-full"
-        title={
-          activeLayer?.isGroup
-            ? 'Przepuszczanie: warstwy grupy mieszają się z tym, co pod grupą (krycie i maska grupy dozują wynik). Inny tryb (np. Normalny): grupa jest najpierw składana osobno, potem nakładana tym trybem'
-            : undefined
-        }
       >
         {/* Tryb Mieszania */}
         <div className="flex items-center justify-between gap-1.5 w-full">
@@ -485,10 +480,10 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
 
       {/* Górny pasek: operacje na aktywnej warstwie */}
       <div className="flex items-center gap-1 mb-1.5 shrink-0 w-full">
-        <IconBtn title={objSel ? 'Przesuń zaznaczone obiekty w górę' : 'Przesuń w górę'} onClick={onMoveUp}>
+        <IconBtn title={'Przesuń w górę'} onClick={onMoveUp}>
           <ArrowUp size={12} />
         </IconBtn>
-        <IconBtn title={objSel ? 'Przesuń zaznaczone obiekty w dół' : 'Przesuń w dół'} onClick={onMoveDown}>
+        <IconBtn title={'Przesuń w dół'} onClick={onMoveDown}>
           <ArrowDown size={12} />
         </IconBtn>
         <IconBtn title={objSel ? 'Duplikuj zaznaczone obiekty' : activeLayer?.isGroup ? 'Duplikuj grupę' : 'Duplikuj warstwę'} onClick={onDuplicateLayer}>
@@ -497,29 +492,29 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
         <IconBtn
           title={
             activeLayer?.isGroup
-              ? 'Scal grupę w jedną warstwę'
+              ? 'Scal grupę'
               : applyEffectsMode === 'stack'
-                ? 'Zastosuj efekt (wpieka korekcję w warstwy pod nią: w grupie - w tej grupie, na poziomie głównym - we wszystkie)'
+                ? 'Zastosuj efekt'
                 : applyEffectsMode === 'correction'
-                  ? 'Zastosuj efekt (wpieka zaznaczony efekt w piksele warstwy)'
+                  ? 'Zastosuj efekt'
                   : mergeDownApplies
-                    ? 'Zastosuj efekty (wpieka wszystkie efekty warstwy w jej piksele, bez łączenia; kolejne kliknięcie połączy warstwę w dół)'
+                    ? 'Zastosuj efekty'
                     : 'Połącz w dół'
           }
           onClick={onMergeDown}
           disabled={activeLayerIndex <= 0 && !activeLayer?.isGroup && !mergeDownApplies}
         >
-          {mergeDownApplies && !activeLayer?.isGroup ? <Wand2 size={12} /> : <GitMerge size={12} />}
+          {mergeDownApplies && !activeLayer?.isGroup ? <Wand2 size={12} /> : <LayerArrowDown size={12} />}
         </IconBtn>
         <IconBtn
           title={
             activeLayer?.isVector && activeLayer.editMask && activeLayer.hasMask
               ? activeLayer.maskRaster
                 ? 'Maska tej warstwy wektorowej jest już rastrowa'
-                : 'Przekształć maskę: zrasteryzuj maskę wektorową (warstwa zostaje wektorowa)'
+                : 'Zrasteryzuj maskę'
               : activeLayer?.isVector
-                ? 'Przekształć warstwę: zrasteryzuj warstwę wektorową razem z maską (obiekty zamieniają się w piksele)'
-                : 'Przekształć warstwę: zamień na warstwę wektorową z jednym obiektem inteligentnym'
+                ? 'Zrasteryzuj warstwę'
+                : 'Przekształć na warstwę wektorową'
           }
           onClick={onConvertLayer}
           disabled={
@@ -527,7 +522,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
             (activeLayer.isVector && activeLayer.editMask && activeLayer.hasMask && activeLayer.maskRaster)
           }
         >
-          <Component size={12} />
+          <BoxesLinked size={12} />
         </IconBtn>
         <div className="flex-1" />
         <IconBtn
@@ -535,12 +530,10 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
             objSel
               ? 'Usuń zaznaczone obiekty'
               : maskSelected
-              ? 'Usuń maskę (zaznaczona jest maska)'
+              ? 'Usuń maskę'
               : activeLayer?.isGroup
-                ? 'Usuń grupę razem z jej warstwami'
-                : activeLayer?.hasMask
-                  ? 'Usuń warstwę razem z maską'
-                  : 'Usuń warstwę'
+                ? 'Usuń grupę'
+                : 'Usuń warstwę'
           }
           onClick={onRemoveLayer}
           disabled={!objSel && !selectedCorrection && layers.filter((l) => !l.isGroup && !l.isAdjustment).length <= 1 && !maskSelected && !activeLayer?.isGroup && !activeLayer?.isAdjustment}
@@ -587,7 +580,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                 onClick={() => onSelectLayer(index)}
                 onDoubleClick={() => onEditCorrection(index, layer.corrections[0]?.id ?? '')}
                 style={isChild ? { marginLeft: 14 } : undefined}
-                title="Korekcja w stosie: działa na wszystko pod nią (w grupie: na warstwy pod nią w tej grupie). Dwukrotne kliknięcie: edytuj. Przeciągnij, aby przenieść między warstwy lub do listy efektów warstwy"
+                title="Korekcja"
                 className={`group flex items-center gap-1.5 h-[26px] pl-1 pr-1.5 rounded border cursor-pointer text-[10.5px] transition-all ${
                   isSelected ? 'bg-[#17454f] border-[#19b5cf] text-white' : 'bg-[#1b2a2e] hover:bg-[#223a40] border-[#25444c] text-[#cfe9ee]'
                 } ${dp === 'before' ? 'border-t-2 border-t-[#00ffcc]' : ''} ${dp === 'after' ? 'border-b-2 border-b-[#00ffcc]' : ''}`}
@@ -638,7 +631,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                   e.stopPropagation();
                   onSelectTarget(index, 'pixels');
                 }}
-                title={layer.hasMask ? 'Edytuj piksele warstwy (przywraca zwykły widok)' : undefined}
+                title={layer.hasMask ? 'Warstwa' : undefined}
                 className={`relative w-[35px] h-[35px] min-w-[35px] min-h-[35px] max-w-[35px] max-h-[35px] flex items-center justify-center flex-shrink-0 cursor-pointer ${
                   dimmed ? 'opacity-60' : ''
                 }`}
@@ -705,7 +698,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                     }}
                     title={
                       isGroup
-                        ? layer.ownLocked ? 'Odblokuj grupę' : 'Zablokuj grupę (blokuje wszystkie jej warstwy)'
+                        ? layer.ownLocked ? 'Odblokuj grupę' : 'Zablokuj grupę'
                         : layer.ownLocked ? 'Odblokuj warstwę' : 'Zablokuj warstwę'
                     }
                     className={`p-0.5 rounded transition-opacity cursor-pointer shadow-xs ${
@@ -736,7 +729,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                     e.stopPropagation();
                     onViewMask(maskViewIndex === index ? null : index);
                   }}
-                  title="Kliknij: edytuj maskę. Dwukrotne kliknięcie: pokaż maskę w skali szarości na płótnie"
+                  title="Maska"
                   className="relative w-[35px] h-[35px] min-w-[35px] min-h-[35px] max-w-[35px] max-h-[35px] flex items-center justify-center flex-shrink-0 cursor-pointer"
                 >
                   <div
@@ -831,7 +824,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                     )}
                     {isVec && (
                       <span
-                        title={`Warstwa wektorowa: obiektów ${layer.vectorObjects.length}`}
+                        title={`Obiekty na warstwie`}
                         className="flex items-center gap-0.5 text-[9px] text-[#e0b84a] shrink-0 opacity-90"
                       >
                         <PenTool size={9} strokeWidth={2.2} />
@@ -840,7 +833,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                     )}
                     {hasCorr && layer.corrections.some((c) => !isFilterType(c.type)) && (
                       <span
-                        title={`Korekcje na warstwie: ${layer.corrections.filter((c) => !isFilterType(c.type)).length}`}
+                        title={`Korekcje na warstwie`}
                         className="flex items-center gap-0.5 text-[9px] text-[#9cdcfe] shrink-0 opacity-90"
                       >
                         <SlidersHorizontal size={9} strokeWidth={2.2} />
@@ -849,7 +842,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                     )}
                     {hasCorr && layer.corrections.some((c) => isFilterType(c.type)) && (
                       <span
-                        title={`Filtry na warstwie: ${layer.corrections.filter((c) => isFilterType(c.type)).length}`}
+                        title={`Filtry na warstwie`}
                         className="flex items-center gap-0.5 text-[9px] text-[#9cdcfe] shrink-0 opacity-90"
                       >
                         <Filter size={9} strokeWidth={2.2} />
@@ -869,7 +862,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                             onOpenStyles?.(index);
                           }}
                           onDoubleClick={(e) => e.stopPropagation()}
-                          title={`Stylizacje warstwy: ${nStyles}. Kliknij, aby edytować`}
+                          title={`Stylizacje warstwy`}
                           className={`flex items-center justify-center gap-1 h-[18px] min-w-[26px] px-1 rounded text-[10px] font-medium cursor-pointer bg-black/35 hover:bg-black/60 ${
                             layer.styles?.visible === false ? 'text-[#777]' : 'text-[#ffd479]'
                           } ${editingStylesLayerId === layer.id ? 'bg-black/70 ring-1 ring-[#ffd479]/60' : ''}`}
@@ -1008,7 +1001,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                           onSelectCorrection?.(index, c.id, e.shiftKey ? 'range' : e.ctrlKey || e.metaKey ? 'toggle' : 'single');
                         }}
                         onDoubleClick={() => onEditCorrection(index, c.id)}
-                        title="Dwukrotne kliknięcie: edytuj. Przeciągnij, aby zmienić kolejność lub przenieść na inną warstwę"
+                        title="Korekcja"
                         className={`group flex items-center gap-1.5 h-[22px] pl-1 pr-0.5 rounded border cursor-pointer text-[10.5px] ${
                           editing
                             ? 'border-[#00e5ff] bg-[#17313a]'
@@ -1115,7 +1108,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                           onEditVectorObject?.(index, o.id);
                         }}
                         onDoubleClick={() => setRenamingObj({ id: o.id, name: vectorObjectLabel(o) })}
-                        title="Kliknij: edytuj obiekt. Ctrl / Shift + klik: zaznacz wiele. Dwukrotne kliknięcie na nazwie: zmień nazwę (obiekt inteligentny: dwuklik na ikonie otwiera jego płótno). Przeciągnij, aby zmienić kolejność lub przenieść na inną warstwę wektorową"
+                        title="Obiekt wektorowy"
                         className={`group flex items-center gap-1.5 h-[22px] pl-1 pr-0.5 rounded border cursor-pointer text-[10.5px] ${
                           editing ? 'border-[#e0b84a] bg-[#3a3217] text-white' : 'border-[#2a2a2a] bg-[#191919] hover:bg-[#242424]'
                         } ${beingDragged ? 'opacity-40' : ''} ${over === 'before' ? 'border-t-2 border-t-[#00ffcc]' : ''} ${over === 'after' ? 'border-b-2 border-b-[#00ffcc]' : ''}`}
@@ -1137,7 +1130,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                         {o.kind === 'smart' && onOpenSmartObject ? (
                           <span
                             data-testid="smart-icon"
-                            title="Dwuklik: edytuj płótno obiektu inteligentnego"
+                            title="Obiekt inteligentny. Kliknij dwukrotnie aby edytować"
                             onDoubleClick={(e) => {
                               e.stopPropagation();
                               onOpenSmartObject(layer.id, o.id);
@@ -1186,7 +1179,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
         <IconBtn title="Nowa warstwa rastrowa" onClick={onAddLayer}>
           <FilePlus size={12} />
         </IconBtn>
-        <IconBtn title="Nowa warstwa wektorowa (obiekty zostają edytowalne)" onClick={onAddVectorLayer}>
+        <IconBtn title="Nowa warstwa wektorowa" onClick={onAddVectorLayer}>
           <PenTool size={12} />
         </IconBtn>
         <IconBtn title="Nowa grupa warstw" onClick={onAddGroup}>
@@ -1195,37 +1188,33 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
         <div className="w-px h-4 bg-[#3a3a3a] mx-0.5" />
         {activeLayer?.isAdjustment ? (
           <IconBtn title="Korekcja w stosie nie ma maski" disabled>
-            <SquareDashed size={12} />
+            <Drama size={12} />
           </IconBtn>
         ) : activeLayer?.isGroup && activeLayer.hasMask ? (
           <IconBtn
-            title="Maski grupy nie da się wypiec w piksele (dotyczy złożenia warstw grupy). Zaznacz maskę i użyj kosza, aby ją usunąć, albo scal grupę"
+            title="Wypiecz maskę"
             disabled
           >
             <Split size={12} />
           </IconBtn>
         ) : activeLayer?.hasMask ? (
-          <IconBtn title="Wypiecz maskę (wpieka ją w piksele warstwy i usuwa)" onClick={onApplyMask}>
+          <IconBtn title="Wypiecz maskę" onClick={onApplyMask}>
             <Split size={12} />
           </IconBtn>
         ) : (
           <IconBtn
             title={
               activeLayer?.isGroup
-                ? hasSelection ? 'Dodaj maskę grupy z zaznaczenia (zaznaczone = widoczne)' : 'Dodaj maskę przezroczystości grupy'
-                : hasSelection ? 'Dodaj maskę z zaznaczenia (zaznaczone = widoczne)' : 'Dodaj maskę przezroczystości'
+                ? hasSelection ? 'Dodaj maskę grupy z zaznaczenia' : 'Dodaj maskę przezroczystości grupy'
+                : hasSelection ? 'Dodaj maskę z zaznaczenia' : 'Dodaj maskę przezroczystości'
             }
             onClick={onAddMask}
           >
-            <SquareDashed size={12} />
+            <Drama size={12} />
           </IconBtn>
         )}
         <IconBtn
-          title={
-            activeLayer && (activeLayer.isGroup || activeLayer.isAdjustment)
-              ? 'Stylizacje działają tylko na zwykłych warstwach rastrowych'
-              : 'Stylizacje warstwy: cień, obrys, poświata, fazowanie, nakładki'
-          }
+          title={'Stylizacje warstwy'}
           disabled={!activeLayer || activeLayer.isGroup || activeLayer.isAdjustment}
           onClick={() => onOpenStyles?.(activeLayerIndex)}
         >
@@ -1233,13 +1222,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
         </IconBtn>
         <div ref={corrBtnRef} className="relative">
           <IconBtn
-            title={
-              activeLayer?.isGroup
-                ? 'Dodaj korekcję na szczyt grupy (działa na wszystkie warstwy grupy)'
-                : activeLayer?.isAdjustment
-                  ? 'Dodaj korekcję w stosie nad zaznaczoną (działa na warstwy pod nią)'
-                  : 'Dodaj korekcję (nieniszczącą) do aktywnej warstwy'
-            }
+            title={'Korekcje'}
             onClick={() => (corrMenu?.kind === 'corr' ? setCorrMenu(null) : openCorrMenu('corr'))}
           >
             <SlidersHorizontal size={12} />
@@ -1247,13 +1230,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
         </div>
         <div ref={filterBtnRef} className="relative">
           <IconBtn
-            title={
-              activeLayer?.isGroup
-                ? 'Dodaj filtr na szczyt grupy (działa na wszystkie warstwy grupy)'
-                : activeLayer?.isAdjustment
-                  ? 'Dodaj filtr w stosie nad zaznaczonym efektem (działa na warstwy pod nim)'
-                  : 'Dodaj filtr (nieniszczący) do aktywnej warstwy'
-            }
+            title={'Filtry'}
             onClick={() => (corrMenu?.kind === 'filter' ? setCorrMenu(null) : openCorrMenu('filter'))}
           >
             <Filter size={12} />

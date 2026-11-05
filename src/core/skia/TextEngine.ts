@@ -802,7 +802,10 @@ function renderTextRaster(
   settings: TextToolSettings,
   pad: number,
   bufW: number,
-  bufH: number
+  bufH: number,
+  /** przesunięcie fragmentu w pełnym buforze liter (rasteryzacja tylko widocznego wycinka) */
+  offX = 0,
+  offY = 0
 ): void {
   const sw = Math.max(0, settings.strokeWidth);
   const hasFill = settings.fillMode !== 'none';
@@ -819,9 +822,10 @@ function renderTextRaster(
   const tCanvas = document.createElement('canvas');
   tCanvas.width = bufW;
   tCanvas.height = bufH;
-  const tCtx = tCanvas.getContext('2d')!;
+  // bufory CPU: odczyt pikseli z płótna na GPU wymusza synchroniczny readback przy każdym wywołaniu (na kafelek)
+  const tCtx = tCanvas.getContext('2d', { willReadFrequently: true })!;
   tCtx.imageSmoothingEnabled = true;
-  tCtx.translate(pad, pad);
+  tCtx.translate(pad - offX, pad - offY);
   drawTextMask(tCtx, layout, hasStroke && hasFill ? 'both' : hasStroke ? 'stroke' : 'fill', strokeW);
 
   // 2. Maska wypełnienia (fCanvas: tylko wnętrze liter)
@@ -830,9 +834,9 @@ function renderTextRaster(
     fCanvas = document.createElement('canvas');
     fCanvas.width = bufW;
     fCanvas.height = bufH;
-    const fCtx = fCanvas.getContext('2d')!;
+    const fCtx = fCanvas.getContext('2d', { willReadFrequently: true })!;
     fCtx.imageSmoothingEnabled = true;
-    fCtx.translate(pad, pad);
+    fCtx.translate(pad - offX, pad - offY);
     drawTextMask(fCtx, layout, 'fill', 0);
   }
 
@@ -943,6 +947,30 @@ export interface RenderTextResult {
  * Tekst nie posiada żadnego tła ani obramowania ramki.
  */
 const textRasterMemo = new WeakMap<object, { key: string; canvas: HTMLCanvasElement }>();
+const textCache = new Map<string, { lay: TextLayout; key: string; canvas: HTMLCanvasElement | null; bytes: number }>();
+const TEXT_CACHE_BYTES = 96 * 1024 * 1024;
+/** Powyżej tylu pikseli bufora liter rasteryzujemy tylko widoczny wycinek (bez pamięci podręcznej rastra) */
+const BIG_TEXT_PIXELS = 1_500_000;
+
+let isoPool: HTMLCanvasElement | null = null;
+
+/** Układ policzony w jednostkach dokumentu przeliczony na skalę S (położenia, rozmiary pisma, odstępy). */
+function scaleTextLayout(l: TextLayout, S: number): TextLayout {
+  return {
+    ...l,
+    height: l.height * S,
+    letterSpacing: l.letterSpacing * S,
+    lines: l.lines.map((ln) => ({
+      ...ln,
+      top: ln.top * S,
+      height: ln.height * S,
+      baseline: ln.baseline * S,
+      contentWidth: ln.contentWidth * S,
+      offsetX: ln.offsetX * S,
+      pieces: ln.pieces.map((p) => ({ ...p, width: p.width * S, x: p.x * S, style: { ...p.style, fontSize: p.style.fontSize * S } })),
+    })),
+  };
+}
 
 export function renderVectorText(
   ctx: CanvasRenderingContext2D,
@@ -953,12 +981,23 @@ export function renderVectorText(
   rt: RichText,
   settings: TextToolSettings,
   layout?: TextLayout,
-  fallbackStyle?: TextCharStyle
+  fallbackStyle?: TextCharStyle,
+  /** kopia przeskalowana: układ liczony w jednostkach dokumentu (jak w wersji pikselowej) i przeskalowany o S */
+  docLayout?: { S: number; layout: () => TextLayout }
 ): RenderTextResult {
   const inset = getTextInset(settings);
   const innerW = getTextInnerWidth(width, settings);
   const fb = fallbackStyle ?? pickCharStyle(settings);
-  const lay = layout ?? layoutText(rt, innerW, getTextLayoutOptions(settings, fb));
+
+  // Układ i raster liter zależą tylko od treści, szerokości i ustawień (nie od położenia, kafelka ani zoomu), więc
+  // pamiętamy je między wywołaniami (kafelki, klatki, zoom) zamiast liczyć tekst od nowa dla każdego kafelka.
+  const cacheKey = layout ? '' : `${docLayout ? 'D|' : ''}${innerW}|${JSON.stringify(rt)}|${JSON.stringify(settings)}|${JSON.stringify(fb)}`;
+  const cached = cacheKey ? textCache.get(cacheKey) : undefined;
+  if (cached) {
+    textCache.delete(cacheKey);
+    textCache.set(cacheKey, cached); // odświeżenie kolejności (LRU)
+  }
+  const lay = layout ?? cached?.lay ?? (docLayout ? scaleTextLayout(docLayout.layout(), docLayout.S) : layoutText(rt, innerW, getTextLayoutOptions(settings, fb)));
   const extentH = Math.max(height, lay.height + 2 * inset);
 
   if (rt.length === 0) return { extentHeight: extentH, extentWidth: width };
@@ -968,22 +1007,6 @@ export function renderVectorText(
   const pad = Math.ceil(sw * 2) + 8;
   const bufW = Math.max(1, Math.ceil(innerW + 2 * pad));
   const bufH = Math.max(1, Math.ceil(lay.height + 2 * pad));
-  // Raster liter zależy tylko od układu i ustawień (nie od położenia), więc przy przesuwaniu
-  // ramki i renderowaniu kafelków używamy go ponownie zamiast rasteryzować tekst w każdym kafelku.
-  const memoKey = `${bufW}x${bufH}|${pad}|${JSON.stringify(settings)}`;
-  let textCanvas: HTMLCanvasElement;
-  const memo = layout ? textRasterMemo.get(layout) : undefined;
-  if (memo && memo.key === memoKey) {
-    textCanvas = memo.canvas;
-  } else {
-    textCanvas = document.createElement('canvas');
-    textCanvas.width = bufW;
-    textCanvas.height = bufH;
-    const tctx = textCanvas.getContext('2d')!;
-    renderTextRaster(tctx, lay, settings, pad, bufW, bufH);
-    if (layout) textRasterMemo.set(layout, { key: memoKey, canvas: textCanvas });
-  }
-
   // Umieszczenie i ewentualny obrót w dokumencie
   const diag = Math.ceil(Math.hypot(Math.max(width, bufW + 2 * inset), Math.max(extentH, height))) + 8;
   const originX = Math.floor(center.x - diag / 2);
@@ -996,10 +1019,14 @@ export function renderVectorText(
   const cx = center.x - ox;
   const cy = center.y - oy;
 
-  const iso = document.createElement('canvas');
-  iso.width = pw;
-  iso.height = ph;
-  const ictx = iso.getContext('2d')!;
+  const iso = isoPool ?? (isoPool = document.createElement('canvas'));
+  if (iso.width < pw || iso.height < ph) {
+    iso.width = Math.max(iso.width, pw);
+    iso.height = Math.max(iso.height, ph);
+  }
+  const ictx = iso.getContext('2d', { willReadFrequently: true })!;
+  ictx.setTransform(1, 0, 0, 1, 0, 0);
+  ictx.clearRect(0, 0, pw, ph);
   ictx.scale(rs, rs);
   ictx.imageSmoothingEnabled = settings.antiAliasing;
   ictx.imageSmoothingQuality = 'high';
@@ -1014,12 +1041,70 @@ export function renderVectorText(
     tx = Math.round(tx);
     ty = Math.round(ty);
   }
-  ictx.drawImage(textCanvas, tx, ty);
+  // Bardzo duży bufor liter (tryb Wektory przy dużym zoomie: tekst w skali ekranu) rasteryzujemy tylko w części widocznej w oknie
+  if (!layout && bufW * bufH > BIG_TEXT_PIXELS) {
+    const cs = Math.cos(angle);
+    const sn = Math.sin(angle);
+    const Tx = isAxisAligned ? Math.round(cx) : cx;
+    const Ty = isAxisAligned ? Math.round(cy) : cy;
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const [u, v] of [[0, 0], [pw, 0], [0, ph], [pw, ph]]) {
+      const px = u / rs - Tx;
+      const py = v / rs - Ty;
+      const bx = px * cs + py * sn - tx;
+      const by = -px * sn + py * cs - ty;
+      if (bx < minX) minX = bx;
+      if (bx > maxX) maxX = bx;
+      if (by < minY) minY = by;
+      if (by > maxY) maxY = by;
+    }
+    const m = Math.ceil(2 + 2 / rs);
+    const rx0 = Math.max(0, Math.floor(minX) - m);
+    const ry0 = Math.max(0, Math.floor(minY) - m);
+    const rx1 = Math.min(bufW, Math.ceil(maxX) + m);
+    const ry1 = Math.min(bufH, Math.ceil(maxY) + m);
+    if (rx1 <= rx0 || ry1 <= ry0) return { extentHeight: extentH, extentWidth: Math.max(width, bufW + 2 * inset) };
+    if (cacheKey && !cached) textCache.set(cacheKey, { lay, key: '', canvas: null, bytes: 1024 }); // układ liczymy raz
+    const sub = document.createElement('canvas');
+    sub.width = rx1 - rx0;
+    sub.height = ry1 - ry0;
+    renderTextRaster(sub.getContext('2d', { willReadFrequently: true })!, lay, settings, pad, sub.width, sub.height, rx0, ry0);
+    ictx.drawImage(sub, tx + rx0, ty + ry0);
+  } else {
+    const memoKey = `${bufW}x${bufH}|${pad}|${JSON.stringify(settings)}`;
+    let textCanvas: HTMLCanvasElement;
+    const memo = layout ? textRasterMemo.get(layout) : cached && cached.canvas ? { key: cached.key, canvas: cached.canvas } : undefined;
+    if (memo && memo.key === memoKey) {
+      textCanvas = memo.canvas;
+    } else {
+      textCanvas = document.createElement('canvas');
+      textCanvas.width = bufW;
+      textCanvas.height = bufH;
+      const tctx = textCanvas.getContext('2d')!;
+      renderTextRaster(tctx, lay, settings, pad, bufW, bufH);
+      if (layout) textRasterMemo.set(layout, { key: memoKey, canvas: textCanvas });
+      else if (cacheKey) {
+        textCache.set(cacheKey, { lay, key: memoKey, canvas: textCanvas, bytes: bufW * bufH * 4 });
+        let total = 0;
+        for (const e of textCache.values()) total += e.bytes;
+        // limit pamięci podręcznej tekstów (najdawniej użyte wypadają pierwsze)
+        for (const k of textCache.keys()) {
+          if (total <= TEXT_CACHE_BYTES || textCache.size <= 1) break;
+          total -= textCache.get(k)!.bytes;
+          textCache.delete(k);
+        }
+      }
+    }
+    ictx.drawImage(textCanvas, tx, ty);
+  }
 
   ctx.save();
   ctx.globalCompositeOperation = getCanvasCompositeOperation(settings.blendMode);
   ctx.imageSmoothingEnabled = settings.antiAliasing;
-  ctx.drawImage(iso, ox, oy, pw / rs, ph / rs);
+  ctx.drawImage(iso, 0, 0, pw, ph, ox, oy, pw / rs, ph / rs);
   ctx.restore();
 
   return { extentHeight: extentH, extentWidth: Math.max(width, bufW + 2 * inset) };
