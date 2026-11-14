@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { ToggleButton } from './ToggleButton.tsx';
 import React, { useEffect, useState } from 'react';
 import {
   AlignCenter,
@@ -16,21 +17,21 @@ import {
   Underline,
 } from 'lucide-react';
 import { LengthField, UnitLabel, useUnits } from './Units.tsx';
-import { getAllFontFamilies } from '../core/skia/FontCatalog.ts';
+import { ScrubField } from './ScrubField.tsx';
+import { getAllFontFamilies } from '../core/FontCatalog.ts';
 import {
   BLEND_MODES,
   SKBlendMode,
   ShapeFillMode,
   TextAlign,
   TextToolSettings,
-} from '../core/skia/types.ts';
+} from '../core/types.ts';
 
 
 interface TextOptionsProps {
   settings: TextToolSettings;
   onChange: (patch: Partial<TextToolSettings>) => void;
   onRequestFocus?: () => void;
-  isSessionActive?: boolean;
   onCommit?: () => void;
   onCancel?: () => void;
 }
@@ -38,43 +39,6 @@ interface TextOptionsProps {
 const inputCls =
   'h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc]';
 const labelCls = 'text-[11px] whitespace-nowrap text-[#aaa]';
-
-/** Pole liczbowe z lokalnym stanem tekstowym (pozwala wyczyścić pole i wpisać nową wartość). */
-const NumField: React.FC<{
-  value: number;
-  min: number;
-  max: number;
-  width?: string;
-  onCommit: (v: number) => void;
-  onEnter?: () => void;
-}> = ({ value, min, max, width = 'w-12', onCommit, onEnter }) => {
-  const [text, setText] = useState(String(value));
-  useEffect(() => {
-    setText(String(value));
-  }, [value]);
-  return (
-    <input
-      type="number"
-      min={min}
-      max={max}
-      value={text}
-      onChange={(e) => {
-        setText(e.target.value);
-        const v = parseFloat(e.target.value);
-        if (!isNaN(v)) onCommit(Math.max(min, Math.min(max, v)));
-      }}
-      onBlur={() => setText(String(value))}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter' || e.key === 'Tab') {
-          if (e.key === 'Enter') e.preventDefault();
-          onEnter?.();
-        }
-        e.stopPropagation();
-      }}
-      className={`${width} ${inputCls} px-1 text-center font-mono`}
-    />
-  );
-};
 
 const ToggleBtn: React.FC<{
   active: boolean;
@@ -100,12 +64,12 @@ const ToggleBtn: React.FC<{
 
 export const TextOptions: React.FC<TextOptionsProps> = (props) => {
   const uctx = useUnits();
-  const vecUnits = uctx.mode === 'vec' || uctx.unit !== 'px';
-  return <TextOptionsInner {...props} vecUnits={vecUnits} />;
+  const fractionalUnits = uctx.unit !== 'px';
+  return <TextOptionsInner {...props} fractionalUnits={fractionalUnits} />;
 };
 
-const TextOptionsInner: React.FC<TextOptionsProps & { vecUnits: boolean }> = ({
-  vecUnits,
+const TextOptionsInner: React.FC<TextOptionsProps & { fractionalUnits: boolean }> = ({
+  fractionalUnits,
   settings,
   onChange,
   onRequestFocus,
@@ -151,7 +115,6 @@ const TextOptionsInner: React.FC<TextOptionsProps & { vecUnits: boolean }> = ({
           integerPx={false}
           onCommitPx={(v) => onChange({ fontSize: v })}
           onEnter={onRequestFocus}
-          className={`w-14 ${inputCls} px-1 text-center font-mono`}
         />
         <UnitLabel />
       </div>
@@ -199,14 +162,15 @@ const TextOptionsInner: React.FC<TextOptionsProps & { vecUnits: boolean }> = ({
       {/* Odstępy */}
       <div className="flex items-center gap-1 flex-shrink-0">
         <label className={labelCls} title="Odstęp pionowy (interlinia)">Pion:</label>
-        <NumField
+        <ScrubField
           value={settings.lineSpacing}
           min={50}
           max={300}
-          onCommit={(v) => onChange({ lineSpacing: Math.round(v) })}
+          suffix="%"
+          width={80}
+          onChange={(v) => onChange({ lineSpacing: Math.round(v) })}
           onEnter={onRequestFocus}
         />
-        <span className="text-[10px] text-[#888]">%</span>
       </div>
       <div className="flex items-center gap-1 flex-shrink-0">
         <label className={labelCls} title="Odstęp poziomy (między znakami)">Poziom:</label>
@@ -217,7 +181,6 @@ const TextOptionsInner: React.FC<TextOptionsProps & { vecUnits: boolean }> = ({
           integerPx={false}
           onCommitPx={(v) => onChange({ letterSpacing: Math.round(v * 100) / 100 })}
           onEnter={onRequestFocus}
-          className={`w-14 ${inputCls} px-1 text-center font-mono`}
         />
         <UnitLabel />
       </div>
@@ -251,35 +214,24 @@ const TextOptionsInner: React.FC<TextOptionsProps & { vecUnits: boolean }> = ({
           valuePx={settings.strokeWidth}
           minPx={0}
           maxPx={200}
-          integerPx={!vecUnits}
-          onCommitPx={(v) => onChange({ strokeWidth: vecUnits ? Math.round(v * 100) / 100 : Math.round(v) })}
+          trackMaxPx={100}
+          integerPx={!fractionalUnits}
+          onCommitPx={(v) => onChange({ strokeWidth: fractionalUnits ? Math.round(v * 100) / 100 : Math.round(v) })}
           onEnter={onRequestFocus}
-          className={`w-14 ${inputCls} px-1 text-center font-mono`}
         />
         <UnitLabel />
-        <input
-          type="range"
-          min="0"
-          max="100"
-          value={Math.min(100, settings.strokeWidth)}
-          onChange={(e) => onChange({ strokeWidth: parseInt(e.target.value) })}
-          className="w-16 h-1 bg-[#444] accent-[#007acc] rounded-lg appearance-none cursor-pointer"
-        />
       </div>
 
       {/* Wygładzanie */}
-      <label className="flex items-center gap-1.5 cursor-pointer text-[11px] hover:text-white flex-shrink-0">
-        <input
-          type="checkbox"
-          checked={settings.antiAliasing}
-          onChange={(e) => {
-            onChange({ antiAliasing: e.target.checked });
-            onRequestFocus?.();
-          }}
-          className="rounded bg-[#1e1e1e] border-[#555] text-[#007acc] focus:ring-0 focus:ring-offset-0 h-3.5 w-3.5 cursor-pointer"
-        />
-        <span>Wygładzanie</span>
-      </label>
+      <ToggleButton
+        active={settings.antiAliasing}
+        onChange={(v) => {
+          onChange({ antiAliasing: v });
+          onRequestFocus?.();
+        }}
+      >
+        Wygładzanie
+      </ToggleButton>
 
       {/* Tryb mieszania */}
       <div className="flex items-center gap-1.5 flex-shrink-0">

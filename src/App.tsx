@@ -3,11 +3,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { vectorObjectLabel } from './core/skia/VectorObjects.ts';
+/**
+ * Główny komponent edytora Figura: zarządza zakładkami dokumentów, ustawieniami narzędzi, schowkiem i skrótami klawiszowymi
+ * oraz składa interfejs z pasków, płótna i paneli bocznych.
+ */
+
+import { VectorObject, newVectorId, vectorObjectLabel } from './core/VectorObjects.ts';
+import { ensureDiskImage, pickDiskImage, reconnectDiskImage, setDiskReadyHook } from './core/DiskImages.ts';
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Lock } from 'lucide-react';
-import { registerSmartBitmap, setSmartReadyHook } from './core/skia/SmartObjects.ts';
-import { GraphicEngine } from './core/skia/GraphicEngine.ts';
+import { Lock, FilePlus, FolderOpen } from 'lucide-react';
+import { registerSmartBitmap, setSmartReadyHook } from './core/SmartObjects.ts';
+import { GraphicEngine } from './core/GraphicEngine.ts';
 import {
   BrushSettings,
   ColorReplaceSettings,
@@ -19,13 +25,12 @@ import {
   SKBlendMode,
   SKColor,
   SelectionSettings,
-  ShapeKind,
   StampSettings,
   ToolType,
   VectorShapeSettings,
   SmartObjectSettings,
   TextToolSettings,
-} from './core/skia/types.ts';
+} from './core/types.ts';
 import { TitleBar } from './components/TitleBar.tsx';
 import { MenuBar, MenuActionHandlers } from './components/MenuBar.tsx';
 import { ToolOptionsBar } from './components/ToolOptionsBar.tsx';
@@ -33,21 +38,30 @@ import { Toolbox } from './components/Toolbox.tsx';
 import { CanvasViewport } from './components/CanvasViewport.tsx';
 import { PropertiesPanel, PropsDescriptor, PropsApi } from './components/PropertiesPanel.tsx';
 import { ColorPanel } from './components/ColorPanel.tsx';
+import { NavigatorPanel } from './components/NavigatorPanel.tsx';
 import { LayersPanel } from './components/LayersPanel.tsx';
+import { LayerPropsDialog } from './components/LayerPropsDialog.tsx';
+import { buildLayersMenu, LayersMenuState } from './components/layersMenu.ts';
+import { HistoryPanel } from './components/HistoryPanel.tsx';
+import { ChannelsPanel } from './components/ChannelsPanel.tsx';
 import { UnitsContext } from './components/Units.tsx';
-import type { LengthUnit, UnitMode } from './core/skia/Units.ts';
+import type { LengthUnit } from './core/Units.ts';
 import { StatusBar } from './components/StatusBar.tsx';
 import { NewDocumentModal } from './components/NewDocumentModal.tsx';
 import { CorrectionDialog } from './components/CorrectionDialog.tsx';
 import { StylesDialog } from './components/StylesDialog.tsx';
-import { LayerStyles } from './core/skia/Styles.ts';
-import { Correction, CorrectionType, Histogram } from './core/skia/Corrections.ts';
-import type { Layer } from './core/skia/Layer.ts';
+import { LayerStyles } from './core/Styles.ts';
+import { Correction, CorrectionType, Histogram } from './core/Corrections.ts';
+import type { LayerTransformOp } from './core/VectorObjects.ts';
+import type { Layer } from './core/Layer.ts';
+import { BrushAdjustFns, clampSize, clampPct, clampSpacing, pctToAlpha, alphaToPct, stepSize, supportsOpacity } from './core/brushAdjust.ts';
 
 /** Narzędzia dostępne na warstwie wektorowej (reszta działa na pikselach). */
 const VECTOR_LAYER_TOOLS = new Set<ToolType>(['vector-select', 'pen', 'smart-object', 'guides', 'shapes', 'line', 'bezier', 'text', 'pipette', 'pan', 'zoom']);
+/** Narzędzia działające wyłącznie na warstwie wektorowej. */
 const VECTOR_ONLY_TOOLS = new Set<ToolType>(['vector-select', 'pen']);
 
+/** Zakładka dokumentu z własnym silnikiem graficznym. */
 interface DocumentTab {
   id: string;
   title: string;
@@ -56,8 +70,23 @@ interface DocumentTab {
   smart?: { parentTabId: string; layerId: string; objectId: string; origFig: string | null };
 }
 
+/** Powiększenie i przesunięcie widoku jednej zakładki. */
+interface TabView {
+  zoom: number;
+  pan: { x: number; y: number };
+}
+const ZERO_PAN = { x: 0, y: 0 };
+
+/** Początkowe powiększenie dużych dokumentów, żeby mieściły się w widoku. */
+const initialZoomFor = (w: number, h: number): number => {
+  const maxDim = Math.max(w, h);
+  return maxDim > 1600 ? 0.3 : maxDim > 1000 ? 0.6 : 1.0;
+};
+
+/** Kolor akcentu zakładek obiektów inteligentnych. */
 const SMART_TAB_COLOR = '#e0a43a';
 
+/** Korzeń aplikacji: renderuje cały interfejs edytora i przechowuje jego stan. */
 export default function App() {
   const [tabs, setTabs] = useState<DocumentTab[]>(() => {
     const doc1 = new GraphicEngine('obraz1.fig', 800, 600);
@@ -65,25 +94,25 @@ export default function App() {
   });
 
   const [activeTabId, setActiveTabId] = useState<string>('tab_1');
-  /** Przełącznik na pasku stanu: Piksele (domyślnie) albo Wektory (wymiary w mm). Dokumenty obiektów inteligentnych zawsze w pikselach. */
-  const [unitMode, setUnitMode] = useState<UnitMode>('px');
-  /** Jednostka wymiarów i pól liczbowych (px / mm / cm / cal), niezależna od trybu wyświetlania. */
+  /** Jednostka wymiarów i pól liczbowych (px / mm / cm / cal). Dokumenty obiektów inteligentnych są zawsze w pikselach. */
   const [lengthUnit, setLengthUnit] = useState<LengthUnit>('px');
   const tabsRef = useRef<DocumentTab[]>([]);
   tabsRef.current = tabs;
   const activeTabIdRef = useRef('tab_1');
   activeTabIdRef.current = activeTabId;
-  const activeTab = tabs.find((t) => t.id === activeTabId) || tabs[0];
-  const engine = activeTab.engine;
-  const effectiveUnitMode: UnitMode = activeTab.smart ? 'px' : unitMode;
-  const effectiveUnit: LengthUnit = activeTab.smart ? 'px' : lengthUnit;
+  /** Aktywna zakładka; po zamknięciu wszystkich zakładek jej nie ma (wtedy pokazywany jest pusty obszar roboczy). */
+  const activeTab: DocumentTab | undefined = tabs.find((t) => t.id === activeTabId) || tabs[0];
+  /** Pusty, nigdy niepokazywany dokument: pozwala hookom działać, gdy nie ma otwartych zakładek. */
+  const [idleEngine] = useState(() => new GraphicEngine('', 1, 1));
+  const engine = activeTab ? activeTab.engine : idleEngine;
+  const effectiveUnit: LengthUnit = activeTab?.smart ? 'px' : lengthUnit;
 
   const [engineRevision, setEngineRevision] = useState(0);
   const bumpEngineRevision = useCallback(() => {
     setEngineRevision((r) => r + 1);
   }, []);
 
-  // Okno edycji korekcji nieniszczącej: zmiany są na żywo na warstwie (silnik), a OK / Anuluj kończą sesję edycji
+  // Okno edycji korekcji: zmiany są stosowane na żywo na warstwie, a OK / Anuluj kończą sesję edycji
   const [correctionDlg, setCorrectionDlg] = useState<{
     engine: GraphicEngine;
     layer: Layer;
@@ -92,7 +121,7 @@ export default function App() {
     histogram: Histogram | null;
     token: number;
   } | null>(null);
-  // Okno stylizacji warstwy (ta sama sesja podglądu na żywo co przy korekcjach)
+  // Okno stylizacji warstwy: korzysta z tej samej sesji podglądu na żywo co korekcje
   const [stylesDlg, setStylesDlg] = useState<{
     engine: GraphicEngine;
     layer: Layer;
@@ -101,7 +130,7 @@ export default function App() {
     token: number;
   } | null>(null);
   const liveRefreshRaf = useRef(0);
-  // Suwak może strzelać częściej niż klatki: odświeżenie płótna scalamy do jednego na klatkę
+  // Suwak może generować zdarzenia częściej niż klatki animacji, więc odświeżenie płótna jest scalane do jednego na klatkę
   const scheduleLiveRefresh = useCallback(() => {
     if (liveRefreshRaf.current) return;
     liveRefreshRaf.current = requestAnimationFrame(() => {
@@ -110,8 +139,11 @@ export default function App() {
     });
   }, []);
 
-  // Stan powiadomień Toast (np. dla zablokowanej warstwy)
+  // ---- Powiadomienia ----
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  // Okno „Tryb mieszania…” / „Przezroczystość…” z menu Warstwy i wspólna opcja „tylko aktywna warstwa” przy dodawaniu efektów
+  const [layerPropsDlg, setLayerPropsDlg] = useState<{ kind: 'blend' | 'opacity'; layer: Layer; blend: SKBlendMode; opacity: number } | null>(null);
+  const [corrOnlyActive, setCorrOnlyActive] = useState(true);
 
   const showToast = useCallback((msg: string) => {
     setToastMessage(msg);
@@ -135,7 +167,7 @@ export default function App() {
       let target: Layer = layer;
       let correction: Correction | null = null;
       if (opts.type && !opts.id && (layer.isGroup || layer.isAdjustment || opts.onlyActive === false)) {
-        // grupa / korekcja w stosie zaznaczona: nowa korekcja trafia do stosu (działa na warstwy pod nią)
+        // Zaznaczona grupa lub korekcja w stosie: nowa korekcja trafia do stosu i działa na warstwy pod nią
         const r = engine.beginNewAdjustmentEdit(opts.type, opts.onlyActive === false || layer.isAdjustment);
         if (r) {
           target = r.layer;
@@ -210,13 +242,13 @@ export default function App() {
     [stylesDlg, bumpEngineRevision]
   );
 
-  // Sesja edycji zakończona z zewnątrz (cofnięcie, zmiana warstwy, inna operacja na warstwach): zamknij okno
+  // Sesja edycji zakończona z zewnątrz (cofnięcie, zmiana warstwy, inna operacja na warstwach) zamyka okno
   useEffect(() => {
     if (correctionDlg && (!correctionDlg.engine.hasCorrectionSession || correctionDlg.engine.stylesEditing)) setCorrectionDlg(null);
     if (stylesDlg && !stylesDlg.engine.stylesEditing) setStylesDlg(null);
   }, [correctionDlg, stylesDlg, engineRevision]);
 
-  // Przełączenie na inny dokument zatwierdza trwającą edycję w dokumencie, w którym została rozpoczęta
+  // Przełączenie na inny dokument zatwierdza edycję trwającą w dokumencie, w którym została rozpoczęta
   useEffect(() => {
     if (correctionDlg && correctionDlg.engine !== engine) {
       correctionDlg.engine.commitCorrectionEdit();
@@ -231,11 +263,11 @@ export default function App() {
     }
   }, [engine, stylesDlg]);
 
-  // Kolory
+  // ---- Kolory ----
   const [primaryColor, setPrimaryColor] = useState<SKColor>({ r: 255, g: 0, b: 0, a: 255 });
   const [secondaryColor, setSecondaryColor] = useState<SKColor>({ r: 255, g: 255, b: 255, a: 255 });
 
-  // Ustawienia pędzla
+  // ---- Ustawienia pędzla ----
   const [brushSettings, setBrushSettings] = useState<BrushSettings>({
     size: 20,
     hardness: 90,
@@ -249,7 +281,7 @@ export default function App() {
     setBrushSettings((prev) => ({ ...prev, color: primaryColor }));
   }, [primaryColor]);
 
-  // Ustawienia pędzla korekcyjnego
+  // ---- Ustawienia pędzla korekcyjnego ----
   const [correctionBrushSettings, setCorrectionBrushSettings] = useState<CorrectionBrushSettings>({
     brushType: 'dodge-burn',
     size: 20,
@@ -263,7 +295,7 @@ export default function App() {
     setCorrectionBrushSettings((prev) => ({ ...prev, ...newSettings }));
   };
 
-  // Ustawienia pędzla podmiany koloru
+  // ---- Ustawienia pędzla podmiany koloru ----
   const [colorReplaceSettings, setColorReplaceSettings] = useState<ColorReplaceSettings>({
     size: 20,
     hardness: 90,
@@ -277,7 +309,7 @@ export default function App() {
     setColorReplaceSettings((prev) => ({ ...prev, ...newSettings }));
   };
 
-  // Ustawienia pieczątki (klonowania)
+  // ---- Ustawienia pieczątki (klonowania) ----
   const [stampSettings, setStampSettings] = useState<StampSettings>({
     size: 30,
     hardness: 85,
@@ -293,7 +325,7 @@ export default function App() {
     setStampSettings((prev) => ({ ...prev, ...newSettings }));
   };
 
-  // Ustawienia deformacji
+  // ---- Ustawienia deformacji ----
   const [deformSettings, setDeformSettings] = useState<DeformSettings>({
     actionType: 'expand-shrink',
     size: 60,
@@ -307,7 +339,7 @@ export default function App() {
     setDeformSettings((prev) => ({ ...prev, ...newSettings }));
   };
 
-  // Ustawienia zaznaczania
+  // ---- Ustawienia zaznaczania ----
   const [selectionSettings, setSelectionSettings] = useState<SelectionSettings>({
     mode: 'replace',
     constraint: 'normal',
@@ -327,7 +359,7 @@ export default function App() {
     setSelectionSettings((prev) => ({ ...prev, ...newSettings }));
   };
 
-  // Ustawienia pipety
+  // ---- Ustawienia pipety ----
   const [pipetteSettings, setPipetteSettings] = useState<PipetteSettings>({
     sampleSource: 'image',
     sampleDiameter: 1,
@@ -338,7 +370,7 @@ export default function App() {
     setPipetteSettings((prev) => ({ ...prev, ...newSettings }));
   };
 
-  // Ustawienia gradientu
+  // ---- Ustawienia gradientu ----
   const [gradientSettings, setGradientSettings] = useState<GradientSettings>({
     type: 'linear',
     repeat: 'none',
@@ -350,7 +382,7 @@ export default function App() {
     setGradientSettings((prev) => ({ ...prev, ...newSettings }));
   };
 
-  // Ustawienia figur wektorowych
+  // ---- Ustawienia figur wektorowych ----
   const [vectorShapeSettings, setVectorShapeSettings] = useState<VectorShapeSettings>({
     shapeKind: 'rect',
     fillMode: 'stroke-and-fill',
@@ -376,7 +408,7 @@ export default function App() {
     setVectorShapeSettings((prev) => ({ ...prev, ...newSettings }));
   };
 
-  // Ustawienia narzędzia tekstu
+  // ---- Ustawienia narzędzia tekstu ----
   const [textSettings, setTextSettings] = useState<TextToolSettings>({
     fontFamily: 'Arial',
     fontSize: 32,
@@ -395,19 +427,19 @@ export default function App() {
     fillColor: { r: 255, g: 255, b: 255, a: 255 },
     blendMode: 'SrcOver',
   });
-  // Zmiana ustawień przez użytkownika (pasek opcji) – edytor tekstu stosuje ją do zaznaczenia / całego tekstu
+  // Żądanie zmiany ustawień z paska opcji: edytor tekstu stosuje ją do zaznaczenia lub całego tekstu (id odróżnia kolejne żądania)
   const [textFormatRequest, setTextFormatRequest] = useState<{ id: number; patch: Partial<TextToolSettings> } | null>(null);
   const handleUpdateTextSettings = (patch: Partial<TextToolSettings>) => {
     setTextSettings((prev) => ({ ...prev, ...patch }));
     setTextFormatRequest((prev) => ({ id: (prev?.id ?? 0) + 1, patch }));
   };
-  // Synchronizacja paska opcji ze stylem w miejscu kursora (bez ponownego stosowania do tekstu)
+  // Synchronizuje pasek opcji ze stylem w miejscu kursora, bez ponownego stosowania go do tekstu
   const handleSyncTextSettings = useCallback((patch: Partial<TextToolSettings>) => {
     setTextSettings((prev) => ({ ...prev, ...patch }));
   }, []);
   const [textFocusTrigger, setTextFocusTrigger] = useState(0);
 
-  // Ustawienia linii i krzywych Beziera
+  // ---- Ustawienia linii i krzywych Beziera ----
   const [lineAndCurveSettings, setLineAndCurveSettings] = useState<LineAndCurveSettings>({
     strokeWidth: 4,
     strokeColor: { r: 255, g: 0, b: 0, a: 255 },
@@ -429,7 +461,7 @@ export default function App() {
     setLineAndCurveSettings((prev) => ({ ...prev, ...newSettings }));
   };
 
-  // Synchronizacja kolorów
+  // Obrys i wypełnienie narzędzi wektorowych oraz tekstu podążają za kolorem głównym i dodatkowym
   useEffect(() => {
     setVectorShapeSettings((prev) => ({
       ...prev,
@@ -448,27 +480,32 @@ export default function App() {
     }));
   }, [primaryColor, secondaryColor]);
 
-  // Stan aktywnej sesji wektorowej (linia, krzywa, figura)
+  // ---- Sesja wektorowa (linia, krzywa, figura) ----
   const [isLiveVectorSessionActive, setIsLiveVectorSessionActive] = useState(false);
   const [liveVectorCommitTrigger, setLiveVectorCommitTrigger] = useState(0);
   const [liveVectorCancelTrigger, setLiveVectorCancelTrigger] = useState(0);
   const [penCloseToggleTrigger, setPenCloseToggleTrigger] = useState(0);
   const [penInfo, setPenInfo] = useState({ active: false, closed: false, count: 0 });
 
-  // Narzędzia
+  // ---- Narzędzia ----
   const [activeTool, setActiveToolRaw] = useState<ToolType>('brush');
-  // Stan edycji obiektu wektorowego z narzędzia Manipulacja: rodzaj otwartej sesji (decyduje o opcjach narzędzia)
   const [guideAxis, setGuideAxis] = useState<'h' | 'v'>('v');
   const [snapEnabled, setSnapEnabled] = useState(false);
   const [guidesVisible, setGuidesVisible] = useState(true);
-  const [rightTab, setRightTab] = useState<'color' | 'props'>('color');
+  const [rightTab, setRightTab] = useState<'color' | 'props' | 'nav'>('color');
+  // Rozmiar obszaru płótna na ekranie (dla ramki widoku w Nawigatorze)
+  const [viewSize, setViewSize] = useState<{ width: number; height: number }>({ width: 0, height: 0 });
+  const [bottomTab, setBottomTab] = useState<'layers' | 'channels' | 'history'>('layers');
   const [propsState, setPropsState] = useState<{ desc: PropsDescriptor; api: PropsApi | null }>({ desc: null, api: null });
   const handlePropertiesChange = useCallback((desc: PropsDescriptor, api: PropsApi) => setPropsState({ desc, api }), []);
+  // Rodzaj otwartej sesji edycji obiektu wektorowego z narzędzia Manipulacja (decyduje o opcjach narzędzia)
   const [vectorEditKind, setVectorEditKind] = useState<'line' | 'bezier' | 'shapes' | 'text' | 'smart-object' | null>(null);
   const activeIsVector = !!engine.getActiveLayer()?.vectorTarget;
-  // Żądanie otwarcia obiektu wektorowego do edycji (kliknięcie wiersza w panelu warstw)
+  // Żądanie otwarcia obiektu wektorowego do edycji (kliknięcie wiersza w panelu warstw); n odróżnia kolejne żądania
   const [vectorEditRequest, setVectorEditRequest] = useState<{ n: number; layerIndex: number; id: string } | null>(null);
-  /** Wybór narzędzia z uwzględnieniem rodzaju aktywnej warstwy (wektorowa ma własny zestaw narzędzi). */
+  /** Wklejony obiekt do otwarcia na płótnie jak świeżo narysowany. */
+  const [vectorPasteRequest, setVectorPasteRequest] = useState<{ n: number; object: VectorObject } | null>(null);
+  /** Wybiera narzędzie z uwzględnieniem rodzaju aktywnej warstwy (wektorowa ma własny zestaw narzędzi); niedozwolone narzędzie jest odrzucane z powiadomieniem. */
   const setActiveTool = useCallback(
     (tool: ToolType) => {
       const vec = !!engine.getActiveLayer()?.vectorTarget;
@@ -484,14 +521,14 @@ export default function App() {
     },
     [engine, showToast]
   );
-  // Zmiana aktywnej warstwy na wektorową / rastrową: narzędzie spoza zestawu zamieniane na domyślne
+  // Narzędzie spoza zestawu aktywnej warstwy (wektorowej lub rastrowej) jest zastępowane domyślnym
   useEffect(() => {
     if (activeIsVector && !VECTOR_LAYER_TOOLS.has(activeTool)) setActiveToolRaw('vector-select');
     else if (!activeIsVector && VECTOR_ONLY_TOOLS.has(activeTool)) setActiveToolRaw('brush');
   }, [activeIsVector, activeTool]);
-  // Przejście do zakładki z aktywną warstwą rastrową przy narzędziu obiektu inteligentnego: od razu pędzel. Po powrocie do zakładki,
-  // z której narzędzie zostało w ten sposób zabrane (np. po wstawieniu obiektu otwiera się jego zakładka), wraca obiekt inteligentny.
-  // Ten efekt jest po efekcie powyżej, więc jego ustawienie narzędzia wygrywa.
+  // Przełączenie na zakładkę z aktywną warstwą rastrową przy narzędziu obiektu inteligentnego zmienia je na pędzel.
+  // Po powrocie do zakładki, z której narzędzie zostało w ten sposób zabrane (np. po wstawieniu obiektu otwiera się jego zakładka),
+  // wraca narzędzie obiektu inteligentnego. Efekt następuje po efekcie powyżej, więc jego ustawienie narzędzia ma pierwszeństwo.
   const prevTabRef = useRef(activeTabId);
   const smartToolLeftRef = useRef<Set<string>>(new Set());
   useEffect(() => {
@@ -504,7 +541,7 @@ export default function App() {
     } else if (smartToolLeftRef.current.delete(activeTabId) && activeIsVector && (activeTool === 'brush' || activeTool === 'vector-select')) {
       setActiveToolRaw('smart-object');
     }
-    // tylko przy zmianie zakładki
+    // Tylko przy zmianie zakładki
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTabId]);
 
@@ -516,9 +553,31 @@ export default function App() {
     }
   }, [activeTool, engine, bumpEngineRevision]);
 
-  // Widok (Zoom i Pan)
-  const [zoom, setZoom] = useState<number>(1.0);
-  const [panOffset, setPanOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  // ---- Widok (powiększenie i przesunięcie) ----
+  // Każda zakładka ma własne powiększenie i przesunięcie: zmiana widoku w jednym dokumencie nie rusza pozostałych
+  const [views, setViews] = useState<Record<string, TabView>>({ tab_1: { zoom: 1, pan: ZERO_PAN } });
+  const activeView = views[activeTabId];
+  const zoom = activeView?.zoom ?? 1;
+  const panOffset = activeView?.pan ?? ZERO_PAN;
+  const setZoom = useCallback((z: number | ((prev: number) => number)) => {
+    const id = activeTabIdRef.current;
+    setViews((prev) => {
+      const cur = prev[id] ?? { zoom: 1, pan: ZERO_PAN };
+      const next = typeof z === 'function' ? z(cur.zoom) : z;
+      return next === cur.zoom && prev[id] ? prev : { ...prev, [id]: { ...cur, zoom: next } };
+    });
+  }, []);
+  const setPanOffset = useCallback((p: { x: number; y: number }) => {
+    const id = activeTabIdRef.current;
+    setViews((prev) => {
+      const cur = prev[id] ?? { zoom: 1, pan: ZERO_PAN };
+      return prev[id] && cur.pan.x === p.x && cur.pan.y === p.y ? prev : { ...prev, [id]: { ...cur, pan: p } };
+    });
+  }, []);
+  /** Ustawia widok konkretnej zakładki (także takiej, która dopiero staje się aktywna). */
+  const setViewOf = useCallback((id: string, zoomValue: number) => {
+    setViews((prev) => ({ ...prev, [id]: { zoom: zoomValue, pan: ZERO_PAN } }));
+  }, []);
 
   const [isNewDocModalOpen, setIsNewDocModalOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -527,7 +586,28 @@ export default function App() {
     setBrushSettings((prev) => ({ ...prev, ...newSettings }));
   };
 
-  /** Składa dokument obiektu inteligentnego do jednej bitmapy i zapisuje go w obiekcie dokumentu nadrzędnego. */
+  /** Szybka regulacja rozmiaru, twardości, odstępów i krycia aktywnego narzędzia pędzlowego (mysz i klawiatura). */
+  const adjustBrushParams = useCallback((tool: ToolType, f: BrushAdjustFns) => {
+    const apply = <T extends { size: number; hardness: number; spacing: number }>(s: T): T => ({
+      ...s,
+      ...(f.size ? { size: clampSize(f.size(s.size)) } : {}),
+      ...(f.hardness ? { hardness: clampPct(f.hardness(s.hardness)) } : {}),
+      ...(f.spacing ? { spacing: clampSpacing(f.spacing(s.spacing)) } : {}),
+    });
+    // przezroczystość (w narzędziach: Intensywność, Krycie) to alfa koloru głównego, wspólna dla wszystkich narzędzi pędzlowych
+    if (f.opacity && supportsOpacity(tool)) {
+      const fo = f.opacity;
+      setPrimaryColor((prev) => ({ ...prev, a: pctToAlpha(Math.max(1, fo(alphaToPct(prev.a)))) }));
+    }
+    if (tool === 'brush' || tool === 'eraser') {
+      setBrushSettings(apply);
+    } else if (tool === 'correction-brush') setCorrectionBrushSettings(apply);
+    else if (tool === 'color-replace') setColorReplaceSettings(apply);
+    else if (tool === 'stamp') setStampSettings(apply);
+    else if (tool === 'deform') setDeformSettings(apply);
+  }, []);
+
+  /** Składa dokument obiektu inteligentnego do jednej bitmapy i zapisuje go w obiekcie dokumentu nadrzędnego; nic nie robi, gdy zawartość się nie zmieniła. */
   const flushSmartTab = useCallback((tab: DocumentTab | undefined): void => {
     if (!tab?.smart) return;
     const parent = tabsRef.current.find((t) => t.id === tab.smart!.parentTabId);
@@ -543,14 +623,22 @@ export default function App() {
     }
   }, [bumpEngineRevision]);
 
+  /** Otwiera zawartość obiektu inteligentnego w osobnej zakładce tuż za zakładką nadrzędną albo przełącza na już otwartą. */
   const handleOpenSmartObject = useCallback((layerId: string, objectId: string) => {
     const cur = tabsRef.current.find((t) => t.id === activeTabIdRef.current);
     if (!cur) return;
     cur.engine.finishOpenSessions();
+    // „Obraz z dysku” nie ma zakładki: dwuklik przywraca dostęp do pliku albo pozwala wskazać inny
+    const dobj = cur.engine.vec.findDiskImage(layerId, objectId);
+    if (dobj?.disk) {
+      void reconnectDiskImage(dobj.disk).then((ref) => {
+        if (ref && cur.engine.vec.relinkDiskImage(layerId, objectId, ref)) bumpEngineRevision();
+      });
+      return;
+    }
     const existing = tabsRef.current.find((t) => t.smart && t.smart.parentTabId === cur.id && t.smart.objectId === objectId);
     if (existing) {
       setActiveTabId(existing.id);
-      setPanOffset({ x: 0, y: 0 });
       bumpEngineRevision();
       return;
     }
@@ -577,21 +665,66 @@ export default function App() {
         while (ins < prev.length && prev[ins].smart?.parentTabId === cur.id) ins++;
         return [...prev.slice(0, ins), tab, ...prev.slice(ins)];
       });
+      setViewOf(tab.id, initialZoomFor(child.width, child.height));
       setActiveTabId(tab.id);
-      const maxDim = Math.max(child.width, child.height);
-      setZoom(maxDim > 1600 ? 0.3 : maxDim > 1000 ? 0.6 : 1.0);
-      setPanOffset({ x: 0, y: 0 });
       bumpEngineRevision();
     })();
-  }, [bumpEngineRevision]);
+  }, [bumpEngineRevision, setViewOf]);
 
-  /** Zakładka obiektu inteligentnego nosi nazwę obiektu z warstwy na obrazie nadrzędnym (zmienia się razem z nią). */
+  /** Zwraca tytuł zakładki; zakładka obiektu inteligentnego nosi nazwę obiektu z dokumentu nadrzędnego i zmienia się razem z nią. */
   const smartTabTitle = (t: DocumentTab): string => {
     if (!t.smart) return t.title;
     const parent = tabs.find((x) => x.id === t.smart!.parentTabId);
     const obj = parent ? parent.engine.vec.findSmart(t.smart.layerId, t.smart.objectId) : null;
     return obj ? vectorObjectLabel(obj) : t.title;
   };
+
+  useEffect(() => {
+    setDiskReadyHook((key) => {
+      for (const t of tabsRef.current) t.engine.vec.refreshDiskImage(key);
+      bumpEngineRevision();
+    });
+    return () => setDiskReadyHook(null);
+  }, [bumpEngineRevision]);
+
+  /** Ponownie wczytuje z dysku wszystkie obrazy z dysku użyte w bieżącym dokumencie (po zmianie plików w czasie pracy). */
+  const refreshDiskImages = useCallback(() => {
+    const seen = new Set<string>();
+    for (const l of engine.layers) {
+      for (const o of [...l.vectorObjects, ...l.maskObjects]) {
+        if (o.kind === 'smart' && o.disk && !seen.has(o.disk.key)) {
+          seen.add(o.disk.key);
+          void ensureDiskImage(o.disk, true);
+        }
+      }
+    }
+    showToast(seen.size ? `Odświeżanie obrazów z dysku: ${seen.size}` : 'W dokumencie nie ma obrazów z dysku.');
+  }, [engine, showToast]);
+
+  /** „Obraz z dysku”: okno wyboru pliku, potem wstawienie obiektu jak świeżo narysowanego (z uchwytami, na wierzchu). */
+  const insertDiskImage = useCallback(async () => {
+    const act = engine.getActiveLayer();
+    if (!act || !act.vectorTarget || act.locked || !act.ownVisible) {
+      showToast('Obraz z dysku można wstawić tylko do widocznej, odblokowanej warstwy wektorowej.');
+      return;
+    }
+    const ref = await pickDiskImage();
+    if (!ref) return;
+    if (engine.getActiveLayer() !== act) return;
+    engine.finishOpenSessions();
+    engine.vec.settle();
+    engine.vec.clearSelection();
+    const fit = Math.min(1, (engine.width * 0.6) / ref.w, (engine.height * 0.6) / ref.h);
+    const obj: VectorObject = {
+      id: newVectorId(), name: null, visible: true, kind: 'smart',
+      center: { x: engine.width / 2, y: engine.height / 2 },
+      width: Math.max(1, ref.w * fit), height: Math.max(1, ref.h * fit), angle: 0, flipX: false, flipY: false,
+      docW: ref.w, docH: ref.h, fig: null, png: null, disk: ref, settings: { blendMode: smartSettings.blendMode },
+    };
+    setVectorPasteRequest((r) => ({ n: (r?.n ?? 0) + 1, object: obj }));
+    setActiveToolRaw('smart-object');
+    bumpEngineRevision();
+  }, [engine, showToast, bumpEngineRevision, smartSettings.blendMode]);
 
   useEffect(() => {
     setSmartReadyHook(() => {
@@ -606,28 +739,28 @@ export default function App() {
       engine.finishOpenSessions();
       flushSmartTab(tabs.find((t) => t.id === activeTabId));
     }
+    // Widok (powiększenie i przesunięcie) zostaje zapamiętany osobno dla każdej zakładki
     setActiveTabId(id);
-    const selectedTab = tabs.find((t) => t.id === id);
-    if (selectedTab) {
-      const maxDim = Math.max(selectedTab.engine.width, selectedTab.engine.height);
-      if (maxDim > 1600) {
-        setZoom(0.3);
-      } else if (maxDim > 1000) {
-        setZoom(0.6);
-      } else {
-        setZoom(1.0);
-      }
-    }
-    setPanOffset({ x: 0, y: 0 });
     bumpEngineRevision();
   };
 
+  /**
+   * Zatwierdza wszystko, co jest w toku w aktywnej zakładce (rysowany obiekt, przekształcenie, gradient, wiadro),
+   * zanim aktywna stanie się inna zakładka. Dzięki temu rozpoczęty obiekt zostaje w dokumencie, w którym go zaczęto.
+   */
+  const leaveActiveTab = () => {
+    const cur = tabsRef.current.find((t) => t.id === activeTabIdRef.current);
+    if (!cur) return;
+    cur.engine.finishOpenSessions();
+    flushSmartTab(cur);
+  };
+
   const handleCloseTab = (id: string) => {
-    if (tabs.length <= 1) return;
     const closing = tabs.find((t) => t.id === id);
+    if (!closing) return;
     closing?.engine.finishOpenSessions();
     flushSmartTab(closing);
-    // zamknięcie dokumentu zamyka też jego obiekty inteligentne (ich zawartość jest już w obiektach)
+    // Zamknięcie dokumentu zamyka też jego obiekty inteligentne (ich zawartość jest już zapisana w obiektach)
     const dropped = new Set<string>([id]);
     let grew = true;
     while (grew) {
@@ -636,17 +769,22 @@ export default function App() {
     }
     for (const t of tabs) if (dropped.has(t.id) && t.id !== id) flushSmartTab(t);
     const remaining = tabs.filter((t) => !dropped.has(t.id));
-    if (remaining.length === 0) return;
     setTabs(remaining);
+    setViews((prev) => {
+      const next = { ...prev };
+      for (const d of dropped) delete next[d];
+      return next;
+    });
     if (dropped.has(activeTabId)) {
-      const back = closing?.smart && remaining.find((t) => t.id === closing.smart!.parentTabId);
-      setActiveTabId((back ?? remaining[0]).id);
-      setPanOffset({ x: 0, y: 0 });
+      // Zamknięcie ostatniej zakładki zostawia pusty obszar roboczy (bez aktywnego dokumentu)
+      const back = closing.smart && remaining.find((t) => t.id === closing.smart!.parentTabId);
+      setActiveTabId((back ?? remaining[0])?.id ?? '');
     }
     bumpEngineRevision();
   };
 
   const handleCreateNewDocument = (title: string, width: number, height: number, dpi: number = 96) => {
+    leaveActiveTab();
     const newDoc = new GraphicEngine(title, width, height);
     newDoc.dpi = dpi;
     const newTab: DocumentTab = {
@@ -655,20 +793,10 @@ export default function App() {
       engine: newDoc,
     };
     setTabs((prev) => [...prev, newTab]);
-    setActiveTabId(newTab.id);
 
     const maxDim = Math.max(width, height);
-    if (maxDim >= 3000) {
-      setZoom(0.25);
-    } else if (maxDim >= 1800) {
-      setZoom(0.4);
-    } else if (maxDim >= 1200) {
-      setZoom(0.7);
-    } else {
-      setZoom(1.0);
-    }
-
-    setPanOffset({ x: 0, y: 0 });
+    setViewOf(newTab.id, maxDim >= 3000 ? 0.25 : maxDim >= 1800 ? 0.4 : maxDim >= 1200 ? 0.7 : 1.0);
+    setActiveTabId(newTab.id);
     bumpEngineRevision();
   };
 
@@ -687,16 +815,17 @@ export default function App() {
         const newEngine = new GraphicEngine(file.name, 800, 600);
         const success = await newEngine.loadFromFigFile(text);
         if (success) {
+          // Obiekt rysowany w dotychczasowej zakładce zostaje w niej zatwierdzony
+          leaveActiveTab();
           const newTab: DocumentTab = {
             id: `tab_${Date.now()}`,
             title: file.name.replace(/\.fig$/, ''),
             engine: newEngine,
           };
           setTabs((prev) => [...prev, newTab]);
-          setActiveTabId(newTab.id);
           const maxDim = Math.max(newEngine.width, newEngine.height);
-          setZoom(maxDim >= 2000 ? 0.35 : 1.0);
-          setPanOffset({ x: 0, y: 0 });
+          setViewOf(newTab.id, maxDim >= 2000 ? 0.35 : 1.0);
+          setActiveTabId(newTab.id);
           bumpEngineRevision();
         }
       };
@@ -707,7 +836,17 @@ export default function App() {
         const dataUrl = ev.target?.result as string;
         const img = new Image();
         img.onload = () => {
-          engine.importImage(img, file.name);
+          if (!tabsRef.current.length) {
+            // Bez otwartych dokumentów obraz otwiera się jako nowy dokument o jego rozmiarze
+            const doc = new GraphicEngine(file.name, img.naturalWidth || img.width, img.naturalHeight || img.height);
+            doc.importImage(img, file.name);
+            const tab: DocumentTab = { id: `tab_${Date.now()}`, title: file.name.replace(/\.[^/.]+$/, ''), engine: doc };
+            setTabs([tab]);
+            setViewOf(tab.id, initialZoomFor(doc.width, doc.height));
+            setActiveTabId(tab.id);
+          } else {
+            engine.importImage(img, file.name);
+          }
           bumpEngineRevision();
         };
         img.src = dataUrl;
@@ -718,6 +857,7 @@ export default function App() {
   };
 
   const handleSaveFig = () => {
+    if (!activeTab) return;
     for (const t of tabs) if (t.smart) flushSmartTab(t);
     const jsonStr = engine.saveToFigFile();
     const blob = new Blob([jsonStr], { type: 'application/json' });
@@ -731,6 +871,7 @@ export default function App() {
   };
 
   const handleExportPng = () => {
+    if (!activeTab) return;
     const dataUrl = engine.exportPng();
     const a = document.createElement('a');
     a.href = dataUrl;
@@ -740,6 +881,7 @@ export default function App() {
   };
 
   const handleExportJpg = () => {
+    if (!activeTab) return;
     const dataUrl = engine.exportJpeg();
     const a = document.createElement('a');
     a.href = dataUrl;
@@ -748,7 +890,7 @@ export default function App() {
     a.click();
   };
 
-  /** Aktywna warstwa wektorowa: jej indeks i zaznaczone obiekty (z otwartą edycją włącznie). */
+  /** Zwraca indeks aktywnej warstwy wektorowej i zaznaczone na niej obiekty (z otwartą edycją włącznie) albo null, gdy nic nie zaznaczono. */
   const vectorSelection = useCallback((): { idx: number; ids: string[] } | null => {
     const l = engine.getActiveLayer();
     if (!l || !l.vectorTarget) return null;
@@ -774,7 +916,7 @@ export default function App() {
     img.src = url;
   }), []);
 
-  /** Wkleja raster na warstwę wektorową jako obiekt inteligentny. */
+  /** Wkleja raster na warstwę wektorową jako obiekt inteligentny; gdy to niemożliwe, pokazuje powiadomienie. */
   const pasteAsSmart = useCallback((canvas: HTMLCanvasElement | null) => {
     if (!canvas || !engine.pasteCanvasAsSmart(canvas)) {
       showToast('Nie można wkleić obrazu jako obiektu inteligentnego (warstwa zablokowana lub pusty obraz)');
@@ -792,6 +934,13 @@ export default function App() {
   }, [engine, showToast, bumpEngineRevision]);
 
   const handleCut = useCallback(() => {
+    // obiekt rysowany lub edytowany na płótnie (jeszcze niezatwierdzony): kopia i usunięcie
+    const pending = engine.pendingVectorObject();
+    if (pending && engine.cutPendingObject(pending)) {
+      lastCopyRef.current = 'objects';
+      bumpEngineRevision();
+      return;
+    }
     if (engine.getActiveLayer()?.vectorTarget) {
       const vs = vectorSelection();
       if (!vs) showToast('Zaznacz obiekty wektorowe, aby je wyciąć');
@@ -814,6 +963,12 @@ export default function App() {
   }, [engine, bumpEngineRevision, showToast, vectorSelection]);
 
   const handleCopy = useCallback(() => {
+    // obiekt rysowany lub edytowany na płótnie (jeszcze niezatwierdzony) kopiujemy od razu, w jego bieżącym stanie
+    const pending = engine.pendingVectorObject();
+    if (pending && engine.copyPendingObject(pending)) {
+      lastCopyRef.current = 'objects';
+      return;
+    }
     if (engine.getActiveLayer()?.vectorTarget) {
       const vs = vectorSelection();
       if (!vs) showToast('Zaznacz obiekty wektorowe, aby je skopiować');
@@ -824,6 +979,7 @@ export default function App() {
     engine.copy();
   }, [engine, vectorSelection, showToast]);
 
+  /** Wkleja obraz spoza aplikacji jako nową zawartość wyśrodkowaną na płótnie dokumentu. */
   const pasteExternalBlob = useCallback((file: File | Blob) => {
     const img = new Image();
     img.onload = () => {
@@ -844,6 +1000,7 @@ export default function App() {
     img.src = URL.createObjectURL(file);
   }, [engine, bumpEngineRevision, showToast]);
 
+  /** Wkleja obraz: własny bufor aplikacji z dokładnymi pikselami i maską albo obraz zewnętrzny (na warstwie wektorowej jako obiekt inteligentny). */
   const pasteImageBlob = useCallback((file: File | Blob) => {
     if (engine.getActiveLayer()?.vectorTarget) {
       void blobToCanvas(file).then(pasteAsSmart);
@@ -856,7 +1013,7 @@ export default function App() {
         return;
       }
     }
-    // Własna kopia aplikacji: wklejamy bufor wewnętrzny (dokładne piksele i maska), a nie obraz zdekodowany z PNG
+    // Własna kopia aplikacji: wklejany jest bufor wewnętrzny (dokładne piksele i maska), a nie obraz zdekodowany z PNG
     engine.isOwnClipboardBlob(file).then((own) => {
       if (own && engine.paste()) {
         setActiveTool('transform-content');
@@ -867,7 +1024,31 @@ export default function App() {
     });
   }, [engine, bumpEngineRevision, showToast, pasteExternalBlob, blobToCanvas, pasteAsSmart]);
 
+  /** Wkleja ze schowka systemowego lub wewnętrznego bufora aplikacji; na warstwie wektorowej wkleja obiekty albo raster jako obiekt inteligentny. */
+  /**
+   * Wkleja jeden skopiowany obiekt jak świeżo narysowany: zatwierdza obiekt (lub obiekty) dotychczas edytowany, a wklejony
+   * otwiera na płótnie z uchwytami, w narzędziu jego rodzaju, gotowy do przesuwania i edycji. Zwraca false, gdy to niemożliwe.
+   */
+  const pasteAsNewObject = useCallback((inPlace: boolean): boolean => {
+    const act = engine.getActiveLayer();
+    if (!act || engine.vec.clipboardCount !== 1) return false;
+    if (act.vectorTarget ? act.locked || !act.ownVisible : !!engine.pixelEditBlockReason()) return false;
+    // obiekt inteligentny istnieje tylko na warstwie wektorowej; na rastrowej wklejany jest jako obraz
+    if (!act.vectorTarget && engine.vec.clipboardSingleKind === 'smart') return false;
+    engine.finishOpenSessions();
+    engine.vec.settle();
+    engine.vec.clearSelection();
+    const obj = engine.vec.takePasteCopy(inPlace);
+    if (!obj) return false;
+    const tool: ToolType = obj.kind === 'line' ? 'line' : obj.kind === 'path' ? 'bezier' : obj.kind === 'smart' ? 'smart-object' : obj.kind === 'text' ? 'text' : 'shapes';
+    setVectorPasteRequest((r) => ({ n: (r?.n ?? 0) + 1, object: obj }));
+    setActiveToolRaw(tool);
+    bumpEngineRevision();
+    return true;
+  }, [engine, bumpEngineRevision]);
+
   const handlePaste = useCallback((inPlace?: boolean) => {
+    if (lastCopyRef.current === 'objects' && engine.vec.hasClipboard && pasteAsNewObject(inPlace === true)) return;
     if (engine.getActiveLayer()?.vectorTarget) {
       const idx = engine.layers.indexOf(engine.getActiveLayer()!);
       const pasteObjs = () => {
@@ -876,12 +1057,12 @@ export default function App() {
         else setActiveToolRaw('vector-select');
         bumpEngineRevision();
       };
-      // ostatnio skopiowane obiekty wektorowe: wklej je (tak jak dotąd)
+      // Ostatnio skopiowane obiekty wektorowe są wklejane jako obiekty
       if (lastCopyRef.current === 'objects' && engine.vec.hasClipboard) {
         pasteObjs();
         return;
       }
-      // raster (schowek systemowy lub wewnętrzny) trafia do warstwy wektorowej jako obiekt inteligentny
+      // Raster (ze schowka systemowego lub wewnętrznego) trafia na warstwę wektorową jako obiekt inteligentny
       const fallback = () => {
         if (engine.clipboardCanvas) pasteAsSmart(engine.clipboardCanvas);
         else pasteObjs();
@@ -917,7 +1098,7 @@ export default function App() {
         return;
       }
     }
-    // 1. Najpierw spróbuj odczytać aktualny obraz ze schowka systemowego (zrzuty ekranu, skopiowane obrazy z przeglądarki/OS)
+    // Najpierw próba odczytu obrazu ze schowka systemowego (zrzuty ekranu, obrazy skopiowane z przeglądarki lub systemu)
     if (navigator.clipboard && typeof navigator.clipboard.read === 'function') {
       navigator.clipboard
         .read()
@@ -933,7 +1114,7 @@ export default function App() {
               break;
             }
           }
-          // Jeśli w schowku systemowym NIE MA obrazu, wklej bufor wewnętrzny aplikacji
+          // Brak obrazu w schowku systemowym: wklejany jest bufor wewnętrzny aplikacji
           if (!foundImage && engine.paste()) {
             setActiveTool('transform-content');
             bumpEngineRevision();
@@ -955,11 +1136,12 @@ export default function App() {
 
   useEffect(() => {
     const handleGlobalPaste = (e: ClipboardEvent) => {
+      if (!tabsRef.current.length) return;
       if (['INPUT', 'SELECT', 'TEXTAREA'].includes((e.target as HTMLElement)?.tagName)) return;
 
       const clipboardData = e.clipboardData;
       if (clipboardData) {
-        // 1. Sprawdź e.clipboardData.items (standard dla zrzutów ekranu / obrazów z OS - BEZ wyskakującego przycisku zgody!)
+        // Elementy clipboardData.items: standardowe źródło zrzutów ekranu i obrazów z systemu, odczyt nie wymaga zgody użytkownika
         if (clipboardData.items && clipboardData.items.length > 0) {
           for (const item of Array.from(clipboardData.items)) {
             if (item.type.startsWith('image/')) {
@@ -974,7 +1156,7 @@ export default function App() {
           }
         }
 
-        // 2. Sprawdź e.clipboardData.files
+        // Pliki z clipboardData.files
         if (clipboardData.files && clipboardData.files.length > 0) {
           for (const file of Array.from(clipboardData.files)) {
             if (file.type.startsWith('image/')) {
@@ -987,7 +1169,7 @@ export default function App() {
         }
       }
 
-      // 3. Jeśli brak obrazu w zdarzeniu schowka, wklej ze schowka wewnętrznego aplikacji (również BEZ przycisku zgody!)
+      // Brak obrazu w zdarzeniu schowka: wklejany jest bufor wewnętrzny aplikacji (również bez zgody użytkownika)
       if (engine.clipboardCanvas) {
         e.preventDefault();
         e.stopPropagation();
@@ -1005,12 +1187,23 @@ export default function App() {
   const isLiveVectorSessionActiveRef = useRef(false);
   isLiveVectorSessionActiveRef.current = isLiveVectorSessionActive;
 
-  // Skróty klawiszowe
+  // ---- Skróty klawiszowe ----
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const activeEl = document.activeElement as HTMLElement | null;
-      // Edytor tekstu na płótnie sam obsługuje wszystkie skróty (Ctrl+Z, Ctrl+A, Ctrl+C/V/X...)
+      // Edytor tekstu na płótnie sam obsługuje wszystkie skróty (Ctrl+Z, Ctrl+A, Ctrl+C/V/X itd.)
       if (activeEl?.dataset?.figuraTextEditor === '1') return;
+      // Bez otwartych dokumentów działają tylko skróty Nowy i Otwórz
+      if (!tabsRef.current.length) {
+        if ((e.ctrlKey || e.metaKey) && (e.key === 'n' || e.key === 'N')) {
+          e.preventDefault();
+          setIsNewDocModalOpen(true);
+        } else if ((e.ctrlKey || e.metaKey) && (e.key === 'o' || e.key === 'O')) {
+          e.preventDefault();
+          handleOpenFilePicker();
+        }
+        return;
+      }
       const isTextEditing =
         activeEl?.tagName === 'TEXTAREA' ||
         (activeEl?.tagName === 'INPUT' &&
@@ -1084,7 +1277,7 @@ export default function App() {
         } else if (e.key === '0') {
           e.preventDefault();
           setZoom(1.0);
-          setPanOffset({ x: 0, y: 0 });
+          setPanOffset(ZERO_PAN);
           return;
         }
       }
@@ -1119,21 +1312,14 @@ export default function App() {
       else if (key === 'x') {
         setPrimaryColor(secondaryColor);
         setSecondaryColor(primaryColor);
-      } else if (e.key === '[' || e.key === ']') {
-        const delta = e.key === ']' ? 5 : -5;
-        if (activeTool === 'brush' || activeTool === 'eraser') {
-          setBrushSettings((prev) => ({ ...prev, size: Math.max(1, Math.min(2000, prev.size + delta)) }));
-        } else if (activeTool === 'correction-brush') {
-          setCorrectionBrushSettings((prev) => ({ ...prev, size: Math.max(1, Math.min(2000, prev.size + delta)) }));
-        } else if (activeTool === 'color-replace') {
-          setColorReplaceSettings((prev) => ({ ...prev, size: Math.max(1, Math.min(2000, prev.size + delta)) }));
-        } else if (activeTool === 'stamp') {
-          setStampSettings((prev) => ({ ...prev, size: Math.max(1, Math.min(2000, prev.size + delta)) }));
-        } else if (activeTool === 'deform') {
-          setDeformSettings((prev) => ({ ...prev, size: Math.max(1, Math.min(2000, prev.size + delta)) }));
-        }
+      } else if (e.code === 'BracketLeft' || e.code === 'BracketRight' || e.key === '[' || e.key === ']' || e.key === '{' || e.key === '}') {
+        // [ ] = rozmiar (proporcjonalnie), Shift + [ ] = twardość ±10; kod klawisza działa też na układach, gdzie nawiasy wymagają AltGr
+        const dir: 1 | -1 = e.code === 'BracketRight' || e.key === ']' || e.key === '}' ? 1 : -1;
+        if (e.altKey) return;
+        if (e.shiftKey) adjustBrushParams(activeTool, { hardness: (v) => v + dir * 10 });
+        else adjustBrushParams(activeTool, { size: (v) => stepSize(v, dir) });
       } else if (e.key === 'Delete' && !isLiveVectorSessionActiveRef.current && !engine.getActiveLayer()?.vectorTarget) {
-        // Przy aktywnej sesji (np. krzywa) Delete należy do sesji (usuwa węzeł), a nie czyści warstwy
+        // Przy aktywnej sesji (np. krzywej) Delete należy do sesji (usuwa węzeł), a nie czyści warstwy
         const mask = engine.selectionManager.hasActiveSelection ? engine.selectionManager.maskCanvas : null;
         engine.getActiveLayer()?.clear(mask);
         bumpEngineRevision();
@@ -1142,7 +1328,208 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [engine, primaryColor, secondaryColor, activeTool, bumpEngineRevision, handleCut, handleCopy, handlePaste]);
+  }, [engine, primaryColor, secondaryColor, activeTool, bumpEngineRevision, handleCut, handleCopy, handlePaste, adjustBrushParams]);
+
+  // ---- Operacje na warstwach: wspólne dla panelu warstw i menu „Warstwy” ----
+  const flushPendingSessions = () => {
+    if (engine.bucketSeedPoint) engine.commitPaintBucketSession();
+    if (engine.gradientStartPoint) engine.commitGradientSession();
+  };
+  const opAddLayer = () => {
+    flushPendingSessions();
+    engine.addLayer();
+    bumpEngineRevision();
+  };
+  const opAddVectorLayer = () => {
+    flushPendingSessions();
+    engine.addVectorLayer();
+    setActiveToolRaw('vector-select');
+    bumpEngineRevision();
+  };
+  const opAddGroup = () => {
+    flushPendingSessions();
+    engine.addGroup();
+    bumpEngineRevision();
+  };
+  const opRemove = () => {
+    const vs = vectorSelection();
+    if (vs) {
+      // Przy zaznaczonych obiektach wektorowych usuwane są one, a nie cała warstwa
+      if (!engine.vec.deleteObjects(vs.idx, vs.ids)) showToast('Nie można usunąć obiektów: warstwa jest zablokowana');
+      bumpEngineRevision();
+      return;
+    }
+    flushPendingSessions();
+    const act = engine.getActiveLayer();
+    // Zaznaczona maska: usuwa tylko maskę. Zaznaczona warstwa: usuwa warstwę razem z ewentualną maską
+    if (!engine.selectedCorrection && act?.hasMask && act.editMask) {
+      engine.removeLayerMask(false);
+      bumpEngineRevision();
+      return;
+    }
+    if (!engine.selectedCorrection && act && engine.correctionsLocked(act) && (act.isGroup || act.isAdjustment || act.locked)) {
+      showToast(act.isGroup ? 'Nie można usunąć zablokowanej grupy' : 'Nie można usunąć zablokowanej warstwy');
+      return;
+    }
+    engine.removeActiveLayer();
+    bumpEngineRevision();
+  };
+  const opDuplicate = () => {
+    const vs = vectorSelection();
+    if (vs) {
+      if (engine.vec.duplicateObjects(vs.idx, vs.ids).length === 0) showToast('Nie można zduplikować obiektów: warstwa jest zablokowana');
+      else setActiveToolRaw('vector-select');
+      bumpEngineRevision();
+      return;
+    }
+    flushPendingSessions();
+    engine.duplicateActiveLayer();
+    bumpEngineRevision();
+  };
+  /** Przycisk panelu: „Zastosuj efekty” (gdy są efekty) albo scalenie z warstwą poniżej. */
+  const opMergeDown = () => {
+    if (engine.applyEffectsMode !== 'none') {
+      if (!engine.applyEffects()) showToast('Nie można zastosować efektów: warstwa jest zablokowana albo pod korekcją leży warstwa wektorowa (jej piksele są wyliczane z obiektów)');
+      bumpEngineRevision();
+      return;
+    }
+    if (!engine.mergeLayerDown()) {
+      showToast('Nie można scalić: warstwa jest zablokowana albo poniżej jest granica grupy lub korekcja');
+      return;
+    }
+    bumpEngineRevision();
+  };
+  const opMoveUp = () => {
+    const vs = vectorSelection();
+    if (vs) {
+      engine.vec.shiftObjects(vs.idx, vs.ids, 1);
+      bumpEngineRevision();
+      return;
+    }
+    engine.moveActiveLayerUp();
+    bumpEngineRevision();
+  };
+  const opMoveDown = () => {
+    const vs = vectorSelection();
+    if (vs) {
+      engine.vec.shiftObjects(vs.idx, vs.ids, -1);
+      bumpEngineRevision();
+      return;
+    }
+    engine.moveActiveLayerDown();
+    bumpEngineRevision();
+  };
+  /** Menu „Spłaszcz w dół”: efekty i maska warstwy (oraz warstwy poniżej) są wpiekane w scalony obraz jednym krokiem historii. */
+  const opFlattenDown = () => {
+    flushPendingSessions();
+    const act = engine.getActiveLayer();
+    if (!act) return;
+    if (act.isAdjustment) {
+      if (!engine.applyEffects()) showToast('Nie można wpiec korekcji: jest zablokowana albo pod nią leży warstwa wektorowa');
+    } else if (!engine.mergeLayerDown()) {
+      showToast(act.isGroup ? 'Nie można spłaszczyć: grupa jest zablokowana' : 'Nie można spłaszczyć w dół: warstwa jest zablokowana albo poniżej jest granica grupy lub korekcja');
+    }
+    bumpEngineRevision();
+  };
+  const opFlattenAll = () => {
+    flushPendingSessions();
+    const hidden = engine.layers.filter((l) => !l.isGroup && !l.isAdjustment && !l.visible).length;
+    if (hidden > 0 && !window.confirm(`Spłaszczenie usunie ukryte warstwy (${hidden}). Kontynuować?`)) return;
+    const r = engine.flattenImage();
+    if (!r.ok) showToast(r.reason);
+    else if (r.dropped > 0) showToast(`Obraz spłaszczony; usunięto ukryte warstwy: ${r.dropped}`);
+    bumpEngineRevision();
+  };
+  const opTransform = (op: LayerTransformOp) => {
+    flushPendingSessions();
+    const r = engine.transformLayerContent(engine.activeLayerIndex, op);
+    if ('error' in r) showToast(r.error);
+    else if (r.clipped) showToast('Część zawartości po obrocie wyszła poza obraz');
+    bumpEngineRevision();
+  };
+  const openLayerProps = (kind: 'blend' | 'opacity') => {
+    const l = engine.getActiveLayer();
+    if (!l || l.isAdjustment) return;
+    setLayerPropsDlg({ kind, layer: l, blend: l.blendMode || (l.isGroup ? 'PassThrough' : 'SrcOver'), opacity: l.opacity });
+  };
+  const opMaskTarget = () => {
+    const l = engine.getActiveLayer();
+    if (!l || !l.hasMask) return;
+    if (engine.vec.editing || engine.vec.getSelection()) {
+      engine.vec.settle();
+      engine.vec.clearSelection();
+    }
+    engine.selectedCorrection = null;
+    engine.setEditTarget(engine.activeLayerIndex, l.editMask ? 'pixels' : 'mask');
+    bumpEngineRevision();
+  };
+  const menuAfter = (fn: () => unknown) => () => {
+    fn();
+    bumpEngineRevision();
+  };
+  const layersMenuActions = {
+    addRaster: opAddLayer,
+    addVector: opAddVectorLayer,
+    addGroup: opAddGroup,
+    remove: opRemove,
+    duplicate: opDuplicate,
+    flattenDown: opFlattenDown,
+    flattenAll: opFlattenAll,
+    toggleVisible: menuAfter(() => engine.toggleLayerVisibility(engine.activeLayerIndex)),
+    toggleLock: menuAfter(() => engine.toggleLayerLock(engine.activeLayerIndex)),
+    convert: handleConvertLayer,
+    transform: opTransform,
+    openBlend: () => openLayerProps('blend'),
+    openOpacity: () => openLayerProps('opacity'),
+    moveUp: opMoveUp,
+    moveDown: opMoveDown,
+    addRasterMask: menuAfter(() => engine.addLayerMask(false, true)),
+    addVectorMask: menuAfter(() => engine.addLayerMask(false)),
+    removeMask: menuAfter(() => engine.removeLayerMask(false)),
+    maskFromSelection: menuAfter(() => engine.addLayerMask(true)),
+    bakeMask: () => {
+      if (!engine.removeLayerMask(true)) showToast('Nie można wypiec maski tej warstwy');
+      bumpEngineRevision();
+    },
+    toggleEditTarget: opMaskTarget,
+    toggleMaskView: menuAfter(() => {
+      const l = engine.getActiveLayer();
+      engine.setMaskView(l && engine.maskView === l ? null : engine.activeLayerIndex);
+    }),
+    toggleMaskLink: menuAfter(() => engine.toggleMaskLink(engine.activeLayerIndex)),
+    toggleMaskEnabled: menuAfter(() => engine.toggleMaskEnabled(engine.activeLayerIndex)),
+    rasterizeMask: () => {
+      if (!engine.rasterizeLayerMask(engine.activeLayerIndex)) showToast('Nie można zrasteryzować maski: warstwa jest zablokowana albo maska jest już rastrowa');
+      bumpEngineRevision();
+    },
+    addCorrection: (type: CorrectionType) => startCorrectionEdit(engine.activeLayerIndex, { type, onlyActive: corrOnlyActive }),
+    addStyles: () => startStylesEdit(engine.activeLayerIndex),
+    bakeEffects: () => {
+      if (!engine.applyEffects()) showToast('Nie można wypiec efektów: warstwa jest zablokowana albo pod korekcją leży warstwa wektorowa');
+      bumpEngineRevision();
+    },
+    setOnlyActive: setCorrOnlyActive,
+  };
+  const activeForMenu = activeTab ? engine.getActiveLayer() : null;
+  const layersMenu = buildLayersMenu(
+    activeForMenu
+      ? ({
+          layer: activeForMenu,
+          index: engine.activeLayerIndex,
+          layerCount: engine.layers.length,
+          plainLayerCount: engine.layers.filter((l) => !l.isGroup && !l.isAdjustment).length,
+          hasSelection: engine.selectionManager.hasActiveSelection,
+          maskViewOn: engine.maskView === activeForMenu,
+          objectSelection: !!vectorSelection(),
+          correctionSelected: !!engine.selectedCorrection,
+          canEffects: true,
+          canStyles: engine.canHaveStyles(activeForMenu),
+          canBakeEffects: engine.applyEffectsMode !== 'none',
+          onlyActive: corrOnlyActive,
+        } as LayersMenuState)
+      : null,
+    layersMenuActions
+  );
 
   const menuHandlers: MenuActionHandlers = {
     onNew: () => setIsNewDocModalOpen(true),
@@ -1205,7 +1592,7 @@ export default function App() {
     onZoomOut: () => setZoom((z) => Math.max(0.05, Number((z / 1.25).toFixed(2)))),
     onZoomReset: () => {
       setZoom(1.0);
-      setPanOffset({ x: 0, y: 0 });
+      setPanOffset(ZERO_PAN);
     },
     onFlipHorizontal: () => {
       const why = engine.pixelEditBlockReason();
@@ -1225,34 +1612,54 @@ export default function App() {
       engine.getActiveLayer()?.flipVertical();
       bumpEngineRevision();
     },
-    onAddLayer: () => {
-      engine.addLayer();
-      bumpEngineRevision();
-    },
-    onRemoveLayer: () => {
-      engine.removeActiveLayer();
-      bumpEngineRevision();
-    },
-    onDuplicateLayer: () => {
-      engine.duplicateActiveLayer();
-      bumpEngineRevision();
-    },
-    onMergeLayerDown: () => {
-      engine.mergeLayerDown();
-      bumpEngineRevision();
-    },
-    onMoveLayerUp: () => {
-      engine.moveActiveLayerUp();
-      bumpEngineRevision();
-    },
-    onMoveLayerDown: () => {
-      engine.moveActiveLayerDown();
-      bumpEngineRevision();
-    },
   };
 
+  if (!activeTab) {
+    // Wszystkie zakładki zamknięte: tylko Nowy i Otwórz mają sens, reszta menu jest wyłączona
+    const idleHandlers = Object.fromEntries(
+      Object.entries(menuHandlers).map(([k, v]) => [k, typeof v === 'function' && k !== 'onNew' && k !== 'onOpen' ? () => {} : v])
+    ) as unknown as MenuActionHandlers;
+    idleHandlers.canUndo = false;
+    idleHandlers.canRedo = false;
+    return (
+      <UnitsContext.Provider value={{ unit: lengthUnit, dpi: engine.dpi }}>
+        <div className="flex flex-col h-screen w-screen overflow-hidden bg-[#1e1e1e] text-[#dddddd] font-sans">
+          <input ref={fileInputRef} type="file" accept=".fig,application/json,image/*" onChange={handleFileLoaded} className="hidden" />
+          <TitleBar tabs={[]} activeTabId="" onSelectTab={handleSelectTab} onCloseTab={handleCloseTab} onNewTab={() => setIsNewDocModalOpen(true)} />
+          <MenuBar handlers={idleHandlers} layersMenu={layersMenu} />
+          <div className="flex-1 min-h-0 flex flex-col items-center justify-center gap-4 select-none bg-[#252526]">
+            <div className="text-[#888] text-sm">Brak otwartych dokumentów</div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setIsNewDocModalOpen(true)}
+                className="h-8 px-4 flex items-center gap-2 bg-[#282828] border border-[#3e3e3e] rounded text-xs text-[#ccc] hover:bg-[#383838] hover:text-white cursor-pointer transition-colors"
+              >
+                <FilePlus size={14} /> Nowy dokument <span className="text-[#777]">Ctrl+N</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleOpenFilePicker}
+                className="h-8 px-4 flex items-center gap-2 bg-[#282828] border border-[#3e3e3e] rounded text-xs text-[#ccc] hover:bg-[#383838] hover:text-white cursor-pointer transition-colors"
+              >
+                <FolderOpen size={14} /> Otwórz <span className="text-[#777]">Ctrl+O</span>
+              </button>
+            </div>
+          </div>
+          <NewDocumentModal
+            isOpen={isNewDocModalOpen}
+            onClose={() => setIsNewDocModalOpen(false)}
+            onCreate={handleCreateNewDocument}
+            defaultTitle="obraz1.fig"
+            defaultUnit={lengthUnit === 'px' ? 'px' : 'mm'}
+          />
+        </div>
+      </UnitsContext.Provider>
+    );
+  }
+
   return (
-    <UnitsContext.Provider value={{ mode: effectiveUnitMode, unit: effectiveUnit, dpi: engine.dpi }}>
+    <UnitsContext.Provider value={{ unit: effectiveUnit, dpi: engine.dpi }}>
     <div className="flex flex-col h-screen w-screen overflow-hidden bg-[#1e1e1e] text-[#dddddd] font-sans">
       <input
         ref={fileInputRef}
@@ -1262,7 +1669,6 @@ export default function App() {
         className="hidden"
       />
 
-      {/* 1. Pasek tytułu: FIGURA + Zakładki */}
       <TitleBar
         tabs={tabs.map((t) => ({ id: t.id, title: smartTabTitle(t), accent: t.smart ? SMART_TAB_COLOR : undefined, hint: t.smart ? 'Obiekt inteligentny: po zamknięciu lub powrocie do głównej zakładki zawartość jest składana do bitmapy' : undefined }))}
         activeTabId={activeTabId}
@@ -1271,10 +1677,8 @@ export default function App() {
         onNewTab={() => setIsNewDocModalOpen(true)}
       />
 
-      {/* 2. Menu główne z sekcją Zaznacz */}
-      <MenuBar handlers={menuHandlers} />
+      <MenuBar handlers={menuHandlers} layersMenu={layersMenu} />
 
-      {/* 3. Pasek opcji narzędzi z opcjami zaznaczania, transformacji i figur/linii */}
       <ToolOptionsBar
         brushSettings={brushSettings}
         onChangeSettings={handleUpdateBrushSettings}
@@ -1284,8 +1688,6 @@ export default function App() {
         onChangeColorReplaceSettings={handleUpdateColorReplaceSettings}
         stampSettings={stampSettings}
         onChangeStampSettings={handleUpdateStampSettings}
-        stampBasePoint={stampBasePoint}
-        onResetStampBasePoint={() => setStampBasePoint(null)}
         deformSettings={deformSettings}
         onChangeDeformSettings={handleUpdateDeformSettings}
         selectionSettings={selectionSettings}
@@ -1298,6 +1700,8 @@ export default function App() {
         onChangeVectorShapeSettings={handleUpdateVectorShapeSettings}
         smartSettings={smartSettings}
         onChangeSmartSettings={handleUpdateSmartSettings}
+        onInsertDiskImage={insertDiskImage}
+        onRefreshDiskImages={refreshDiskImages}
         guideAxis={guideAxis}
         onChangeGuideAxis={setGuideAxis}
         guideCount={engine.guides.length}
@@ -1311,7 +1715,6 @@ export default function App() {
         onChangeTextSettings={handleUpdateTextSettings}
         onRequestTextFocus={() => setTextFocusTrigger((c) => c + 1)}
         primaryColor={primaryColor}
-        secondaryColor={secondaryColor}
         onChangePrimaryColorAlpha={(a) => setPrimaryColor((prev) => ({ ...prev, a }))}
         activeTool={activeTool === 'vector-select' ? (vectorEditKind ?? activeTool) : activeTool === 'pen' ? 'bezier' : activeTool}
         flipDisabled={engine.perspectiveActive}
@@ -1325,16 +1728,13 @@ export default function App() {
           engine.selectionManager.flipVertical();
           bumpEngineRevision();
         }}
-        isLiveVectorSessionActive={isLiveVectorSessionActive}
         onCommitLiveVectorSession={() => setLiveVectorCommitTrigger((c) => c + 1)}
         onCancelLiveVectorSession={() => setLiveVectorCancelTrigger((c) => c + 1)}
         penInfo={penInfo}
         onTogglePenClosed={() => setPenCloseToggleTrigger((c) => c + 1)}
       />
 
-      {/* 4. Główny obszar roboczy */}
       <div className="flex flex-1 min-h-0 overflow-hidden relative">
-        {/* Pływające powiadomienie Toast dla zablokowanej warstwy */}
         {toastMessage && (
           <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-[#2d1b10] border border-amber-500/80 text-amber-200 px-4 py-2 rounded-md shadow-2xl text-xs font-semibold flex items-center gap-2 z-50 backdrop-blur-md pointer-events-none animate-bounce">
             <Lock size={15} className="text-amber-400 shrink-0" />
@@ -1347,7 +1747,6 @@ export default function App() {
           activeTool={activeTool}
           onSelectTool={setActiveTool}
           activeShapeType={vectorShapeSettings.shapeKind}
-          onSelectShapeType={(sh) => setVectorShapeSettings((prev) => ({ ...prev, shapeKind: sh }))}
         />
 
         <CanvasViewport
@@ -1386,6 +1785,7 @@ export default function App() {
           panOffset={panOffset}
           onUpdateZoom={setZoom}
           onUpdatePan={setPanOffset}
+          onContainerSize={setViewSize}
           onPipettePick={(color, isSecondary) => {
             if (isSecondary) {
               setSecondaryColor(color);
@@ -1394,6 +1794,7 @@ export default function App() {
               setBrushSettings((prev) => ({ ...prev, color }));
             }
           }}
+          onAdjustBrush={adjustBrushParams}
           onCanvasModified={bumpEngineRevision}
           onLiveVectorSessionChange={setIsLiveVectorSessionActive}
           liveVectorCommitTrigger={liveVectorCommitTrigger}
@@ -1404,35 +1805,79 @@ export default function App() {
           onPropertiesChange={handlePropertiesChange}
               onVectorSelectionChange={bumpEngineRevision}
           vectorEditRequest={vectorEditRequest}
+          vectorPasteRequest={vectorPasteRequest}
           onShowToast={showToast}
         />
 
-        {/* Prawy panel boczny: Kolor + Warstwy */}
         <div className="w-[224px] bg-[#1e1e1e] border-l border-[#2c2c2d] p-2 flex flex-col gap-3 overflow-y-auto z-10 select-none flex-shrink-0">
           <ColorPanel
             primaryColor={primaryColor}
             secondaryColor={secondaryColor}
-            // Sama zmiana koloru nie zmienia pikseli dokumentu, więc nie wymusza ponownego złożenia warstw
+            // Zmiana koloru nie zmienia pikseli dokumentu, więc nie wymusza ponownego złożenia warstw
             // (sesje gradientu, wiadra i figur odświeżają się same, bo zależą od koloru)
             onChangePrimaryColor={setPrimaryColor}
             onChangeSecondaryColor={setSecondaryColor}
             tab={rightTab}
             onChangeTab={setRightTab}
             propsContent={<PropertiesPanel desc={propsState.desc} api={propsState.api} />}
+            navContent={
+              <NavigatorPanel
+                engine={engine}
+                zoom={zoom}
+                panOffset={panOffset}
+                viewSize={viewSize}
+                onChangeZoom={setZoom}
+                onChangePan={setPanOffset}
+              />
+            }
           />
 
           <LayersPanel
+            tab={bottomTab}
+            onChangeTab={(t) => {
+              // powrót do panelu Warstwy kończy edycję kanału alfa: narzędzia znów rysują na warstwie
+              if (t === 'layers' && engine.channelEdit) {
+                engine.exitChannelEdit();
+                bumpEngineRevision();
+              }
+              setBottomTab(t);
+            }}
+            channelsContent={bottomTab === 'channels' ? <ChannelsPanel engine={engine} onChanged={bumpEngineRevision} /> : null}
+            historyContent={(() => {
+              const h = engine.historyEntries();
+              return (
+                <HistoryPanel
+                  labels={h.labels}
+                  current={h.current}
+                  onGoTo={(i) => {
+                    engine.goToHistory(i);
+                    bumpEngineRevision();
+                  }}
+                />
+              );
+            })()}
             layers={engine.layers}
             activeLayerIndex={engine.activeLayerIndex}
             onSelectLayer={(idx) => {
               if (engine.bucketSeedPoint) engine.commitPaintBucketSession();
               if (engine.gradientStartPoint) engine.commitGradientSession();
-              // zachowuje cel edycji (piksele / maska) wybranej warstwy; zmiana warstwy kończy podgląd maski
+              // Kliknięcie samej warstwy odznacza obiekty (także otwarty do edycji na płótnie) i efekty wewnątrz niej
+              if (engine.vec.editing || engine.vec.getSelection()) {
+                engine.vec.settle();
+                engine.vec.clearSelection();
+              }
+              // Zachowuje cel edycji (piksele lub maska) wybranej warstwy. Zmiana warstwy kończy podgląd maski
               engine.setEditTarget(idx, engine.layers[idx]?.editMask ? 'mask' : 'pixels');
               engine.selectedCorrection = null;
               bumpEngineRevision();
             }}
             onSelectTarget={(idx, target) => {
+              // wybór miniatury warstwy albo maski to też kliknięcie warstwy: zaznaczenie obiektów i efektów znika
+              if (engine.vec.editing || engine.vec.getSelection()) {
+                engine.vec.settle();
+                engine.vec.clearSelection();
+              }
+              engine.selectedCorrection = null;
               engine.setEditTarget(idx, target);
               bumpEngineRevision();
             }}
@@ -1458,6 +1903,8 @@ export default function App() {
               bumpEngineRevision();
             }}
             hasSelection={engine.selectionManager.hasActiveSelection}
+            corrOnlyActive={corrOnlyActive}
+            onChangeCorrOnlyActive={setCorrOnlyActive}
             editingCorrectionId={correctionDlg ? correctionDlg.correction.id : null}
             editingStylesLayerId={stylesDlg ? stylesDlg.layer.id : null}
             onOpenStyles={(idx) => startStylesEdit(idx)}
@@ -1469,14 +1916,6 @@ export default function App() {
             onEditCorrection={(idx, id) => startCorrectionEdit(idx, { id })}
             onToggleCorrection={(idx, id) => {
               if (!engine.toggleCorrection(idx, id)) showToast('Nie można zmienić korekcji: warstwa jest zablokowana');
-              bumpEngineRevision();
-            }}
-            onRemoveCorrection={(idx, id) => {
-              if (!engine.removeCorrection(idx, id)) showToast('Nie można usunąć korekcji: warstwa jest zablokowana');
-              bumpEngineRevision();
-            }}
-            onDuplicateCorrection={(idx, id) => {
-              if (!engine.duplicateCorrection(idx, id)) showToast('Nie można zduplikować korekcji: warstwa jest zablokowana');
               bumpEngineRevision();
             }}
             onMoveCorrection={(from, id, to, at) => {
@@ -1493,16 +1932,11 @@ export default function App() {
               engine.setCorrectionsExpanded(idx, !engine.layers[idx]?.correctionsExpanded);
               bumpEngineRevision();
             }}
-            onAddGroup={() => {
-              if (engine.bucketSeedPoint) engine.commitPaintBucketSession();
-              if (engine.gradientStartPoint) engine.commitGradientSession();
-              engine.addGroup();
-              bumpEngineRevision();
-            }}
+            onAddGroup={opAddGroup}
             onToggleExpand={(idx) => {
               const g = engine.layers[idx];
               const act = engine.getActiveLayer();
-              // zwijana grupa z aktywną warstwą w środku: zaznaczamy grupę (ukryta warstwa nie może być celem przycisków panelu)
+              // Zwijana grupa z aktywną warstwą w środku: zaznaczana jest grupa (ukryta warstwa nie może być celem przycisków panelu)
               const hidesActive = !!g && g.isGroup && g.expanded && !!act && act !== g && act.groupId === g.id;
               if (hidesActive) {
                 if (engine.bucketSeedPoint) engine.commitPaintBucketSession();
@@ -1515,14 +1949,7 @@ export default function App() {
               }
               bumpEngineRevision();
             }}
-            onAddVectorLayer={() => {
-              if (engine.bucketSeedPoint) engine.commitPaintBucketSession();
-              if (engine.gradientStartPoint) engine.commitGradientSession();
-              engine.addVectorLayer();
-              setActiveToolRaw('vector-select');
-              bumpEngineRevision();
-            }}
-            editingVectorObject={engine.vec.editingInfo}
+            onAddVectorLayer={opAddVectorLayer}
             selectedVectorObjects={engine.vec.getSelection()}
             pendingVectorObject={(() => {
               const act = engine.getActiveLayer();
@@ -1531,7 +1958,7 @@ export default function App() {
               return { layerId: act.id, label: names[activeTool] ?? 'Obiekt' };
             })()}
             onSelectVectorObjects={(idx, ids) => {
-              // lista pokazuje obiekty bieżącego celu edycji warstwy (maska albo warstwa) - cel zostaje, nie wracamy do warstwy
+              // Lista pokazuje obiekty bieżącego celu edycji warstwy (maska albo piksele), więc cel zostaje bez zmian
               engine.setEditTarget(idx, engine.layers[idx]?.editMask && engine.layers[idx]?.hasMask ? 'mask' : 'pixels');
               setActiveToolRaw('vector-select');
               engine.vec.settle();
@@ -1540,7 +1967,7 @@ export default function App() {
             }}
             onOpenSmartObject={handleOpenSmartObject}
             onEditVectorObject={(idx, id) => {
-              // lista pokazuje obiekty bieżącego celu edycji warstwy (maska albo warstwa) - cel zostaje, nie wracamy do warstwy
+              // Lista pokazuje obiekty bieżącego celu edycji warstwy (maska albo piksele), więc cel zostaje bez zmian
               engine.setEditTarget(idx, engine.layers[idx]?.editMask && engine.layers[idx]?.hasMask ? 'mask' : 'pixels');
               setActiveToolRaw('vector-select');
               setVectorEditRequest((r) => ({ n: (r?.n ?? 0) + 1, layerIndex: idx, id }));
@@ -1551,10 +1978,6 @@ export default function App() {
               else engine.vec.setObjectVisible(idx, id, vis);
               bumpEngineRevision();
             }}
-            onRemoveVectorObject={(idx, id) => {
-              if (!engine.vec.removeObject(idx, id)) showToast('Nie można usunąć obiektu: warstwa jest zablokowana albo obiekt jest właśnie edytowany');
-              bumpEngineRevision();
-            }}
             onRenameVectorObject={(idx, id, name) => {
               engine.vec.renameObject(idx, id, name);
               bumpEngineRevision();
@@ -1563,49 +1986,9 @@ export default function App() {
               if (!engine.vec.moveObject(from, id, to, pos)) showToast('Nie można przenieść obiektu: warstwa jest zablokowana albo nie jest wektorowa');
               bumpEngineRevision();
             }}
-            onAddLayer={() => {
-              if (engine.bucketSeedPoint) engine.commitPaintBucketSession();
-              if (engine.gradientStartPoint) engine.commitGradientSession();
-              engine.addLayer();
-              bumpEngineRevision();
-            }}
-            onRemoveLayer={() => {
-              const vs = vectorSelection();
-              if (vs) {
-                // zaznaczone obiekty wektorowe: przycisk usuwa je, a nie całą warstwę
-                if (!engine.vec.deleteObjects(vs.idx, vs.ids)) showToast('Nie można usunąć obiektów: warstwa jest zablokowana');
-                bumpEngineRevision();
-                return;
-              }
-              if (engine.bucketSeedPoint) engine.commitPaintBucketSession();
-              if (engine.gradientStartPoint) engine.commitGradientSession();
-              const act = engine.getActiveLayer();
-              // zaznaczona maska: usuwa tylko maskę; zaznaczona warstwa: warstwę razem z ewentualną maską
-              if (!engine.selectedCorrection && act?.hasMask && act.editMask) {
-                engine.removeLayerMask(false);
-                bumpEngineRevision();
-                return;
-              }
-              if (!engine.selectedCorrection && act && engine.correctionsLocked(act) && (act.isGroup || act.isAdjustment || act.locked)) {
-                showToast(act.isGroup ? 'Nie można usunąć zablokowanej grupy' : 'Nie można usunąć zablokowanej warstwy');
-                return;
-              }
-              engine.removeActiveLayer();
-              bumpEngineRevision();
-            }}
-            onDuplicateLayer={() => {
-              const vs = vectorSelection();
-              if (vs) {
-                if (engine.vec.duplicateObjects(vs.idx, vs.ids).length === 0) showToast('Nie można zduplikować obiektów: warstwa jest zablokowana');
-                else setActiveToolRaw('vector-select');
-                bumpEngineRevision();
-                return;
-              }
-              if (engine.bucketSeedPoint) engine.commitPaintBucketSession();
-              if (engine.gradientStartPoint) engine.commitGradientSession();
-              engine.duplicateActiveLayer();
-              bumpEngineRevision();
-            }}
+            onAddLayer={opAddLayer}
+            onRemoveLayer={opRemove}
+            onDuplicateLayer={opDuplicate}
             mergeDownApplies={engine.applyEffectsMode !== 'none'}
             applyEffectsMode={engine.applyEffectsMode}
             selectedCorrection={engine.selectedCorrection}
@@ -1625,40 +2008,9 @@ export default function App() {
               bumpEngineRevision();
             }}
             onConvertLayer={handleConvertLayer}
-            onMergeDown={() => {
-              // Zaznaczony efekt / warstwa z korekcjami / korekcja w stosie: „Zastosuj efekty” wpieka je w piksele;
-              // bez efektów przycisk łączy warstwę w dół
-              if (engine.applyEffectsMode !== 'none') {
-                if (!engine.applyEffects()) showToast('Nie można zastosować efektów: warstwa jest zablokowana albo pod korekcją leży warstwa wektorowa (jej piksele są wyliczane z obiektów)');
-                bumpEngineRevision();
-                return;
-              }
-              if (!engine.mergeLayerDown()) {
-                showToast('Nie można scalić: warstwa jest zablokowana, poniżej jest granica grupy albo warstwa wektorowa');
-                return;
-              }
-              bumpEngineRevision();
-            }}
-            onMoveUp={() => {
-              const vs = vectorSelection();
-              if (vs) {
-                engine.vec.shiftObjects(vs.idx, vs.ids, 1);
-                bumpEngineRevision();
-                return;
-              }
-              engine.moveActiveLayerUp();
-              bumpEngineRevision();
-            }}
-            onMoveDown={() => {
-              const vs = vectorSelection();
-              if (vs) {
-                engine.vec.shiftObjects(vs.idx, vs.ids, -1);
-                bumpEngineRevision();
-                return;
-              }
-              engine.moveActiveLayerDown();
-              bumpEngineRevision();
-            }}
+            onMergeDown={opMergeDown}
+            onMoveUp={opMoveUp}
+            onMoveDown={opMoveDown}
             onMoveAdjustmentToLayer={(a, t, i) => {
               engine.moveAdjustmentToLayer(a, t, i);
               bumpEngineRevision();
@@ -1693,18 +2045,55 @@ export default function App() {
         </div>
       </div>
 
-      {/* 5. Dolny pasek stanu */}
+      {layerPropsDlg && (() => {
+        const dlg = layerPropsDlg;
+        const idx = () => engine.layers.indexOf(dlg.layer);
+        const close = () => setLayerPropsDlg(null);
+        return (
+          <LayerPropsDialog
+            kind={dlg.kind}
+            layerName={dlg.layer.name}
+            isGroup={dlg.layer.isGroup}
+            initialBlend={dlg.blend}
+            initialOpacity={dlg.opacity}
+            onPreviewBlend={(m) => {
+              engine.previewLayerBlendMode(idx(), m);
+              bumpEngineRevision();
+            }}
+            onPreviewOpacity={(v) => {
+              engine.setLayerOpacity(idx(), v);
+              bumpEngineRevision();
+            }}
+            onOk={(value) => {
+              if (dlg.kind === 'blend') {
+                // podgląd zmienił już warstwę bez historii: wraca stary tryb, a zmiana trafia do historii jednym wpisem
+                engine.previewLayerBlendMode(idx(), dlg.blend);
+                engine.setLayerBlendMode(idx(), value as SKBlendMode);
+              } else {
+                engine.setLayerOpacity(idx(), value as number, dlg.opacity);
+              }
+              close();
+              bumpEngineRevision();
+            }}
+            onCancel={() => {
+              if (dlg.kind === 'blend') engine.previewLayerBlendMode(idx(), dlg.blend);
+              else engine.setLayerOpacity(idx(), dlg.opacity);
+              close();
+              bumpEngineRevision();
+            }}
+          />
+        );
+      })()}
+
       <StatusBar
         statusText=""
         docWidth={engine.width}
         docHeight={engine.height}
         zoom={zoom}
         onZoomChange={setZoom}
-        unitMode={effectiveUnitMode}
-        onUnitModeChange={setUnitMode}
         unit={effectiveUnit}
         onUnitChange={setLengthUnit}
-        unitsLocked={!!activeTab.smart}
+        unitsLocked={!!activeTab?.smart}
         dpi={engine.dpi}
         snapEnabled={snapEnabled}
         onToggleSnap={() => setSnapEnabled((v) => !v)}
@@ -1712,7 +2101,6 @@ export default function App() {
         onToggleGuides={() => setGuidesVisible((v) => !v)}
       />
 
-      {/* Pływające okno korekcji (podgląd na żywo na płótnie) */}
       {correctionDlg && correctionDlg.engine === engine && (
         <CorrectionDialog
           key={correctionDlg.correction.id + correctionDlg.token}
@@ -1733,7 +2121,6 @@ export default function App() {
         />
       )}
 
-      {/* Pływające okno stylizacji warstwy (podgląd na żywo na płótnie) */}
       {stylesDlg && stylesDlg.engine === engine && (
         <StylesDialog
           key={stylesDlg.layer.id + stylesDlg.token}
@@ -1749,7 +2136,6 @@ export default function App() {
         />
       )}
 
-      {/* Modal Nowego Dokumentu */}
       <NewDocumentModal
         isOpen={isNewDocModalOpen}
         onClose={() => setIsNewDocModalOpen(false)}

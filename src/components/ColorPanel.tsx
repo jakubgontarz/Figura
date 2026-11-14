@@ -6,16 +6,18 @@
 import React, { useState, useEffect } from 'react';
 import { ArrowLeftRight } from 'lucide-react';
 import { ColorPickerBody } from './ColorPicker.tsx';
-import { SKColor, hexToSkColor, skColorToHex } from '../core/skia/types.ts';
+import { SKColor, hexToSkColor, skColorToHex } from '../core/types.ts';
 
 interface ColorPanelProps {
   primaryColor: SKColor;
   secondaryColor: SKColor;
   onChangePrimaryColor: (color: SKColor) => void;
   onChangeSecondaryColor: (color: SKColor) => void;
-  tab?: 'color' | 'props';
-  onChangeTab?: (t: 'color' | 'props') => void;
+  tab?: 'color' | 'props' | 'nav';
+  onChangeTab?: (t: 'color' | 'props' | 'nav') => void;
   propsContent?: React.ReactNode;
+  /** Zawartość zakładki „Nawigator” (montowana tylko przy otwartej zakładce, więc nic nie kosztuje, gdy jest zamknięta). */
+  navContent?: React.ReactNode;
 }
 
 export const ColorPanel: React.FC<ColorPanelProps> = ({
@@ -26,9 +28,11 @@ export const ColorPanel: React.FC<ColorPanelProps> = ({
   tab = 'color',
   onChangeTab,
   propsContent,
+  navContent,
 }) => {
   const [activeSlot, setActiveSlot] = useState<'primary' | 'secondary'>('primary');
-  const [colorMode, setColorMode] = useState<'hsv' | 'rgb'>('hsv');
+  /** false: kwadrat S-V z paskiem barwy (domyślnie), true: sześć pól R, G, B, H, S, V. Przycisk „Metoda” przełącza. */
+  const [fieldsMode, setFieldsMode] = useState(false);
 
   const currentColor = activeSlot === 'primary' ? primaryColor : secondaryColor;
   const updateCurrentColor = activeSlot === 'primary' ? onChangePrimaryColor : onChangeSecondaryColor;
@@ -51,7 +55,7 @@ export const ColorPanel: React.FC<ColorPanelProps> = ({
     <div className="bg-transparent text-xs select-none">
       {/* Pasek Zakładek (Tab Strip) */}
       <div className="flex items-center border-b border-[#333] mb-2 pb-0.5">
-        {(['color', 'props'] as const).map((t) => (
+        {(['color', 'props', 'nav'] as const).map((t) => (
           <button
             key={t}
             type="button"
@@ -59,13 +63,15 @@ export const ColorPanel: React.FC<ColorPanelProps> = ({
             data-testid={`tab-${t}`}
             className={`text-[11px] font-semibold tracking-wide pb-1 px-0.5 mr-3 border-b-2 focus:outline-none cursor-pointer ${tab === t ? 'text-white border-[#007acc]' : 'text-[#888] border-transparent hover:text-[#ccc]'}`}
           >
-            {t === 'color' ? 'Kolor' : 'Właściwości'}
+            {t === 'color' ? 'Kolor' : t === 'props' ? 'Właściwości' : 'Nawigator'}
           </button>
         ))}
       </div>
 
       {tab === 'props' ? (
         propsContent
+      ) : tab === 'nav' ? (
+        navContent
       ) : (
         <>
       {/* Górny wiersz: Podgląd Kolorów + Hex + Przycisk Metoda */}
@@ -118,9 +124,9 @@ export const ColorPanel: React.FC<ColorPanelProps> = ({
             type="button"
             onClick={swapColors}
             title="Zamień kolory (X)"
-            className="p-1 text-[#888] hover:text-white hover:bg-[#333] rounded cursor-pointer"
+            className="w-6 h-5.5 flex items-center justify-center bg-[#282828] border border-[#3e3e3e] rounded transition-colors hover:bg-[#383838] text-[#ccc] hover:text-white cursor-pointer"
           >
-            <ArrowLeftRight size={11} />
+            <ArrowLeftRight size={12} />
           </button>
         </div>
 
@@ -142,16 +148,19 @@ export const ColorPanel: React.FC<ColorPanelProps> = ({
           />
           <button
             type="button"
-            onClick={() => setColorMode(colorMode === 'hsv' ? 'rgb' : 'hsv')}
-            className="h-5 px-1.5 bg-[#2a2a2a] hover:bg-[#3a3a3a] text-[#aaa] hover:text-white border border-[#444] rounded text-[9.5px] cursor-pointer"
-            title="Przełącz tryb suwaków (HSV / RGB)"
+            onClick={() => setFieldsMode((v) => !v)}
+            aria-pressed={fieldsMode}
+            className={`h-5.5 px-2 rounded border text-[11px] cursor-pointer transition-colors ${
+              fieldsMode ? 'bg-[#094771] border-[#007acc] text-white' : 'bg-[#282828] border-[#3e3e3e] text-[#ccc] hover:bg-[#383838] hover:text-white'
+            }`}
+            title={fieldsMode ? 'Wróć do kwadratu barw i paska odcienia' : 'Pokaż pola R, G, B, H, S, V'}
           >
             Metoda
           </button>
         </div>
       </div>
 
-      <ColorPickerBody color={currentColor} onChange={updateCurrentColor} onChangeSecondary={onChangeSecondaryColor} />
+      <ColorPickerBody color={currentColor} onChange={updateCurrentColor} onChangeSecondary={onChangeSecondaryColor} fieldsMode={fieldsMode} />
         </>
       )}
     </div>

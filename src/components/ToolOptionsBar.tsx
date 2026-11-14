@@ -33,13 +33,14 @@ import {
   StrokeAlignment,
   StrokeCornerJoin,
   StrokeDashStyle,
-  StrokeLineCap,
   PathFillMode,
   VectorShapeSettings,
   SmartObjectSettings,
   TextToolSettings,
-} from '../core/skia/types.ts';
+} from '../core/types.ts';
 import { TextOptions } from './TextOptions.tsx';
+import { ScrubField } from './ScrubField.tsx';
+import { ToggleButton } from './ToggleButton.tsx';
 
 const isArrowMarker = (m: MarkerType) => m !== 'none' && m !== 'cap-round' && m !== 'cap-square';
 
@@ -54,8 +55,6 @@ interface ToolOptionsBarProps {
   onChangeColorReplaceSettings?: (newSettings: Partial<ColorReplaceSettings>) => void;
   stampSettings?: StampSettings;
   onChangeStampSettings?: (newSettings: Partial<StampSettings>) => void;
-  stampBasePoint?: { x: number; y: number } | null;
-  onResetStampBasePoint?: () => void;
   selectionSettings: SelectionSettings;
   onChangeSelectionSettings: (newSettings: Partial<SelectionSettings>) => void;
   pipetteSettings: PipetteSettings;
@@ -70,10 +69,13 @@ interface ToolOptionsBarProps {
   guideCount?: number;
   onClearGuides?: () => void;
   onChangeSmartSettings?: (n: Partial<SmartObjectSettings>) => void;
+  /** „Obraz z dysku”: okno wyboru pliku i wstawienie obiektu */
+  onInsertDiskImage?: () => void;
+  /** ponowne wczytanie wszystkich obrazów z dysku z pliku */
+  onRefreshDiskImages?: () => void;
   lineAndCurveSettings: LineAndCurveSettings;
   onChangeLineAndCurveSettings: (newSettings: Partial<LineAndCurveSettings>) => void;
   primaryColor?: SKColor;
-  secondaryColor?: SKColor;
   onChangePrimaryColorAlpha?: (alpha: number) => void;
   activeTool: string;
   /** Tryb perspektywy: odbicia są niedostępne */
@@ -83,35 +85,10 @@ interface ToolOptionsBarProps {
   textSettings?: TextToolSettings;
   onChangeTextSettings?: (newSettings: Partial<TextToolSettings>) => void;
   onRequestTextFocus?: () => void;
-  isLiveVectorSessionActive?: boolean;
   onCommitLiveVectorSession?: () => void;
   onCancelLiveVectorSession?: () => void;
   penInfo?: { active: boolean; closed: boolean; count: number };
   onTogglePenClosed?: () => void;
-}
-
-function sliderToSize(val: number): number {
-  const norm = Math.max(0, Math.min(1000, val)) / 1000;
-  const size = Math.round(1 + Math.pow(norm, 2.6) * 1999);
-  return Math.max(1, Math.min(2000, size));
-}
-
-function sizeToSlider(size: number): number {
-  const clean = Math.max(1, Math.min(2000, size));
-  const norm = Math.pow((clean - 1) / 1999, 1 / 2.6);
-  return Math.round(norm * 1000);
-}
-
-function sliderToSpacing(val: number): number {
-  const norm = Math.max(0, Math.min(1000, val)) / 1000;
-  const spacing = Math.round(1 + Math.pow(norm, 2.2) * 499);
-  return Math.max(1, Math.min(500, spacing));
-}
-
-function spacingToSlider(spacing: number): number {
-  const clean = Math.max(1, Math.min(500, spacing));
-  const norm = Math.pow((clean - 1) / 499, 1 / 2.2);
-  return Math.round(norm * 1000);
 }
 
 import { LengthField, UnitLabel, useUnits } from './Units.tsx';
@@ -147,8 +124,6 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
     sourceMode: 'relative',
   },
   onChangeStampSettings,
-  stampBasePoint,
-  onResetStampBasePoint,
   deformSettings = {
     actionType: 'expand-shrink',
     size: 60,
@@ -172,10 +147,11 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
   guideCount = 0,
   onClearGuides,
   onChangeSmartSettings,
+  onInsertDiskImage,
+  onRefreshDiskImages,
   lineAndCurveSettings,
   onChangeLineAndCurveSettings,
   primaryColor,
-  secondaryColor,
   onChangePrimaryColorAlpha,
   activeTool,
   flipDisabled,
@@ -184,14 +160,13 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
   textSettings,
   onChangeTextSettings,
   onRequestTextFocus,
-  isLiveVectorSessionActive = false,
   onCommitLiveVectorSession,
   onCancelLiveVectorSession,
   penInfo,
   onTogglePenClosed,
 }) => {
   const uctx = useUnits();
-  const vecUnits = uctx.mode === 'vec' || uctx.unit !== 'px';
+  const fractionalUnits = uctx.unit !== 'px';
   const isSelectionTool =
     activeTool === 'select-rect' ||
     activeTool === 'select-ellipse' ||
@@ -205,7 +180,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
     <div className="h-8 bg-[#2b2b2b] select-none flex items-center px-3 text-xs text-[#dddddd] border-b border-[#1c1c1c] gap-3.5 overflow-x-auto scrollbar-none flex-nowrap">
       <span className="font-semibold text-[#aaaaaa] flex-shrink-0">Opcje:</span>
 
-      {/* 1. OPCJE LINII I KRZYWEJ BEZIERA */}
+      {/* Opcje linii i krzywej beziera */}
       {isLineOrCurve ? (
         <div className="flex items-center gap-3 flex-1 flex-shrink-0">
           {/* Grubość linii */}
@@ -215,19 +190,12 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
               valuePx={lineAndCurveSettings.strokeWidth}
               minPx={activeTool === 'bezier' ? 0 : 1}
               maxPx={200}
-              integerPx={!vecUnits}
+              trackMaxPx={100}
+              integerPx={!fractionalUnits}
               onCommitPx={(v) => onChangeLineAndCurveSettings({ strokeWidth: v })}
               className="w-14 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white focus:outline-none focus:border-[#007acc] font-mono"
             />
             <UnitLabel />
-            <input
-              type="range"
-              min={activeTool === 'bezier' ? 0 : 1}
-              max="100"
-              value={lineAndCurveSettings.strokeWidth}
-              onChange={(e) => onChangeLineAndCurveSettings({ strokeWidth: parseInt(e.target.value) })}
-              className="w-16 h-1 bg-[#444] accent-[#007acc] rounded-lg appearance-none cursor-pointer"
-            />
           </div>
 
           {activeTool === 'bezier' && (
@@ -362,15 +330,9 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
           )}
 
           {/* Wygładzanie */}
-          <label className="flex items-center gap-1.5 cursor-pointer text-[11px] hover:text-white flex-shrink-0">
-            <input
-              type="checkbox"
-              checked={lineAndCurveSettings.antiAliasing}
-              onChange={(e) => onChangeLineAndCurveSettings({ antiAliasing: e.target.checked })}
-              className="rounded bg-[#1e1e1e] border-[#555] text-[#007acc] focus:ring-0 focus:ring-offset-0 h-3.5 w-3.5 cursor-pointer"
-            />
-            <span>Wygładzanie</span>
-          </label>
+          <ToggleButton active={lineAndCurveSettings.antiAliasing} onChange={(v) => onChangeLineAndCurveSettings({ antiAliasing: v })}>
+            Wygładzanie
+          </ToggleButton>
 
           {/* Tryb mieszania */}
           <div className="flex items-center gap-1.5 flex-shrink-0">
@@ -393,17 +355,11 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
         <div className="flex items-center gap-3 flex-1 flex-shrink-0">
           <div className="flex items-center gap-1.5">
             <span className="text-[11px] text-[#aaa]">Kierunek:</span>
-            <div className="flex rounded overflow-hidden border border-[#444]">
+            <div className="flex items-center gap-1.5">
               {([['v', 'Pionowa'], ['h', 'Pozioma']] as const).map(([a, label]) => (
-                <button
-                  key={a}
-                  type="button"
-                  data-testid={`guide-axis-${a}`}
-                  onClick={() => onChangeGuideAxis?.(a)}
-                  className={`h-5 px-2 text-[11px] cursor-pointer ${guideAxis === a ? 'bg-[#094771] text-white' : 'bg-[#252525] text-[#aaa] hover:text-white'}`}
-                >
+                <ToggleButton key={a} radio testId={`guide-axis-${a}`} active={guideAxis === a} onChange={() => onChangeGuideAxis?.(a)}>
                   {label}
-                </button>
+                </ToggleButton>
               ))}
             </div>
           </div>
@@ -458,10 +414,26 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
               ))}
             </select>
           </div>
+          <button
+            type="button"
+            onClick={() => onInsertDiskImage?.()}
+            title="Wstawia obraz z pliku na dysku. Dokument zapamiętuje tylko położenie pliku, współrzędne, rozmiar, kąt i tryb mieszania, bez bitmapy."
+            className="h-5 px-2 text-[11px] bg-[#2a2a2a] border border-[#444] rounded text-[#ccc] hover:text-white cursor-pointer whitespace-nowrap flex-shrink-0"
+          >
+            Obraz z dysku…
+          </button>
+          <button
+            type="button"
+            onClick={() => onRefreshDiskImages?.()}
+            title="Wczytuje ponownie z dysku wszystkie obrazy z dysku w tym dokumencie (po zmianie plików w czasie pracy)."
+            className="h-5 px-2 text-[11px] bg-[#2a2a2a] border border-[#444] rounded text-[#ccc] hover:text-white cursor-pointer whitespace-nowrap flex-shrink-0"
+          >
+            Odśwież
+          </button>
           <span className="text-[11px] text-[#9a9a9a]">Kliknij lub przeciągnij (Shift – zachowaj proporcje płótna), aby wstawić. Dwuklik na obiekcie otwiera jego dokument w zakładce.</span>
         </div>
       ) : isShapeTool ? (
-        /* 2. OPCJE FIGUR GEOMETRYCZNYCH */
+        /* Opcje figur geometrycznych */
         <div className="flex items-center gap-3 flex-1 flex-shrink-0">
           {/* Wybór kształtu */}
           <div className="flex items-center gap-1.5 flex-shrink-0">
@@ -508,19 +480,205 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
               valuePx={vectorShapeSettings.strokeWidth}
               minPx={0}
               maxPx={200}
-              integerPx={!vecUnits}
+              trackMaxPx={100}
+              integerPx={!fractionalUnits}
               onCommitPx={(v) => onChangeVectorShapeSettings({ strokeWidth: v })}
               className="w-14 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white focus:outline-none focus:border-[#007acc] font-mono"
             />
             <UnitLabel />
-            <input
-              type="range"
-              min="0"
-              max="100"
-              value={vectorShapeSettings.strokeWidth}
-              onChange={(e) => onChangeVectorShapeSettings({ strokeWidth: parseInt(e.target.value) })}
-              className="w-16 h-1 bg-[#444] accent-[#007acc] rounded-lg appearance-none cursor-pointer"
+          </div>
+
+          {/* Narożnik */}
+          <div className="flex items-center gap-1.5 flex-shrink-0">
+            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Narożnik:</label>
+            <select
+              value={vectorShapeSettings.strokeCornerJoin}
+              onChange={(e) =>
+                onChangeVectorShapeSettings({ strokeCornerJoin: e.target.value as StrokeCornerJoin })
+              }
+              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+            >
+              <option value="miter">Prosty / Ostry</option>
+              <option value="round">Zaokrąglony</option>
+              <option value="bevel">Ścięty</option>
+            </select>
+          </div>
+
+          {/* Wyrównanie obrysu */}
+          <div className="flex items-center gap-1.5 flex-shrink-0">
+            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Wyrównanie:</label>
+            <select
+              value={vectorShapeSettings.strokeAlignment}
+              onChange={(e) =>
+                onChangeVectorShapeSettings({ strokeAlignment: e.target.value as StrokeAlignment })
+              }
+              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+            >
+              <option value="center">Do środka</option>
+              <option value="inside">Do wewnątrz</option>
+              <option value="outside">Do zewnątrz</option>
+            </select>
+          </div>
+
+          {/* Wymiary specyficzne dla kształtu (promień, ramiona, boki, grot, trzon) są w panelu Właściwości */}
+
+          {/* Wygładzanie */}
+          <ToggleButton active={lineAndCurveSettings.antiAliasing} onChange={(v) => onChangeLineAndCurveSettings({ antiAliasing: v })}>
+            Wygładzanie
+          </ToggleButton>
+
+          {/* Tryb mieszania */}
+          <div className="flex items-center gap-1.5 flex-shrink-0">
+            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Mieszanie:</label>
+            <select
+              value={lineAndCurveSettings.blendMode}
+              onChange={(e) => onChangeLineAndCurveSettings({ blendMode: e.target.value as SKBlendMode })}
+              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+            >
+              {BLEND_MODES.map((mode) => (
+                <option key={mode.id} value={mode.id}>
+                  {mode.namePl}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+      ) : activeTool === 'guides' ? (
+        /* Prowadnice: kierunek nowej prowadnicy */
+        <div className="flex items-center gap-3 flex-1 flex-shrink-0">
+          <div className="flex items-center gap-1.5">
+            <span className="text-[11px] text-[#aaa]">Kierunek:</span>
+            <div className="flex items-center gap-1.5">
+              {([['v', 'Pionowa'], ['h', 'Pozioma']] as const).map(([a, label]) => (
+                <ToggleButton key={a} radio testId={`guide-axis-${a}`} active={guideAxis === a} onChange={() => onChangeGuideAxis?.(a)}>
+                  {label}
+                </ToggleButton>
+              ))}
+            </div>
+          </div>
+          <button
+            type="button"
+            disabled={guideCount === 0}
+            onClick={() => onClearGuides?.()}
+            className="h-5 px-2 text-[11px] bg-[#2a2a2a] border border-[#444] rounded text-[#ccc] hover:text-white cursor-pointer disabled:opacity-40 disabled:cursor-default"
+          >
+            Usuń wszystkie ({guideCount})
+          </button>
+          <span className="text-[11px] text-[#9a9a9a]">Kliknij, aby wstawić. Przeciągnij prowadnicę, aby ją przesunąć; wyciągnięcie poza obraz lub Delete usuwa. Współrzędne: panel Właściwości.</span>
+        </div>
+      ) : activeTool === 'smart-object' ? (
+        /* Obiekt inteligentny: rozmiar płótna obiektu (zawsze w pikselach) i tryb mieszania */
+        <div className="flex items-center gap-3 flex-1 flex-shrink-0">
+          <div className="flex items-center gap-1.5 bg-[#1e1e1e] px-1.5 py-0.5 rounded border border-[#3e3e3e]">
+            <label className="text-[11px] whitespace-nowrap text-[#aaa]" title="Rozmiar płótna obiektu inteligentnego">Płótno obiektu:</label>
+            <LengthField
+              forcePx
+              valuePx={smartSettings.width}
+              minPx={1}
+              maxPx={16000}
+              integerPx
+              onCommitPx={(v) => onChangeSmartSettings?.({ width: v })}
+              className="w-16 h-5 bg-[#252525] border border-[#555] rounded px-1 text-center text-xs text-white font-mono focus:outline-none focus:border-[#00bcd4]"
             />
+            <span className="text-[11px] text-[#aaa]">px</span>
+            <label className="text-[11px] whitespace-nowrap text-[#aaa] ml-1">×</label>
+            <LengthField
+              forcePx
+              valuePx={smartSettings.height}
+              minPx={1}
+              maxPx={16000}
+              integerPx
+              onCommitPx={(v) => onChangeSmartSettings?.({ height: v })}
+              className="w-16 h-5 bg-[#252525] border border-[#555] rounded px-1 text-center text-xs text-white font-mono focus:outline-none focus:border-[#00bcd4]"
+            />
+            <span className="text-[11px] text-[#aaa]">px</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Tryb mieszania:</label>
+            <select
+              value={smartSettings.blendMode}
+              onChange={(e) => onChangeSmartSettings?.({ blendMode: e.target.value as SKBlendMode })}
+              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+            >
+              {BLEND_MODES.map((mode) => (
+                <option key={mode.id} value={mode.id}>
+                  {mode.namePl}
+                </option>
+              ))}
+            </select>
+          </div>
+          <button
+            type="button"
+            onClick={() => onInsertDiskImage?.()}
+            title="Wstawia obraz z pliku na dysku. Dokument zapamiętuje tylko położenie pliku, współrzędne, rozmiar, kąt i tryb mieszania, bez bitmapy."
+            className="h-5 px-2 text-[11px] bg-[#2a2a2a] border border-[#444] rounded text-[#ccc] hover:text-white cursor-pointer whitespace-nowrap flex-shrink-0"
+          >
+            Obraz z dysku…
+          </button>
+          <button
+            type="button"
+            onClick={() => onRefreshDiskImages?.()}
+            title="Wczytuje ponownie z dysku wszystkie obrazy z dysku w tym dokumencie (po zmianie plików w czasie pracy)."
+            className="h-5 px-2 text-[11px] bg-[#2a2a2a] border border-[#444] rounded text-[#ccc] hover:text-white cursor-pointer whitespace-nowrap flex-shrink-0"
+          >
+            Odśwież
+          </button>
+          <span className="text-[11px] text-[#9a9a9a]">Kliknij lub przeciągnij (Shift – zachowaj proporcje płótna), aby wstawić. Dwuklik na obiekcie otwiera jego dokument w zakładce.</span>
+        </div>
+      ) : isShapeTool ? (
+        /* Opcje figur geometrycznych */
+        <div className="flex items-center gap-3 flex-1 flex-shrink-0">
+          {/* Wybór kształtu */}
+          <div className="flex items-center gap-1.5 flex-shrink-0">
+            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Kształt:</label>
+            <select
+              value={vectorShapeSettings.shapeKind}
+              onChange={(e) =>
+                onChangeVectorShapeSettings({ shapeKind: e.target.value as ShapeKind })
+              }
+              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer font-medium"
+            >
+              <option value="rect">Prostokąt</option>
+              <option value="round-rect">Zaokrąglony prostokąt</option>
+              <option value="ellipse">Elipsa / Koło</option>
+              <option value="triangle">Trójkąt</option>
+              <option value="star">Gwiazda</option>
+              <option value="polygon">Wielokąt</option>
+              <option value="arrow">Strzałka</option>
+              <option value="heart">Serce</option>
+              <option value="diamond">Romb</option>
+            </select>
+          </div>
+
+          {/* Sposób wypełnienia */}
+          <div className="flex items-center gap-1.5 flex-shrink-0">
+            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Wypełnienie:</label>
+            <select
+              value={vectorShapeSettings.fillMode}
+              onChange={(e) =>
+                onChangeVectorShapeSettings({ fillMode: e.target.value as ShapeFillMode })
+              }
+              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer font-medium"
+            >
+              <option value="none">tylko obrys</option>
+              <option value="primary">kolor główny</option>
+              <option value="stroke-and-fill">kolor dodatkowy</option>
+            </select>
+          </div>
+
+          {/* Grubość obrysu */}
+          <div className="flex items-center gap-1.5 flex-shrink-0">
+            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Obrys:</label>
+            <LengthField
+              valuePx={vectorShapeSettings.strokeWidth}
+              minPx={0}
+              maxPx={200}
+              trackMaxPx={100}
+              integerPx={!fractionalUnits}
+              onCommitPx={(v) => onChangeVectorShapeSettings({ strokeWidth: v })}
+              className="w-14 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white focus:outline-none focus:border-[#007acc] font-mono"
+            />
+            <UnitLabel />
           </div>
 
           {/* Narożnik */}
@@ -563,7 +721,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
                 valuePx={vectorShapeSettings.cornerRadius}
                 minPx={0}
                 maxPx={2000}
-                integerPx={!vecUnits}
+                integerPx={!fractionalUnits}
                 onCommitPx={(v) => onChangeVectorShapeSettings({ cornerRadius: v })}
                 className="w-14 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white font-mono"
               />
@@ -575,28 +733,23 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
             <>
               <div className="flex items-center gap-1 flex-shrink-0">
                 <label className="text-[11px] whitespace-nowrap text-[#aaa]">Ramiona:</label>
-                <input
-                  type="number"
-                  min="3"
-                  max="32"
+                <ScrubField
                   value={vectorShapeSettings.starPoints}
-                  onChange={(e) => {
-                    const val = parseInt(e.target.value);
-                    if (!isNaN(val)) onChangeVectorShapeSettings({ starPoints: Math.max(3, Math.min(32, val)) });
-                  }}
-                  className="w-10 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white font-mono"
+                  min={3}
+                  max={32}
+                  width={64}
+                  onChange={(v) => onChangeVectorShapeSettings({ starPoints: v })}
                 />
               </div>
               <div className="flex items-center gap-1 flex-shrink-0">
                 <label className="text-[11px] whitespace-nowrap text-[#aaa]">Ostrość:</label>
-                <span className="text-[10px] text-[#ccc] font-mono">{Math.round((1 - vectorShapeSettings.starInnerRatio) * 100)}%</span>
-                <input
-                  type="range"
-                  min="10"
-                  max="90"
-                  value={Math.round(vectorShapeSettings.starInnerRatio * 100)}
-                  onChange={(e) => onChangeVectorShapeSettings({ starInnerRatio: parseInt(e.target.value) / 100 })}
-                  className="w-14 h-1 bg-[#444] accent-[#007acc] rounded-lg appearance-none cursor-pointer"
+                <ScrubField
+                  value={Math.round((1 - vectorShapeSettings.starInnerRatio) * 100)}
+                  min={10}
+                  max={90}
+                  suffix="%"
+                  width={80}
+                  onChange={(v) => onChangeVectorShapeSettings({ starInnerRatio: (100 - v) / 100 })}
                 />
               </div>
             </>
@@ -605,16 +758,12 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
           {vectorShapeSettings.shapeKind === 'polygon' && (
             <div className="flex items-center gap-1 flex-shrink-0">
               <label className="text-[11px] whitespace-nowrap text-[#aaa]">Boki:</label>
-              <input
-                type="number"
-                min="3"
-                max="16"
+              <ScrubField
                 value={vectorShapeSettings.polygonSides}
-                onChange={(e) => {
-                  const val = parseInt(e.target.value);
-                  if (!isNaN(val)) onChangeVectorShapeSettings({ polygonSides: Math.max(3, Math.min(16, val)) });
-                }}
-                className="w-10 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white font-mono"
+                min={3}
+                max={16}
+                width={64}
+                onChange={(v) => onChangeVectorShapeSettings({ polygonSides: v })}
               />
             </div>
           )}
@@ -623,41 +772,33 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
             <>
               <div className="flex items-center gap-1 flex-shrink-0">
                 <label className="text-[11px] whitespace-nowrap text-[#aaa]">Grot:</label>
-                <span className="text-[10px] text-[#ccc] font-mono">{Math.round(vectorShapeSettings.arrowHeadWidth * 100)}%</span>
-                <input
-                  type="range"
-                  min="15"
-                  max="85"
+                <ScrubField
                   value={Math.round(vectorShapeSettings.arrowHeadWidth * 100)}
-                  onChange={(e) => onChangeVectorShapeSettings({ arrowHeadWidth: parseInt(e.target.value) / 100 })}
-                  className="w-14 h-1 bg-[#444] accent-[#007acc] rounded-lg appearance-none cursor-pointer"
+                  min={15}
+                  max={85}
+                  suffix="%"
+                  width={80}
+                  onChange={(v) => onChangeVectorShapeSettings({ arrowHeadWidth: v / 100 })}
                 />
               </div>
               <div className="flex items-center gap-1 flex-shrink-0">
                 <label className="text-[11px] whitespace-nowrap text-[#aaa]">Trzon:</label>
-                <span className="text-[10px] text-[#ccc] font-mono">{Math.round(vectorShapeSettings.arrowShaftThickness * 100)}%</span>
-                <input
-                  type="range"
-                  min="10"
-                  max="85"
+                <ScrubField
                   value={Math.round(vectorShapeSettings.arrowShaftThickness * 100)}
-                  onChange={(e) => onChangeVectorShapeSettings({ arrowShaftThickness: parseInt(e.target.value) / 100 })}
-                  className="w-14 h-1 bg-[#444] accent-[#007acc] rounded-lg appearance-none cursor-pointer"
+                  min={10}
+                  max={85}
+                  suffix="%"
+                  width={80}
+                  onChange={(v) => onChangeVectorShapeSettings({ arrowShaftThickness: v / 100 })}
                 />
               </div>
             </>
           )}
 
           {/* Wygładzanie */}
-          <label className="flex items-center gap-1.5 cursor-pointer text-[11px] hover:text-white flex-shrink-0">
-            <input
-              type="checkbox"
-              checked={vectorShapeSettings.antiAliasing}
-              onChange={(e) => onChangeVectorShapeSettings({ antiAliasing: e.target.checked })}
-              className="rounded bg-[#1e1e1e] border-[#555] text-[#007acc] focus:ring-0 focus:ring-offset-0 h-3.5 w-3.5 cursor-pointer"
-            />
-            <span>Wygładzanie</span>
-          </label>
+          <ToggleButton active={vectorShapeSettings.antiAliasing} onChange={(v) => onChangeVectorShapeSettings({ antiAliasing: v })}>
+            Wygładzanie
+          </ToggleButton>
 
           {/* Tryb mieszania */}
           <div className="flex items-center gap-1.5 flex-shrink-0">
@@ -676,17 +817,16 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
           </div>
         </div>
       ) : activeTool === 'text' && textSettings && onChangeTextSettings ? (
-        /* OPCJE NARZĘDZIA TEKSTU */
+        /* Opcje narzędzia tekstu */
         <TextOptions
           settings={textSettings}
           onChange={onChangeTextSettings}
           onRequestFocus={onRequestTextFocus}
-          isSessionActive={isLiveVectorSessionActive}
           onCommit={onCommitLiveVectorSession}
           onCancel={onCancelLiveVectorSession}
         />
       ) : activeTool === 'pipette' ? (
-        /* 3. PASEK OPCJI PIPETY */
+        /* Pasek opcji pipety */
         <div className="flex items-center gap-3.5 flex-1 flex-shrink-0">
           {/* Próbkowanie: Warstwa / Obraz */}
           <div className="flex items-center gap-1.5">
@@ -729,35 +869,23 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
             </select>
 
             <div className="flex items-center gap-1">
-              <input
-                type="number"
-                min="1"
-                max="101"
+              <ScrubField
                 value={pipetteSettings.sampleDiameter}
-                onChange={(e) => {
-                  const val = parseInt(e.target.value);
-                  if (!isNaN(val)) {
-                    onChangePipetteSettings({ sampleDiameter: Math.max(1, Math.min(101, val)) });
-                  }
-                }}
-                className="w-12 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white font-mono focus:outline-none focus:border-[#00bcd4]"
+                min={1}
+                max={101}
+                width={92}
+                onChange={(v) => onChangePipetteSettings({ sampleDiameter: v })}
               />
               <span className="text-[10px] text-[#888]">px</span>
             </div>
           </div>
 
-          <label className="flex items-center gap-1.5 cursor-pointer text-[11px] hover:text-white">
-            <input
-              type="checkbox"
-              checked={pipetteSettings.showLoupe}
-              onChange={(e) => onChangePipetteSettings({ showLoupe: e.target.checked })}
-              className="rounded bg-[#1e1e1e] border-[#555] text-[#00bcd4] focus:ring-0 focus:ring-offset-0 h-3.5 w-3.5 cursor-pointer"
-            />
-            <span>Pokaż lupę</span>
-          </label>
+          <ToggleButton active={pipetteSettings.showLoupe} onChange={(v) => onChangePipetteSettings({ showLoupe: v })}>
+            Pokaż lupę
+          </ToggleButton>
         </div>
       ) : activeTool === 'transform-selection' || activeTool === 'transform-content' ? (
-        /* 4. PASEK OPCJI PRZEKSZTAŁCANIA */
+        /* Pasek opcji przekształcania */
         <div className="flex items-center gap-3 flex-1 flex-shrink-0">
           {activeTool === 'transform-content' && (
             <div className="flex items-center gap-1.5">
@@ -802,7 +930,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
           </div>
         </div>
       ) : isSelectionTool ? (
-        /* 5. PASEK OPCJI ZAZNACZANIA */
+        /* Pasek opcji zaznaczania */
         <div className="flex items-center gap-3 flex-1 flex-shrink-0">
           <div className="flex items-center gap-1.5">
             <label className="text-[11px] whitespace-nowrap text-[#aaa]">Tryb:</label>
@@ -863,34 +991,28 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
               {selectionSettings.constraint === 'fixed-ratio' && (
                 <div className="flex items-center gap-1.5 bg-[#1e1e1e] px-1.5 py-0.5 rounded border border-[#3e3e3e]">
                   <label className="text-[11px] whitespace-nowrap text-[#aaa]">Proporcja:</label>
-                  <input
-                    type="number"
-                    min="0.1"
-                    step="0.5"
+                  <ScrubField
                     value={selectionSettings.ratioW}
-                    onChange={(e) => {
-                      const val = parseFloat(e.target.value);
-                      if (!isNaN(val) && val > 0) {
-                        onChangeSelectionSettings({ ratioW: val });
-                      }
-                    }}
-                    className="w-11 h-5 bg-[#252525] border border-[#555] rounded px-1 text-center text-xs text-white font-mono focus:outline-none focus:border-[#00bcd4]"
+                    min={0.1}
+                    max={100}
+                    step={0.1}
+                    openEnded
+                    speed={0.05}
+                    width={72}
                     title="Szerokość proporcji"
+                    onChange={(v) => onChangeSelectionSettings({ ratioW: v })}
                   />
                   <span className="text-xs text-[#888] font-bold">:</span>
-                  <input
-                    type="number"
-                    min="0.1"
-                    step="0.5"
+                  <ScrubField
                     value={selectionSettings.ratioH}
-                    onChange={(e) => {
-                      const val = parseFloat(e.target.value);
-                      if (!isNaN(val) && val > 0) {
-                        onChangeSelectionSettings({ ratioH: val });
-                      }
-                    }}
-                    className="w-11 h-5 bg-[#252525] border border-[#555] rounded px-1 text-center text-xs text-white font-mono focus:outline-none focus:border-[#00bcd4]"
+                    min={0.1}
+                    max={100}
+                    step={0.1}
+                    openEnded
+                    speed={0.05}
+                    width={72}
                     title="Wysokość proporcji"
+                    onChange={(v) => onChangeSelectionSettings({ ratioH: v })}
                   />
                 </div>
               )}
@@ -898,34 +1020,24 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
               {selectionSettings.constraint === 'fixed-size' && (
                 <div className="flex items-center gap-1.5 bg-[#1e1e1e] px-1.5 py-0.5 rounded border border-[#3e3e3e]">
                   <label className="text-[11px] whitespace-nowrap text-[#aaa]">Szer.:</label>
-                  <input
-                    type="number"
-                    min="1"
-                    max="10000"
+                  <ScrubField
                     value={selectionSettings.fixedW}
-                    onChange={(e) => {
-                      const val = parseInt(e.target.value);
-                      if (!isNaN(val) && val > 0) {
-                        onChangeSelectionSettings({ fixedW: val });
-                      }
-                    }}
-                    className="w-14 h-5 bg-[#252525] border border-[#555] rounded px-1 text-center text-xs text-white font-mono focus:outline-none focus:border-[#00bcd4]"
+                    min={1}
+                    max={10000}
+                    curve={2.5}
+                    width={92}
+                    onChange={(v) => onChangeSelectionSettings({ fixedW: v })}
                   />
                   <span className="text-[10px] text-[#888]">px</span>
 
                   <label className="text-[11px] whitespace-nowrap text-[#aaa] ml-1">Wys.:</label>
-                  <input
-                    type="number"
-                    min="1"
-                    max="10000"
+                  <ScrubField
                     value={selectionSettings.fixedH}
-                    onChange={(e) => {
-                      const val = parseInt(e.target.value);
-                      if (!isNaN(val) && val > 0) {
-                        onChangeSelectionSettings({ fixedH: val });
-                      }
-                    }}
-                    className="w-14 h-5 bg-[#252525] border border-[#555] rounded px-1 text-center text-xs text-white font-mono focus:outline-none focus:border-[#00bcd4]"
+                    min={1}
+                    max={10000}
+                    curve={2.5}
+                    width={92}
+                    onChange={(v) => onChangeSelectionSettings({ fixedH: v })}
                   />
                   <span className="text-[10px] text-[#888]">px</span>
                 </div>
@@ -935,18 +1047,12 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
 
           <div className="flex items-center gap-1.5">
             <label className="text-[11px] whitespace-nowrap text-[#aaa]">Wtapianie:</label>
-            <input
-              type="number"
-              min="0"
-              max="100"
+            <ScrubField
               value={selectionSettings.feather}
-              onChange={(e) => {
-                const val = parseInt(e.target.value);
-                if (!isNaN(val)) {
-                  onChangeSelectionSettings({ feather: Math.max(0, Math.min(100, val)) });
-                }
-              }}
-              className="w-12 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white font-mono"
+              min={0}
+              max={100}
+              width={64}
+              onChange={(v) => onChangeSelectionSettings({ feather: v })}
             />
             <span className="text-[10px] text-[#888]">px</span>
           </div>
@@ -955,31 +1061,14 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
             <>
               <div className="flex items-center gap-1.5">
                 <label className="text-[11px] whitespace-nowrap text-[#aaa]">Tolerancja:</label>
-                <input
-                  type="number"
-                  min="0"
-                  max="100"
+                <ScrubField
                   value={selectionSettings.tolerance}
-                  onChange={(e) => {
-                    const val = parseInt(e.target.value);
-                    if (!isNaN(val)) {
-                      onChangeSelectionSettings({ tolerance: Math.max(0, Math.min(100, val)) });
-                    }
-                  }}
-                  className="w-12 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white font-mono"
+                  min={0}
+                  max={100}
+                  width={92}
+                  onChange={(v) => onChangeSelectionSettings({ tolerance: v })}
                 />
-                <input
-                  type="range"
-                  min="0"
-                  max="100"
-                  value={selectionSettings.tolerance}
-                  onChange={(e) => {
-                    onChangeSelectionSettings({ tolerance: parseInt(e.target.value) });
-                  }}
-                  className="w-20 h-1 bg-[#444] accent-[#007acc] rounded-lg appearance-none cursor-pointer"
-                  title={`Tolerancja próbkowania: ${selectionSettings.tolerance}%`}
-                />
-                <span className="text-[10px] text-[#888] font-mono w-6">{selectionSettings.tolerance}%</span>
+
               </div>
 
               <div className="flex items-center gap-1.5">
@@ -1018,7 +1107,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
           )}
         </div>
       ) : activeTool === 'gradient' ? (
-        /* 6. PASEK OPCJI GRADIENTU */
+        /* Pasek opcji gradientu */
         <div className="flex items-center gap-3 flex-1 flex-shrink-0">
           <div className="flex items-center gap-1.5">
             <label className="text-[11px] whitespace-nowrap text-[#aaa]">Kształt:</label>
@@ -1072,51 +1161,29 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
             </select>
           </div>
 
-          <button
-            type="button"
-            onClick={() => onChangeGradientSettings?.({ reverse: !gradientSettings?.reverse })}
+          <ToggleButton
+            active={!!gradientSettings?.reverse}
+            onChange={(v) => onChangeGradientSettings?.({ reverse: v })}
             title="Odwróć kierunek kolorów gradientu"
-            className={`flex items-center gap-1 px-2 h-5 rounded text-xs border transition-colors cursor-pointer ${
-              gradientSettings?.reverse
-                ? 'bg-[#0284c7] border-[#38bdf8] text-white font-medium'
-                : 'bg-[#252525] border-[#444] text-[#ccc] hover:bg-[#333]'
-            }`}
           >
             <ArrowLeftRight size={12} />
             <span>Odwróć</span>
-          </button>
+          </ToggleButton>
         </div>
       ) : activeTool === 'bucket' ? (
-        /* 7. PASEK OPCJI WIADRA Z FARBĄ */
+        /* Pasek opcji wiadra z farbą */
         <div className="flex items-center gap-3 flex-1 flex-shrink-0">
           {/* Tolerancja */}
           <div className="flex items-center gap-1.5">
             <label className="text-[11px] whitespace-nowrap text-[#aaa]">Tolerancja:</label>
-            <input
-              type="number"
-              min="0"
-              max="100"
+            <ScrubField
               value={selectionSettings.tolerance}
-              onChange={(e) => {
-                const val = parseInt(e.target.value);
-                if (!isNaN(val)) {
-                  onChangeSelectionSettings({ tolerance: Math.max(0, Math.min(100, val)) });
-                }
-              }}
-              className="w-12 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white font-mono"
+              min={0}
+              max={100}
+              width={92}
+              onChange={(v) => onChangeSelectionSettings({ tolerance: v })}
             />
-            <input
-              type="range"
-              min="0"
-              max="100"
-              value={selectionSettings.tolerance}
-              onChange={(e) => {
-                onChangeSelectionSettings({ tolerance: parseInt(e.target.value) });
-              }}
-              className="w-20 h-1 bg-[#444] accent-[#ff9800] rounded-lg appearance-none cursor-pointer"
-              title={`Tolerancja próbkowania: ${selectionSettings.tolerance}%`}
-            />
-            <span className="text-[10px] text-[#888] font-mono w-6">{selectionSettings.tolerance}%</span>
+
           </div>
 
           {/* Zakres / Ciągłość */}
@@ -1154,15 +1221,9 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
           </div>
 
           {/* Wygładzanie */}
-          <label className="flex items-center gap-1.5 cursor-pointer text-[11px] hover:text-white">
-            <input
-              type="checkbox"
-              checked={brushSettings.antiAliasing}
-              onChange={(e) => onChangeSettings({ antiAliasing: e.target.checked })}
-              className="rounded bg-[#1e1e1e] border-[#555] text-[#ff9800] focus:ring-0 focus:ring-offset-0 h-3.5 w-3.5 cursor-pointer"
-            />
-            <span>Wygładzanie</span>
-          </label>
+          <ToggleButton active={brushSettings.antiAliasing} onChange={(v) => onChangeSettings({ antiAliasing: v })}>
+            Wygładzanie
+          </ToggleButton>
 
           {/* Tryb mieszania */}
           <div className="flex items-center gap-1.5">
@@ -1181,7 +1242,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
           </div>
         </div>
       ) : activeTool === 'correction-brush' ? (
-        /* 7b. PASEK OPCJI PĘDZLA KOREKCYJNEGO */
+        /* Pasek opcji pędzla korekcyjnego */
         <div className="flex items-center gap-3 flex-1 flex-shrink-0">
           {/* Rodzaj korekcji */}
           <div className="flex items-center gap-1.5">
@@ -1204,121 +1265,64 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
           {/* Rozmiar */}
           <div className="flex items-center gap-1.5">
             <label className="text-[11px] whitespace-nowrap">Rozmiar:</label>
-            <input
-              type="number"
-              min="1"
-              max="2000"
+            <ScrubField
               value={correctionBrushSettings.size}
-              onChange={(e) => {
-                const val = parseInt(e.target.value);
-                if (!isNaN(val)) {
-                  onChangeCorrectionBrushSettings?.({ size: Math.max(1, Math.min(2000, val)) });
-                }
-              }}
-              className="w-14 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white focus:outline-none focus:border-[#007acc] font-mono"
+              min={1}
+              max={2000}
+              curve={2.6}
+              width={92}
+              onChange={(v) => onChangeCorrectionBrushSettings?.({ size: v })}
             />
-            <input
-              type="range"
-              min="0"
-              max="1000"
-              value={sizeToSlider(correctionBrushSettings.size)}
-              onChange={(e) => {
-                const size = sliderToSize(parseInt(e.target.value));
-                onChangeCorrectionBrushSettings?.({ size });
-              }}
-              className="w-24 h-1 bg-[#444] accent-[#007acc] rounded-lg appearance-none cursor-pointer"
-              title={`Rozmiar: ${correctionBrushSettings.size} px`}
-            />
+
           </div>
 
           {/* Twardość */}
           <div className="flex items-center gap-1.5">
             <label className="text-[11px] whitespace-nowrap">Twardość:</label>
-            <span className="text-[11px] text-[#ccc] w-9 text-right font-mono">{correctionBrushSettings.hardness}%</span>
-            <input
-              type="range"
-              min="0"
-              max="100"
-              value={correctionBrushSettings.hardness}
-              onChange={(e) => onChangeCorrectionBrushSettings?.({ hardness: parseInt(e.target.value) })}
-              className="w-20 h-1 bg-[#444] accent-[#007acc] rounded-lg appearance-none cursor-pointer"
-            />
+            <ScrubField value={correctionBrushSettings.hardness} min={0} max={100} suffix="%" width={80} onChange={(v) => onChangeCorrectionBrushSettings?.({ hardness: v })} />
           </div>
 
           {/* Wygładzanie */}
-          <label className="flex items-center gap-1.5 cursor-pointer text-[11px] hover:text-white">
-            <input
-              type="checkbox"
-              checked={correctionBrushSettings.antiAliasing}
-              onChange={(e) => onChangeCorrectionBrushSettings?.({ antiAliasing: e.target.checked })}
-              className="rounded bg-[#1e1e1e] border-[#555] text-[#007acc] focus:ring-0 focus:ring-offset-0 h-3.5 w-3.5 cursor-pointer"
-            />
-            <span>Wygładzanie</span>
-          </label>
+          <ToggleButton active={correctionBrushSettings.antiAliasing} onChange={(v) => onChangeCorrectionBrushSettings?.({ antiAliasing: v })}>
+            Wygładzanie
+          </ToggleButton>
 
           {/* Odstęp */}
           <div className="flex items-center gap-1.5">
             <label className="text-[11px] whitespace-nowrap">Odstęp:</label>
-            <input
-              type="number"
-              min="1"
-              max="500"
+            <ScrubField
               value={correctionBrushSettings.spacing}
-              onChange={(e) => {
-                const val = parseInt(e.target.value);
-                if (!isNaN(val)) {
-                  onChangeCorrectionBrushSettings?.({ spacing: Math.max(1, Math.min(500, val)) });
-                }
-              }}
-              className="w-12 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white focus:outline-none focus:border-[#007acc] font-mono"
+              min={1}
+              max={500}
+              curve={2.2}
+              width={92}
+              onChange={(v) => onChangeCorrectionBrushSettings?.({ spacing: v })}
             />
             <span className="text-[10px] text-[#888]">%</span>
-            <input
-              type="range"
-              min="0"
-              max="1000"
-              value={spacingToSlider(correctionBrushSettings.spacing)}
-              onChange={(e) => {
-                const spacing = sliderToSpacing(parseInt(e.target.value));
-                onChangeCorrectionBrushSettings?.({ spacing });
-              }}
-              className="w-20 h-1 bg-[#444] accent-[#007acc] rounded-lg appearance-none cursor-pointer"
-            />
+
           </div>
 
           {/* Odwróć działanie */}
-          <label className="flex items-center gap-1.5 cursor-pointer text-[11px] hover:text-white border-l border-[#444] pl-2.5">
-            <input
-              type="checkbox"
-              checked={correctionBrushSettings.invertAction}
-              onChange={(e) => onChangeCorrectionBrushSettings?.({ invertAction: e.target.checked })}
-              className="rounded bg-[#1e1e1e] border-[#555] text-[#007acc] focus:ring-0 focus:ring-offset-0 h-3.5 w-3.5 cursor-pointer"
-            />
-            <span>Odwróć działanie</span>
-          </label>
+          <ToggleButton divider active={correctionBrushSettings.invertAction} onChange={(v) => onChangeCorrectionBrushSettings?.({ invertAction: v })}>
+            Odwróć działanie
+          </ToggleButton>
 
           {/* Intensywność (zależna od kanału Alfa) */}
           <div className="flex items-center gap-1.5 border-l border-[#444] pl-2.5">
             <label className="text-[11px] whitespace-nowrap text-[#aaa]">Intensywność:</label>
-            <span className="text-[11px] text-[#ccc] w-9 text-right font-mono">
-              {Math.round(((primaryColor?.a ?? 255) / 255) * 100)}%
-            </span>
-            <input
-              type="range"
-              min="1"
-              max="255"
-              value={primaryColor?.a ?? 255}
-              onChange={(e) => {
-                const a = parseInt(e.target.value);
-                onChangePrimaryColorAlpha?.(a);
-              }}
-              className="w-20 h-1 bg-[#444] accent-[#007acc] rounded-lg appearance-none cursor-pointer"
-              title={`Intensywność: ${Math.round(((primaryColor?.a ?? 255) / 255) * 100)}%`}
+            <ScrubField
+              value={Math.round(((primaryColor?.a ?? 255) / 255) * 100)}
+              min={1}
+              max={100}
+              suffix="%"
+              width={80}
+              onChange={(v) => onChangePrimaryColorAlpha?.(Math.round((v / 100) * 255))}
+              title="Intensywność"
             />
           </div>
         </div>
       ) : activeTool === 'color-replace' ? (
-        /* 7c. PASEK OPCJI PĘDZLA ZMIANY KOLORU */
+        /* Pasek opcji pędzla zmiany koloru */
         <div className="flex items-center gap-3 flex-1 flex-shrink-0">
           {/* Tryb: Pojedynczy / Kolor dodatkowy */}
           <div className="flex items-center gap-1.5">
@@ -1340,204 +1344,98 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
           {/* Tolerancja */}
           <div className="flex items-center gap-1.5 border-l border-[#444] pl-2.5">
             <label className="text-[11px] whitespace-nowrap text-[#aaa]">Tolerancja:</label>
-            <input
-              type="number"
-              min="0"
-              max="100"
+            <ScrubField
               value={colorReplaceSettings.tolerance}
-              onChange={(e) => {
-                const val = parseInt(e.target.value);
-                if (!isNaN(val)) {
-                  onChangeColorReplaceSettings?.({ tolerance: Math.max(0, Math.min(100, val)) });
-                }
-              }}
-              className="w-12 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white focus:outline-none focus:border-[#10b981] font-mono"
+              min={0}
+              max={100}
+              width={92}
+              onChange={(v) => onChangeColorReplaceSettings?.({ tolerance: v })}
             />
             <span className="text-[10px] text-[#888] font-mono w-6">{colorReplaceSettings.tolerance}%</span>
-            <input
-              type="range"
-              min="0"
-              max="100"
-              value={colorReplaceSettings.tolerance}
-              onChange={(e) =>
-                onChangeColorReplaceSettings?.({ tolerance: parseInt(e.target.value) })
-              }
-              className="w-20 h-1 bg-[#444] accent-[#10b981] rounded-lg appearance-none cursor-pointer"
-              title={`Tolerancja koloru: ${colorReplaceSettings.tolerance}%`}
-            />
+
           </div>
 
           {/* Rozmiar */}
           <div className="flex items-center gap-1.5 border-l border-[#444] pl-2.5">
             <label className="text-[11px] whitespace-nowrap">Rozmiar:</label>
-            <input
-              type="number"
-              min="1"
-              max="2000"
+            <ScrubField
               value={colorReplaceSettings.size}
-              onChange={(e) => {
-                const val = parseInt(e.target.value);
-                if (!isNaN(val)) {
-                  onChangeColorReplaceSettings?.({ size: Math.max(1, Math.min(2000, val)) });
-                }
-              }}
-              className="w-14 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white focus:outline-none focus:border-[#10b981] font-mono"
+              min={1}
+              max={2000}
+              curve={2.6}
+              width={92}
+              onChange={(v) => onChangeColorReplaceSettings?.({ size: v })}
             />
-            <input
-              type="range"
-              min="0"
-              max="1000"
-              value={sizeToSlider(colorReplaceSettings.size)}
-              onChange={(e) => {
-                const size = sliderToSize(parseInt(e.target.value));
-                onChangeColorReplaceSettings?.({ size });
-              }}
-              className="w-24 h-1 bg-[#444] accent-[#10b981] rounded-lg appearance-none cursor-pointer"
-              title={`Rozmiar: ${colorReplaceSettings.size} px`}
-            />
+
           </div>
 
           {/* Twardość */}
           <div className="flex items-center gap-1.5">
             <label className="text-[11px] whitespace-nowrap">Twardość:</label>
-            <span className="text-[11px] text-[#ccc] w-9 text-right font-mono">{colorReplaceSettings.hardness}%</span>
-            <input
-              type="range"
-              min="0"
-              max="100"
-              value={colorReplaceSettings.hardness}
-              onChange={(e) => onChangeColorReplaceSettings?.({ hardness: parseInt(e.target.value) })}
-              className="w-20 h-1 bg-[#444] accent-[#10b981] rounded-lg appearance-none cursor-pointer"
-            />
+            <ScrubField value={colorReplaceSettings.hardness} min={0} max={100} suffix="%" width={80} onChange={(v) => onChangeColorReplaceSettings?.({ hardness: v })} />
           </div>
 
           {/* Wygładzanie */}
-          <label className="flex items-center gap-1.5 cursor-pointer text-[11px] hover:text-white">
-            <input
-              type="checkbox"
-              checked={colorReplaceSettings.antiAliasing}
-              onChange={(e) => onChangeColorReplaceSettings?.({ antiAliasing: e.target.checked })}
-              className="rounded bg-[#1e1e1e] border-[#555] text-[#10b981] focus:ring-0 focus:ring-offset-0 h-3.5 w-3.5 cursor-pointer"
-            />
-            <span>Wygładzanie</span>
-          </label>
+          <ToggleButton active={colorReplaceSettings.antiAliasing} onChange={(v) => onChangeColorReplaceSettings?.({ antiAliasing: v })}>
+            Wygładzanie
+          </ToggleButton>
 
           {/* Odstęp */}
           <div className="flex items-center gap-1.5">
             <label className="text-[11px] whitespace-nowrap">Odstęp:</label>
-            <input
-              type="number"
-              min="1"
-              max="500"
+            <ScrubField
               value={colorReplaceSettings.spacing}
-              onChange={(e) => {
-                const val = parseInt(e.target.value);
-                if (!isNaN(val)) {
-                  onChangeColorReplaceSettings?.({ spacing: Math.max(1, Math.min(500, val)) });
-                }
-              }}
-              className="w-12 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white focus:outline-none focus:border-[#10b981] font-mono"
+              min={1}
+              max={500}
+              curve={2.2}
+              width={92}
+              onChange={(v) => onChangeColorReplaceSettings?.({ spacing: v })}
             />
             <span className="text-[10px] text-[#888]">%</span>
-            <input
-              type="range"
-              min="0"
-              max="1000"
-              value={spacingToSlider(colorReplaceSettings.spacing)}
-              onChange={(e) => {
-                const spacing = sliderToSpacing(parseInt(e.target.value));
-                onChangeColorReplaceSettings?.({ spacing });
-              }}
-              className="w-20 h-1 bg-[#444] accent-[#10b981] rounded-lg appearance-none cursor-pointer"
-            />
+
           </div>
         </div>
       ) : activeTool === 'stamp' ? (
-        /* 7d. PASEK OPCJI PIECZĄTKI (CLONE STAMP) */
+        /* Pasek opcji pieczątki */
         <div className="flex items-center gap-3 flex-1 flex-shrink-0">
           {/* Rozmiar */}
           <div className="flex items-center gap-1.5">
             <label className="text-[11px] whitespace-nowrap">Rozmiar:</label>
-            <input
-              type="number"
-              min="1"
-              max="2000"
+            <ScrubField
               value={stampSettings.size}
-              onChange={(e) => {
-                const val = parseInt(e.target.value);
-                if (!isNaN(val)) {
-                  onChangeStampSettings?.({ size: Math.max(1, Math.min(2000, val)) });
-                }
-              }}
-              className="w-14 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white focus:outline-none focus:border-[#007acc] font-mono"
+              min={1}
+              max={2000}
+              curve={2.6}
+              width={92}
+              onChange={(v) => onChangeStampSettings?.({ size: v })}
             />
-            <input
-              type="range"
-              min="0"
-              max="1000"
-              value={sizeToSlider(stampSettings.size)}
-              onChange={(e) => {
-                const size = sliderToSize(parseInt(e.target.value));
-                onChangeStampSettings?.({ size });
-              }}
-              className="w-24 h-1 bg-[#444] accent-[#007acc] rounded-lg appearance-none cursor-pointer"
-              title={`Rozmiar: ${stampSettings.size} px`}
-            />
+
           </div>
 
           {/* Twardość */}
           <div className="flex items-center gap-1.5 border-l border-[#444] pl-2.5">
             <label className="text-[11px] whitespace-nowrap">Twardość:</label>
-            <span className="text-[11px] text-[#ccc] w-9 text-right font-mono">{stampSettings.hardness}%</span>
-            <input
-              type="range"
-              min="0"
-              max="100"
-              value={stampSettings.hardness}
-              onChange={(e) => onChangeStampSettings?.({ hardness: parseInt(e.target.value) })}
-              className="w-20 h-1 bg-[#444] accent-[#007acc] rounded-lg appearance-none cursor-pointer"
-            />
+            <ScrubField value={stampSettings.hardness} min={0} max={100} suffix="%" width={80} onChange={(v) => onChangeStampSettings?.({ hardness: v })} />
           </div>
 
           {/* Wygładzanie */}
-          <label className="flex items-center gap-1.5 cursor-pointer text-[11px] hover:text-white border-l border-[#444] pl-2.5">
-            <input
-              type="checkbox"
-              checked={stampSettings.antiAliasing}
-              onChange={(e) => onChangeStampSettings?.({ antiAliasing: e.target.checked })}
-              className="rounded bg-[#1e1e1e] border-[#555] text-[#007acc] focus:ring-0 focus:ring-offset-0 h-3.5 w-3.5 cursor-pointer"
-            />
-            <span>Wygładzanie</span>
-          </label>
+          <ToggleButton divider active={stampSettings.antiAliasing} onChange={(v) => onChangeStampSettings?.({ antiAliasing: v })}>
+            Wygładzanie
+          </ToggleButton>
 
           {/* Odstęp */}
           <div className="flex items-center gap-1.5 border-l border-[#444] pl-2.5">
             <label className="text-[11px] whitespace-nowrap">Odstęp:</label>
-            <input
-              type="number"
-              min="1"
-              max="500"
+            <ScrubField
               value={stampSettings.spacing}
-              onChange={(e) => {
-                const val = parseInt(e.target.value);
-                if (!isNaN(val)) {
-                  onChangeStampSettings?.({ spacing: Math.max(1, Math.min(500, val)) });
-                }
-              }}
-              className="w-12 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white focus:outline-none focus:border-[#007acc] font-mono"
+              min={1}
+              max={500}
+              curve={2.2}
+              width={92}
+              onChange={(v) => onChangeStampSettings?.({ spacing: v })}
             />
             <span className="text-[10px] text-[#888]">%</span>
-            <input
-              type="range"
-              min="0"
-              max="1000"
-              value={spacingToSlider(stampSettings.spacing)}
-              onChange={(e) => {
-                const spacing = sliderToSpacing(parseInt(e.target.value));
-                onChangeStampSettings?.({ spacing });
-              }}
-              className="w-20 h-1 bg-[#444] accent-[#007acc] rounded-lg appearance-none cursor-pointer"
-            />
+
           </div>
 
           {/* Tryb mieszania */}
@@ -1586,25 +1484,19 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
           {/* Krycie (z kanału alfa koloru) */}
           <div className="flex items-center gap-1.5 border-l border-[#444] pl-2.5">
             <label className="text-[11px] whitespace-nowrap text-[#aaa]">Krycie:</label>
-            <span className="text-[11px] text-[#ccc] w-9 text-right font-mono">
-              {Math.round(((primaryColor?.a ?? 255) / 255) * 100)}%
-            </span>
-            <input
-              type="range"
-              min="1"
-              max="255"
-              value={primaryColor?.a ?? 255}
-              onChange={(e) => {
-                const a = parseInt(e.target.value);
-                onChangePrimaryColorAlpha?.(a);
-              }}
-              className="w-20 h-1 bg-[#444] accent-[#007acc] rounded-lg appearance-none cursor-pointer"
-              title={`Krycie pieczątki (kanał alfa): ${Math.round(((primaryColor?.a ?? 255) / 255) * 100)}%`}
+            <ScrubField
+              value={Math.round(((primaryColor?.a ?? 255) / 255) * 100)}
+              min={1}
+              max={100}
+              suffix="%"
+              width={80}
+              onChange={(v) => onChangePrimaryColorAlpha?.(Math.round((v / 100) * 255))}
+              title="Krycie pieczątki (kanał alfa)"
             />
           </div>
         </div>
       ) : activeTool === 'deform' ? (
-        /* 7e. PASEK OPCJI DEFORMACJI */
+        /* Pasek opcji deformacji */
         <div className="flex items-center gap-3 flex-1 flex-shrink-0">
           {/* Rodzaj działania */}
           <div className="flex items-center gap-1.5">
@@ -1627,116 +1519,59 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
           {/* Rozmiar */}
           <div className="flex items-center gap-1.5">
             <label className="text-[11px] whitespace-nowrap">Rozmiar:</label>
-            <input
-              type="number"
-              min="1"
-              max="2000"
+            <ScrubField
               value={deformSettings.size}
-              onChange={(e) => {
-                const val = parseInt(e.target.value);
-                if (!isNaN(val)) {
-                  onChangeDeformSettings?.({ size: Math.max(1, Math.min(2000, val)) });
-                }
-              }}
-              className="w-14 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white focus:outline-none focus:border-[#007acc] font-mono"
+              min={1}
+              max={2000}
+              curve={2.6}
+              width={92}
+              onChange={(v) => onChangeDeformSettings?.({ size: v })}
             />
-            <input
-              type="range"
-              min="0"
-              max="1000"
-              value={sizeToSlider(deformSettings.size)}
-              onChange={(e) => {
-                const size = sliderToSize(parseInt(e.target.value));
-                onChangeDeformSettings?.({ size });
-              }}
-              className="w-24 h-1 bg-[#444] accent-[#007acc] rounded-lg appearance-none cursor-pointer"
-              title={`Rozmiar: ${deformSettings.size} px`}
-            />
+
           </div>
 
           {/* Twardość */}
           <div className="flex items-center gap-1.5">
             <label className="text-[11px] whitespace-nowrap">Twardość:</label>
-            <span className="text-[11px] text-[#ccc] w-9 text-right font-mono">{deformSettings.hardness}%</span>
-            <input
-              type="range"
-              min="0"
-              max="100"
-              value={deformSettings.hardness}
-              onChange={(e) => onChangeDeformSettings?.({ hardness: parseInt(e.target.value) })}
-              className="w-20 h-1 bg-[#444] accent-[#007acc] rounded-lg appearance-none cursor-pointer"
-            />
+            <ScrubField value={deformSettings.hardness} min={0} max={100} suffix="%" width={80} onChange={(v) => onChangeDeformSettings?.({ hardness: v })} />
           </div>
 
           {/* Wygładzanie */}
-          <label className="flex items-center gap-1.5 cursor-pointer text-[11px] hover:text-white">
-            <input
-              type="checkbox"
-              checked={deformSettings.antiAliasing}
-              onChange={(e) => onChangeDeformSettings?.({ antiAliasing: e.target.checked })}
-              className="rounded bg-[#1e1e1e] border-[#555] text-[#007acc] focus:ring-0 focus:ring-offset-0 h-3.5 w-3.5 cursor-pointer"
-            />
-            <span>Wygładzanie</span>
-          </label>
+          <ToggleButton active={deformSettings.antiAliasing} onChange={(v) => onChangeDeformSettings?.({ antiAliasing: v })}>
+            Wygładzanie
+          </ToggleButton>
 
           {/* Odstęp */}
           <div className="flex items-center gap-1.5">
             <label className="text-[11px] whitespace-nowrap">Odstęp:</label>
-            <input
-              type="number"
-              min="1"
-              max="500"
+            <ScrubField
               value={deformSettings.spacing}
-              onChange={(e) => {
-                const val = parseInt(e.target.value);
-                if (!isNaN(val)) {
-                  onChangeDeformSettings?.({ spacing: Math.max(1, Math.min(500, val)) });
-                }
-              }}
-              className="w-12 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white focus:outline-none focus:border-[#007acc] font-mono"
+              min={1}
+              max={500}
+              curve={2.2}
+              width={92}
+              onChange={(v) => onChangeDeformSettings?.({ spacing: v })}
             />
             <span className="text-[10px] text-[#888]">%</span>
-            <input
-              type="range"
-              min="0"
-              max="1000"
-              value={spacingToSlider(deformSettings.spacing)}
-              onChange={(e) => {
-                const spacing = sliderToSpacing(parseInt(e.target.value));
-                onChangeDeformSettings?.({ spacing });
-              }}
-              className="w-20 h-1 bg-[#444] accent-[#007acc] rounded-lg appearance-none cursor-pointer"
-            />
+
           </div>
 
           {/* Odwróć działanie */}
-          <label className="flex items-center gap-1.5 cursor-pointer text-[11px] hover:text-white border-l border-[#444] pl-2.5">
-            <input
-              type="checkbox"
-              checked={deformSettings.invertAction}
-              onChange={(e) => onChangeDeformSettings?.({ invertAction: e.target.checked })}
-              className="rounded bg-[#1e1e1e] border-[#555] text-[#007acc] focus:ring-0 focus:ring-offset-0 h-3.5 w-3.5 cursor-pointer"
-            />
-            <span>Odwróć działanie</span>
-          </label>
+          <ToggleButton divider active={deformSettings.invertAction} onChange={(v) => onChangeDeformSettings?.({ invertAction: v })}>
+            Odwróć działanie
+          </ToggleButton>
 
           {/* Intensywność (zależna od kanału Alfa) */}
           <div className="flex items-center gap-1.5 border-l border-[#444] pl-2.5">
             <label className="text-[11px] whitespace-nowrap text-[#aaa]">Intensywność:</label>
-            <span className="text-[11px] text-[#ccc] w-9 text-right font-mono">
-              {Math.round(((primaryColor?.a ?? 255) / 255) * 100)}%
-            </span>
-            <input
-              type="range"
-              min="1"
-              max="255"
-              value={primaryColor?.a ?? 255}
-              onChange={(e) => {
-                const a = parseInt(e.target.value);
-                onChangePrimaryColorAlpha?.(a);
-              }}
-              className="w-20 h-1 bg-[#444] accent-[#007acc] rounded-lg appearance-none cursor-pointer"
-              title={`Intensywność: ${Math.round(((primaryColor?.a ?? 255) / 255) * 100)}%`}
+            <ScrubField
+              value={Math.round(((primaryColor?.a ?? 255) / 255) * 100)}
+              min={1}
+              max={100}
+              suffix="%"
+              width={80}
+              onChange={(v) => onChangePrimaryColorAlpha?.(Math.round((v / 100) * 255))}
+              title="Intensywność"
             />
           </div>
         </div>
@@ -1764,91 +1599,46 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
           </div>
         </div>
       ) : (
-        /* 8. PASEK OPCJI PĘDZLA I GUMKI */
+        /* Pasek opcji pędzla i gumki */
         <div className="flex items-center gap-3 flex-1 flex-shrink-0">
           {/* Rozmiar pędzla */}
           <div className="flex items-center gap-1.5">
             <label className="text-[11px] whitespace-nowrap">Rozmiar:</label>
-            <input
-              type="number"
-              min="1"
-              max="2000"
+            <ScrubField
               value={brushSettings.size}
-              onChange={(e) => {
-                const val = parseInt(e.target.value);
-                if (!isNaN(val)) {
-                  onChangeSettings({ size: Math.max(1, Math.min(2000, val)) });
-                }
-              }}
-              className="w-14 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white focus:outline-none focus:border-[#007acc] font-mono"
+              min={1}
+              max={2000}
+              curve={2.6}
+              width={92}
+              onChange={(v) => onChangeSettings({ size: v })}
             />
-            <input
-              type="range"
-              min="0"
-              max="1000"
-              value={sizeToSlider(brushSettings.size)}
-              onChange={(e) => {
-                const size = sliderToSize(parseInt(e.target.value));
-                onChangeSettings({ size });
-              }}
-              className="w-24 h-1 bg-[#444] accent-[#007acc] rounded-lg appearance-none cursor-pointer"
-              title={`Rozmiar pędzla: ${brushSettings.size} px`}
-            />
+
           </div>
 
           {/* Twardość */}
           <div className="flex items-center gap-1.5">
             <label className="text-[11px] whitespace-nowrap">Twardość:</label>
-            <span className="text-[11px] text-[#ccc] w-9 text-right font-mono">{brushSettings.hardness}%</span>
-            <input
-              type="range"
-              min="0"
-              max="100"
-              value={brushSettings.hardness}
-              onChange={(e) => onChangeSettings({ hardness: parseInt(e.target.value) })}
-              className="w-20 h-1 bg-[#444] accent-[#007acc] rounded-lg appearance-none cursor-pointer"
-            />
+            <ScrubField value={brushSettings.hardness} min={0} max={100} suffix="%" width={80} onChange={(v) => onChangeSettings({ hardness: v })} />
           </div>
 
           {/* Wygładzanie */}
-          <label className="flex items-center gap-1.5 cursor-pointer text-[11px] hover:text-white">
-            <input
-              type="checkbox"
-              checked={brushSettings.antiAliasing}
-              onChange={(e) => onChangeSettings({ antiAliasing: e.target.checked })}
-              className="rounded bg-[#1e1e1e] border-[#555] text-[#007acc] focus:ring-0 focus:ring-offset-0 h-3.5 w-3.5 cursor-pointer"
-            />
-            <span>Wygładzanie</span>
-          </label>
+          <ToggleButton active={brushSettings.antiAliasing} onChange={(v) => onChangeSettings({ antiAliasing: v })}>
+            Wygładzanie
+          </ToggleButton>
 
           {/* Odstęp */}
           <div className="flex items-center gap-1.5">
             <label className="text-[11px] whitespace-nowrap">Odstęp:</label>
-            <input
-              type="number"
-              min="1"
-              max="500"
+            <ScrubField
               value={brushSettings.spacing}
-              onChange={(e) => {
-                const val = parseInt(e.target.value);
-                if (!isNaN(val)) {
-                  onChangeSettings({ spacing: Math.max(1, Math.min(500, val)) });
-                }
-              }}
-              className="w-12 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white focus:outline-none focus:border-[#007acc] font-mono"
+              min={1}
+              max={500}
+              curve={2.2}
+              width={92}
+              onChange={(v) => onChangeSettings({ spacing: v })}
             />
             <span className="text-[10px] text-[#888]">%</span>
-            <input
-              type="range"
-              min="0"
-              max="1000"
-              value={spacingToSlider(brushSettings.spacing)}
-              onChange={(e) => {
-                const spacing = sliderToSpacing(parseInt(e.target.value));
-                onChangeSettings({ spacing });
-              }}
-              className="w-20 h-1 bg-[#444] accent-[#007acc] rounded-lg appearance-none cursor-pointer"
-            />
+
           </div>
 
           {/* Tryb mieszania */}

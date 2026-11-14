@@ -5,7 +5,7 @@
 
 import React from 'react';
 import { ZoomIn, ZoomOut, RotateCcw, Magnet, Grid } from 'lucide-react';
-import { LENGTH_UNITS, LengthUnit, UNIT_LABEL, UnitMode, fmtUnit } from '../core/skia/Units.ts';
+import { LENGTH_UNITS, LengthUnit, UNIT_LABEL, fmtUnit } from '../core/Units.ts';
 
 interface StatusBarProps {
   statusText: string;
@@ -13,9 +13,7 @@ interface StatusBarProps {
   docHeight: number;
   zoom: number;
   onZoomChange: (newZoom: number) => void;
-  unitMode?: UnitMode;
-  onUnitModeChange?: (m: UnitMode) => void;
-  /** Dokument obiektu inteligentnego: wymiary zawsze w pikselach, przełącznik nieaktywny. */
+  /** Dokument obiektu inteligentnego: wymiary zawsze w pikselach, przełącznik jednostek nieaktywny. */
   unitsLocked?: boolean;
   unit?: LengthUnit;
   onUnitChange?: (u: LengthUnit) => void;
@@ -32,8 +30,6 @@ export const StatusBar: React.FC<StatusBarProps> = ({
   docHeight,
   zoom,
   onZoomChange,
-  unitMode = 'px',
-  onUnitModeChange,
   unitsLocked = false,
   unit = 'px',
   onUnitChange,
@@ -73,17 +69,7 @@ export const StatusBar: React.FC<StatusBarProps> = ({
         {statusText}
       </div>
 
-      {/* Przełączniki wyrównane do prawej */}
-      <div className="flex items-center gap-1.5 whitespace-nowrap">
-        <div className="flex rounded overflow-hidden border border-[#444444]" title={unitsLocked ? 'Dokument obiektu inteligentnego jest zawsze wyświetlany w pikselach' : 'Tryb wyświetlania'}>
-          {(['px', 'vec'] as UnitMode[]).map((m) => (
-            <button key={m} type="button" disabled={unitsLocked} onClick={() => onUnitModeChange?.(m)} className={seg(unitMode === m, unitsLocked)}>
-              {m === 'px' ? 'Piksele' : 'Wektory'}
-            </button>
-          ))}
-        </div>
-      </div>
-
+      {/* Przełącznik jednostki wymiarów */}
       <div className="flex items-center gap-1.5 whitespace-nowrap">
         <div className="flex rounded overflow-hidden border border-[#444444]" title="Jednostka wymiarów">
           {LENGTH_UNITS.map((u) => (

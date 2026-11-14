@@ -4,9 +4,10 @@
  */
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { ScrubField } from './ScrubField.tsx';
 import { createPortal } from 'react-dom';
 import { Plus, Palette } from 'lucide-react';
-import { SKColor, hexToSkColor, skColorToHex } from '../core/skia/types.ts';
+import { SKColor, hexToSkColor, skColorToHex } from '../core/types.ts';
 
 // Domyślna 32-kolorowa paleta Paint.NET
 export const DEFAULT_PALETTE_HEX = [
@@ -83,7 +84,9 @@ export const ColorPickerBody: React.FC<{
   onChange: (c: SKColor) => void;
   onChangeSecondary?: (c: SKColor) => void;
   showAlpha?: boolean;
-}> = ({ color: currentColor, onChange: updateCurrentColor, onChangeSecondary, showAlpha = true }) => {
+  /** Zamiast kwadratu S-V i paska barwy: sześć pól R, G, B oraz H, S, V (z suwakami pod spodem). */
+  fieldsMode?: boolean;
+}> = ({ color: currentColor, onChange: updateCurrentColor, onChangeSecondary, showAlpha = true, fieldsMode = false }) => {
   const [palette, setPaletteState] = useState<string[]>(sharedPalette);
   const setPalette = (p: string[]) => {
     sharedPalette = p;
@@ -92,10 +95,30 @@ export const ColorPickerBody: React.FC<{
   const hexString = skColorToHex(currentColor);
   const hsv = rgbToHsv(currentColor.r, currentColor.g, currentColor.b);
   const [hue, setHue] = useState(hsv.h);
+  // Nasycenie i jasność pamiętane osobno, żeby pola S i V nie gubiły wartości przy czerni i szarości (RGB ich nie przechowuje)
+  const [sv, setSv] = useState({ s: hsv.s, v: hsv.v });
+  /**
+   * RGB ustawione ostatnio przez pola H/S/V (kilka ostatnich, bo zmiany przychodzą z opóźnieniem): zmiana pochodząca z nich
+   * nie może przeliczać H, S, V z zaokrąglonego RGB. Przy edycji H/S/V zmienia się więc tylko RGB, a pozostałe pola HSV zostają
+   * nietknięte; przy edycji R, G, B (albo wyborze koloru gdzie indziej) HSV jest liczone na nowo z RGB.
+   */
+  const emittedRgb = useRef<string[]>([]);
   useEffect(() => {
+    const key = `${currentColor.r},${currentColor.g},${currentColor.b}`;
+    if (emittedRgb.current.includes(key)) return;
+    emittedRgb.current = [];
     const newHsv = rgbToHsv(currentColor.r, currentColor.g, currentColor.b);
     if (newHsv.s > 0.05) setHue(newHsv.h);
+    setSv({ s: newHsv.s, v: newHsv.v });
   }, [currentColor.r, currentColor.g, currentColor.b]);
+
+  const applyHsv = (h: number, s: number, v: number) => {
+    const rgb = hsvToRgb(h, s, v);
+    emittedRgb.current = [...emittedRgb.current.slice(-11), `${rgb.r},${rgb.g},${rgb.b}`];
+    setHue(h);
+    setSv({ s, v });
+    updateCurrentColor({ r: rgb.r, g: rgb.g, b: rgb.b, a: currentColor.a });
+  };
 
   const svBoxRef = useRef<HTMLDivElement>(null);
   const hueStripRef = useRef<HTMLDivElement>(null);
@@ -205,7 +228,79 @@ export const ColorPickerBody: React.FC<{
 
   return (
     <div>
-      {/* 2D Saturation-Value + Pasek Hue (CSS Grid, zredukowana wysokość 2:1) */}
+      {fieldsMode ? (
+        <div className="grid grid-cols-2 gap-x-2 gap-y-1 mb-2">
+          {(() => {
+            const { r, g, b } = currentColor;
+            const lin = (c1: string, c2: string) => `linear-gradient(to right, ${c1}, ${c2})`;
+            const css = (c: { r: number; g: number; b: number }) => `rgb(${c.r},${c.g},${c.b})`;
+            const row = (label: string, field: React.ReactNode) => (
+              <div key={label} className="flex items-center gap-1.5">
+                <span className="w-2.5 text-[10px] font-mono text-[#999]">{label}</span>
+                <div className="flex-1 min-w-0">{field}</div>
+              </div>
+            );
+            const chan = (key: 'r' | 'g' | 'b', label: string, c1: string, c2: string) =>
+              row(
+                label,
+                <ScrubField
+                  value={currentColor[key]}
+                  min={0}
+                  max={255}
+                  width="100%"
+                  trackStyle={lin(c1, c2)}
+                  title={label}
+                  onChange={(v) => updateCurrentColor({ ...currentColor, [key]: v })}
+                />
+              );
+            return [
+              chan('r', 'R', `rgb(0,${g},${b})`, `rgb(255,${g},${b})`),
+              row(
+                'H',
+                <ScrubField
+                  value={Math.round(hue)}
+                  min={0}
+                  max={360}
+                  suffix="°"
+                  width="100%"
+                  trackStyle="linear-gradient(to right, #f00, #ff0, #0f0, #0ff, #00f, #f0f, #f00)"
+                  title="Barwa"
+                  onChange={(v) => applyHsv(v, sv.s, sv.v)}
+                />
+              ),
+              chan('g', 'G', `rgb(${r},0,${b})`, `rgb(${r},255,${b})`),
+              row(
+                'S',
+                <ScrubField
+                  value={Math.round(sv.s * 100)}
+                  min={0}
+                  max={100}
+                  suffix="%"
+                  width="100%"
+                  trackStyle={lin(css(hsvToRgb(hue, 0, sv.v)), css(hsvToRgb(hue, 1, sv.v)))}
+                  title="Nasycenie"
+                  onChange={(v) => applyHsv(hue, v / 100, sv.v)}
+                />
+              ),
+              chan('b', 'B', `rgb(${r},${g},0)`, `rgb(${r},${g},255)`),
+              row(
+                'V',
+                <ScrubField
+                  value={Math.round(sv.v * 100)}
+                  min={0}
+                  max={100}
+                  suffix="%"
+                  width="100%"
+                  trackStyle={lin('#000', css(hsvToRgb(hue, sv.s, 1)))}
+                  title="Jasność"
+                  onChange={(v) => applyHsv(hue, sv.s, v / 100)}
+                />
+              ),
+            ];
+          })()}
+        </div>
+      ) : (
+      /* 2D Saturation-Value + Pasek Hue (CSS Grid, zredukowana wysokość 2:1) */
       <div className="grid grid-cols-[1fr_14px] gap-2 mb-2 items-stretch">
         {/* Saturation-Value Box */}
         <div
@@ -262,6 +357,7 @@ export const ColorPickerBody: React.FC<{
           />
         </div>
       </div>
+      )}
 
       {/* Suwak przezroczystości (Alpha / Krycie pędzla) */}
       {showAlpha && (
@@ -307,17 +403,17 @@ export const ColorPickerBody: React.FC<{
               type="button"
               onClick={addColorToPalette}
               title="Dodaj obecny kolor do palety"
-              className="p-0.5 text-[#888] hover:text-white hover:bg-[#333] rounded cursor-pointer"
+              className="w-6 h-5.5 flex items-center justify-center bg-[#282828] border border-[#3e3e3e] rounded transition-colors hover:bg-[#383838] text-[#ccc] hover:text-white cursor-pointer"
             >
-              <Plus size={11} />
+              <Plus size={12} />
             </button>
             <button
               type="button"
               onClick={() => setPalette(DEFAULT_PALETTE_HEX)}
               title="Przywróć domyślną paletę"
-              className="p-0.5 text-[#888] hover:text-white hover:bg-[#333] rounded cursor-pointer"
+              className="w-6 h-5.5 flex items-center justify-center bg-[#282828] border border-[#3e3e3e] rounded transition-colors hover:bg-[#383838] text-[#ccc] hover:text-white cursor-pointer"
             >
-              <Palette size={11} />
+              <Palette size={12} />
             </button>
           </div>
         </div>

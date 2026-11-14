@@ -31,13 +31,12 @@ import {
   ImagePlus,
   Ruler,
 } from 'lucide-react';
-import { ShapeKind, ToolType } from '../core/skia/types.ts';
+import { ShapeKind, ToolType } from '../core/types.ts';
 
 interface ToolboxProps {
   activeTool: ToolType;
   onSelectTool: (tool: ToolType) => void;
   activeShapeType?: ShapeKind;
-  onSelectShapeType?: (shape: ShapeKind) => void;
   /** Aktywna warstwa jest wektorowa: pasek narzędzi pokazuje tylko narzędzia obiektów wektorowych. */
   vectorMode?: boolean;
 }

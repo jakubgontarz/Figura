@@ -4,15 +4,16 @@
  */
 
 import React, { useEffect, useState } from 'react';
+import { ScrubField } from './ScrubField.tsx';
 import { X, FileImage, Link2, Link2Off, RotateCw } from 'lucide-react';
-import { DPI_CHOICES, MM_PRESETS, PIXEL_PRESETS, mmToPx, pxToMm } from '../core/skia/Units.ts';
+import { DPI_CHOICES, MM_PRESETS, PIXEL_PRESETS, mmToPx, pxToMm } from '../core/Units.ts';
 
 interface NewDocumentModalProps {
   isOpen: boolean;
   onClose: () => void;
   onCreate: (title: string, width: number, height: number, dpi: number) => void;
   defaultTitle?: string;
-  /** Jednostki proponowane na starcie (zgodne z przełącznikiem Piksele / Wektory na pasku stanu). */
+  /** Jednostka proponowana na starcie (zgodna z jednostką wymiarów wybraną na pasku stanu). */
   defaultUnit?: 'px' | 'mm';
 }
 
@@ -184,13 +185,17 @@ export const NewDocumentModal: React.FC<NewDocumentModalProps> = ({
           <div className="grid grid-cols-[1fr_auto_1fr] gap-2 items-end">
             <div>
               <label className="block text-[11px] text-[#aaa] mb-1">Szerokość ({unit}):</label>
-              <input
-                type="text"
-                inputMode="decimal"
-                value={width}
-                onChange={(e) => onWidthChange(e.target.value.replace(/[^\d.,]/g, '').slice(0, 8))}
-                onFocus={(e) => e.target.select()}
-                className={field}
+              <ScrubField
+                value={w}
+                min={unit === 'px' ? MIN_PX : pxToMm(MIN_PX, dpi)}
+                max={unit === 'px' ? MAX_PX : pxToMm(MAX_PX, dpi)}
+                step={unit === 'px' ? 1 : 0.01}
+                wheelStep={1}
+                curve={2}
+                format={(v) => fmt(v, unit)}
+                width="100%"
+                tall
+                onChange={(v) => onWidthChange(fmt(v, unit))}
               />
             </div>
             <div className="flex gap-1 pb-0.5">
@@ -217,13 +222,17 @@ export const NewDocumentModal: React.FC<NewDocumentModalProps> = ({
             </div>
             <div>
               <label className="block text-[11px] text-[#aaa] mb-1">Wysokość ({unit}):</label>
-              <input
-                type="text"
-                inputMode="decimal"
-                value={height}
-                onChange={(e) => onHeightChange(e.target.value.replace(/[^\d.,]/g, '').slice(0, 8))}
-                onFocus={(e) => e.target.select()}
-                className={field}
+              <ScrubField
+                value={h}
+                min={unit === 'px' ? MIN_PX : pxToMm(MIN_PX, dpi)}
+                max={unit === 'px' ? MAX_PX : pxToMm(MAX_PX, dpi)}
+                step={unit === 'px' ? 1 : 0.01}
+                wheelStep={1}
+                curve={2}
+                format={(v) => fmt(v, unit)}
+                width="100%"
+                tall
+                onChange={(v) => onHeightChange(fmt(v, unit))}
               />
             </div>
           </div>
@@ -232,17 +241,7 @@ export const NewDocumentModal: React.FC<NewDocumentModalProps> = ({
             <div>
               <label className="block text-[11px] text-[#aaa] mb-1">Rozdzielczość (dpi):</label>
               <div className="flex gap-1">
-                <input
-                  type="text"
-                  inputMode="numeric"
-                  value={dpi}
-                  onChange={(e) => {
-                    const n = parseInt(e.target.value.replace(/\D/g, '').slice(0, 4) || '0', 10);
-                    setDpi(Math.max(1, Math.min(2400, n)));
-                  }}
-                  onFocus={(e) => e.target.select()}
-                  className={`${field} w-16`}
-                />
+                <ScrubField value={dpi} min={1} max={2400} curve={2} width={80} tall onChange={setDpi} />
                 <select
                   value=""
                   onChange={(e) => e.target.value && setDpi(parseInt(e.target.value, 10))}

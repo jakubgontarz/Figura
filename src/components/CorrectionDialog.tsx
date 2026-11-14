@@ -5,6 +5,9 @@
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { X } from 'lucide-react';
+import { ScrubField } from './ScrubField.tsx';
+import { CorrectionPresetsBar } from './CorrectionPresetsBar.tsx';
+import { hasPresetParams } from '../core/CorrectionPresets.ts';
 import {
   ChannelId,
   ColorBalanceParams,
@@ -22,7 +25,7 @@ import {
   curveLut,
   defaultParams,
   getCorrectionDef,
-} from '../core/skia/Corrections.ts';
+} from '../core/Corrections.ts';
 
 interface CorrectionDialogProps {
   correction: Correction;
@@ -55,56 +58,29 @@ export const SliderRow: React.FC<{
   /** Tło ścieżki suwaka (np. gradient barwy) */
   trackStyle?: string;
   onChange: (v: number) => void;
-}> = ({ label, value, min, max, step, decimals = 0, unit, defaultValue, trackStyle, onChange }) => {
-  const [draft, setDraft] = useState<string | null>(null);
-  const clamp = (v: number) => Math.max(min, Math.min(max, v));
-  return (
-    <div className="mb-2">
-      <div className="flex items-center justify-between mb-0.5">
-        <label
-          className="text-[10.5px] text-[#bbb] cursor-default"
-          title={defaultValue !== undefined ? 'Kliknij dwukrotnie, aby przywrócić wartość domyślną' : undefined}
-          onDoubleClick={() => defaultValue !== undefined && onChange(defaultValue)}
-        >
-          {label}
-        </label>
-        <div className="flex items-center gap-0.5">
-          <input
-            type="text"
-            inputMode="decimal"
-            value={draft ?? fmt(value, decimals)}
-            onFocus={(e) => e.currentTarget.select()}
-            onChange={(e) => {
-              setDraft(e.target.value);
-              const v = parseFloat(e.target.value.replace(',', '.'));
-              if (!Number.isNaN(v)) onChange(clamp(v));
-            }}
-            onBlur={() => setDraft(null)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                setDraft(null);
-                (e.target as HTMLInputElement).blur();
-                e.stopPropagation();
-              }
-            }}
-            className="w-14 h-5 bg-[#111] border border-[#3e3e3e] rounded px-1 text-right text-[10.5px] text-white font-mono focus:outline-none focus:border-[#007acc]"
-          />
-          {unit && <span className="text-[10px] text-[#888] w-5">{unit.trim()}</span>}
-        </div>
-      </div>
-      <input
-        type="range"
-        min={min}
-        max={max}
-        step={step}
-        value={value}
-        onChange={(e) => onChange(clamp(parseFloat(e.target.value)))}
-        className="w-full h-1.5 rounded-lg appearance-none cursor-pointer accent-[#007acc]"
-        style={{ background: trackStyle ?? '#444' }}
-      />
-    </div>
-  );
-};
+}> = ({ label, value, min, max, step, decimals = 0, unit, defaultValue, trackStyle, onChange }) => (
+  <div className="mb-2">
+    <label
+      className="block mb-0.5 text-[10.5px] text-[#bbb] cursor-default"
+      title={defaultValue !== undefined ? 'Kliknij dwukrotnie, aby przywrócić wartość domyślną' : undefined}
+      onDoubleClick={() => defaultValue !== undefined && onChange(defaultValue)}
+    >
+      {label}
+    </label>
+    <ScrubField
+      value={value}
+      min={min}
+      max={max}
+      step={step}
+      format={(v) => fmt(v, decimals)}
+      suffix={unit?.trim()}
+      trackStyle={trackStyle}
+      width="100%"
+      title={label}
+      onChange={onChange}
+    />
+  </div>
+);
 
 export const CheckRow: React.FC<{ label: string; checked: boolean; onChange: (v: boolean) => void }> = ({ label, checked, onChange }) => (
   <label className="flex items-center gap-1.5 mb-1.5 text-[10.5px] text-[#ccc] cursor-pointer select-none">
@@ -574,6 +550,8 @@ export const CorrectionDialog: React.FC<CorrectionDialogProps> = ({
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        // Esc w polu nazwy presetu anuluje tylko nazwę (obsługuje je samo pole)
+        if (e.target instanceof HTMLElement && e.target.dataset.presetName !== undefined) return;
         e.preventDefault();
         latest.current.onCancel();
       } else if (e.key === 'Enter' && !(e.target instanceof HTMLInputElement && e.target.type === 'text') && !(e.target instanceof HTMLSelectElement)) {
@@ -628,6 +606,8 @@ export const CorrectionDialog: React.FC<CorrectionDialogProps> = ({
           <X size={13} />
         </button>
       </div>
+
+      {hasPresetParams(correction.type) && <CorrectionPresetsBar type={correction.type} current={params} onApply={update} />}
 
       <div className="p-3 overflow-y-auto min-h-0">
         {def.editor === 'levels' ? (

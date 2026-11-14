@@ -30,23 +30,102 @@ export interface MenuActionHandlers {
   onZoomReset: () => void;
   onFlipHorizontal: () => void;
   onFlipVertical: () => void;
-  onInvertColors: () => void;
-  onGrayscale: () => void;
-  onBrightnessUp: () => void;
-  onContrastUp: () => void;
-  onAddLayer: () => void;
-  onRemoveLayer: () => void;
-  onDuplicateLayer: () => void;
-  onMergeLayerDown: () => void;
-  onMoveLayerUp: () => void;
-  onMoveLayerDown: () => void;
 }
+
+/** Pozycja menu rozwijanego: zwykła, z podmenu albo separator. */
+export type MenuEntry =
+  | { sep: true }
+  | {
+      label: string;
+      onClick?: () => void;
+      disabled?: boolean;
+      /** Skrót klawiszowy albo krótka wskazówka po prawej stronie */
+      hint?: string;
+      /** Pozycja przełącznika: zaznaczona (✓) albo nie; undefined = zwykła pozycja */
+      checked?: boolean;
+      /** Menu zostaje otwarte po kliknięciu (np. przełącznik w podmenu) */
+      keepOpen?: boolean;
+      submenu?: MenuEntry[];
+    };
 
 interface MenuBarProps {
   handlers: MenuActionHandlers;
+  /** Zawartość menu „Warstwy” (budowana na podstawie stanu aktywnej warstwy) */
+  layersMenu?: MenuEntry[];
 }
 
-export const MenuBar: React.FC<MenuBarProps> = ({ handlers }) => {
+const ITEM = 'w-full text-left px-3 py-[2px] flex items-center justify-between gap-4';
+const ITEM_ON = 'hover:bg-[#007acc] hover:text-white cursor-pointer';
+const ITEM_OFF = 'opacity-40 cursor-default';
+
+/** Lista pozycji menu; podmenu otwierają się z boku po najechaniu (położenie stałe, więc nie są przycinane przez menu). */
+const MenuList: React.FC<{ entries: MenuEntry[]; onDone: () => void }> = ({ entries, onDone }) => (
+  <>
+    {entries.map((e, i) =>
+      'sep' in e ? (
+        <div key={i} className="h-[1px] bg-[#333333] my-1" />
+      ) : e.submenu ? (
+        <SubMenuItem key={i} entry={e} onDone={onDone} />
+      ) : (
+        <button
+          key={i}
+          type="button"
+          disabled={e.disabled}
+          onClick={() => {
+            if (e.disabled) return;
+            e.onClick?.();
+            if (!e.keepOpen) onDone();
+          }}
+          className={`${ITEM} ${e.disabled ? ITEM_OFF : ITEM_ON}`}
+        >
+          <span className="flex items-center gap-1.5">
+            {e.checked !== undefined && <span className="w-3 text-center">{e.checked ? '✓' : ''}</span>}
+            {e.label}
+          </span>
+          {e.hint && <span className="text-[#888] text-[11px]">{e.hint}</span>}
+        </button>
+      )
+    )}
+  </>
+);
+
+const SubMenuItem: React.FC<{ entry: Extract<MenuEntry, { label: string }>; onDone: () => void }> = ({ entry, onDone }) => {
+  const ref = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState<{ left: number; top: number; maxHeight: number } | null>(null);
+  const items = entry.submenu ?? [];
+  const open = () => {
+    if (entry.disabled || !ref.current) return;
+    const r = ref.current.getBoundingClientRect();
+    const want = Math.min(window.innerHeight - 16, items.length * 22 + 12);
+    const top = Math.max(8, Math.min(r.top - 4, window.innerHeight - 8 - want));
+    const width = 230;
+    const left = r.right + width > window.innerWidth ? Math.max(0, r.left - width) : r.right - 1;
+    setPos({ left, top, maxHeight: window.innerHeight - top - 8 });
+  };
+  return (
+    <div ref={ref} onMouseEnter={open} onMouseLeave={() => setPos(null)} className="relative">
+      <button
+        type="button"
+        disabled={entry.disabled}
+        onClick={open}
+        className={`${ITEM} ${entry.disabled ? ITEM_OFF : pos ? 'bg-[#007acc] text-white cursor-pointer' : ITEM_ON}`}
+      >
+        <span>{entry.label}</span>
+        <span className="text-[10px]">▶</span>
+      </button>
+      {pos && (
+        <div
+          className="fixed min-w-[230px] bg-[#1e1e1e] border border-[#3f3f46] shadow-xl py-1 text-[12px] text-[#cccccc] overflow-y-auto z-[60]"
+          style={{ left: pos.left, top: pos.top, maxHeight: pos.maxHeight }}
+        >
+          <MenuList entries={items} onDone={onDone} />
+        </div>
+      )}
+    </div>
+  );
+};
+
+export const MenuBar: React.FC<MenuBarProps> = ({ handlers, layersMenu }) => {
   const [openMenu, setOpenMenu] = useState<string | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -342,44 +421,12 @@ export const MenuBar: React.FC<MenuBarProps> = ({ handlers }) => {
           Warstwy
         </button>
         {openMenu === 'warstwy' && (
-          <div className="absolute left-0 top-full mt-0.5 min-w-[210px] bg-[#1e1e1e] border border-[#3f3f46] shadow-xl py-1 text-[12px] text-[#cccccc]">
-            <button
-              onClick={() => handleAction(handlers.onAddLayer)}
-              className="w-full text-left px-3 py-1 hover:bg-[#007acc] hover:text-white cursor-pointer"
-            >
-              Dodaj nową warstwę
-            </button>
-            <button
-              onClick={() => handleAction(handlers.onDuplicateLayer)}
-              className="w-full text-left px-3 py-1 hover:bg-[#007acc] hover:text-white cursor-pointer"
-            >
-              Duplikuj warstwę
-            </button>
-            <button
-              onClick={() => handleAction(handlers.onMergeLayerDown)}
-              className="w-full text-left px-3 py-1 hover:bg-[#007acc] hover:text-white cursor-pointer"
-            >
-              Scal w dół
-            </button>
-            <button
-              onClick={() => handleAction(handlers.onRemoveLayer)}
-              className="w-full text-left px-3 py-1 hover:bg-[#007acc] hover:text-white cursor-pointer"
-            >
-              Usuń warstwę
-            </button>
-            <div className="h-[1px] bg-[#333333] my-1" />
-            <button
-              onClick={() => handleAction(handlers.onMoveLayerUp)}
-              className="w-full text-left px-3 py-1 hover:bg-[#007acc] hover:text-white cursor-pointer"
-            >
-              Przesuń warstwę w górę
-            </button>
-            <button
-              onClick={() => handleAction(handlers.onMoveLayerDown)}
-              className="w-full text-left px-3 py-1 hover:bg-[#007acc] hover:text-white cursor-pointer"
-            >
-              Przesuń warstwę w dół
-            </button>
+          <div
+            data-testid="layers-menu"
+            className="absolute left-0 top-full mt-0.5 min-w-[270px] bg-[#1e1e1e] border border-[#3f3f46] shadow-xl py-1 text-[12px] text-[#cccccc] overflow-y-auto"
+            style={{ maxHeight: 'calc(100vh - 64px)' }}
+          >
+            <MenuList entries={layersMenu ?? []} onDone={() => setOpenMenu(null)} />
           </div>
         )}
       </div>

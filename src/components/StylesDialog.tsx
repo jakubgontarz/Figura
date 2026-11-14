@@ -18,9 +18,10 @@ import {
   cloneStyles,
   defaultStyles,
   reviveStyles,
-} from '../core/skia/Styles.ts';
+} from '../core/Styles.ts';
 import { CheckRow } from './CorrectionDialog.tsx';
 import { ColorSwatchButton, isColorPopoverOpen } from './ColorPicker.tsx';
+import { ScrubField } from './ScrubField.tsx';
 
 interface StylesDialogProps {
   layerName: string;
@@ -50,51 +51,20 @@ const SliderRow: React.FC<{
   unit?: string;
   defaultValue?: number;
   onChange: (v: number) => void;
-}> = ({ label, value, min, max, step, decimals = 0, unit, defaultValue, onChange }) => {
-  const [draft, setDraft] = useState<string | null>(null);
-  const clamp = (v: number) => Math.max(min, Math.min(max, v));
-  return (
-    <div className="mb-1.5 flex items-center gap-1.5">
-      <label
-        className="w-[108px] shrink-0 truncate text-[10.5px] text-[#bbb] cursor-default"
-        title={defaultValue !== undefined ? `${label} (dwukrotne kliknięcie przywraca wartość domyślną)` : label}
-        onDoubleClick={() => defaultValue !== undefined && onChange(defaultValue)}
-      >
-        {label}
-      </label>
-      <input
-        type="range"
-        min={min}
-        max={max}
-        step={step}
-        value={value}
-        onChange={(e) => onChange(clamp(parseFloat(e.target.value)))}
-        className="flex-1 min-w-0 h-1.5 rounded-lg appearance-none cursor-pointer accent-[#007acc] bg-[#444]"
-      />
-      <input
-        type="text"
-        inputMode="decimal"
-        value={draft ?? fmtNum(value, decimals)}
-        onFocus={(e) => e.currentTarget.select()}
-        onChange={(e) => {
-          setDraft(e.target.value);
-          const v = parseFloat(e.target.value.replace(',', '.'));
-          if (!Number.isNaN(v)) onChange(clamp(v));
-        }}
-        onBlur={() => setDraft(null)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') {
-            setDraft(null);
-            (e.target as HTMLInputElement).blur();
-            e.stopPropagation();
-          }
-        }}
-        className="w-11 h-5 bg-[#111] border border-[#3e3e3e] rounded px-1 text-right text-[10.5px] text-white font-mono focus:outline-none focus:border-[#007acc]"
-      />
-      <span className="text-[10px] text-[#888] w-4 shrink-0">{unit?.trim()}</span>
+}> = ({ label, value, min, max, step, decimals = 0, unit, defaultValue, onChange }) => (
+  <div className="mb-1.5 flex items-center gap-1.5">
+    <label
+      className="w-[108px] shrink-0 truncate text-[10.5px] text-[#bbb] cursor-default"
+      title={defaultValue !== undefined ? `${label} (dwukrotne kliknięcie przywraca wartość domyślną)` : label}
+      onDoubleClick={() => defaultValue !== undefined && onChange(defaultValue)}
+    >
+      {label}
+    </label>
+    <div className="flex-1 min-w-0">
+      <ScrubField value={value} min={min} max={max} step={step} format={(v) => fmtNum(v, decimals)} suffix={unit?.trim()} width="100%" title={label} onChange={onChange} />
     </div>
-  );
-};
+  </div>
+);
 
 const SelectRow: React.FC<{
   label: string;
@@ -777,11 +747,6 @@ export const StylesDialog: React.FC<StylesDialogProps> = ({ layerName, initial, 
             />
           ) : (
             <>
-              {!(styles[tab] as StyleBase).enabled && (
-                <div className="mb-2 px-2 py-1 rounded bg-[#2b2b2d] text-[10px] text-[#aaa]">
-                  Stylizacja jest wyłączona: zaznacz pole przy jej nazwie, aby zobaczyć efekt.
-                </div>
-              )}
               <StyleEditor
                 kind={tab}
                 styles={styles}

@@ -3,22 +3,28 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Quad, pointInQuad, drawPerspectivePreview } from '../core/skia/Perspective.ts';
+/**
+ * Widok płótna edytora: wyświetla dokument, obsługuje wskaźnik i klawiaturę dla wszystkich narzędzi
+ * oraz prowadzi sesje edycji obiektów wektorowych (linia, krzywa, kształt, tekst, obiekt inteligentny).
+ */
+
+import { Quad, pointInQuad, drawPerspectivePreview } from '../core/Perspective.ts';
 import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react';
-import { GraphicEngine, drawSolidFragment } from '../core/skia/GraphicEngine.ts';
-import { renderGradientPreview } from '../core/skia/GradientRenderer.ts';
+import { GraphicEngine, drawSolidFragment } from '../core/GraphicEngine.ts';
+import { renderGradientPreview } from '../core/GradientRenderer.ts';
 import {
   ViewportTileRenderer,
+  type TilePreview,
   boundsForPoints,
   boundsForRotatedBox,
   boundsForShape,
-} from '../core/skia/ViewportTileRenderer.ts';
+} from '../core/ViewportTileRenderer.ts';
+import { renderAlphaOverlay } from '../core/Channels.ts';
 import {
   BrushSettings,
   ColorReplaceSettings,
   CorrectionBrushSettings,
   CorrectionSubAction,
-  DeformActionType,
   DeformSettings,
   DeformSubAction,
   GradientSettings,
@@ -36,14 +42,11 @@ import {
   TextToolSettings,
   ToolType,
   VectorShapeSettings,
-  skColorToHex,
-  skColorToRgbaString,
-} from '../core/skia/types.ts';
+} from '../core/types.ts';
 import { useUnits } from './Units.tsx';
-import { UNIT_LABEL, UnitMode, fmtUnit, quantizeCoord } from '../core/skia/Units.ts';
-import { compositeVectorObject, drawVectorObject, scaleVectorObject, vectorObjectBlend, vectorObjectBounds } from '../core/skia/VectorObjects.ts';
-import { drawSmartBitmap, getSmartBitmap, smartBitmapId } from '../core/skia/SmartObjects.ts';
-import { TransformSelectionState } from '../core/skia/SelectionManager.ts';
+import { UNIT_LABEL, fmtUnit } from '../core/Units.ts';
+import { drawSmartBitmap, getSmartBitmap, smartBitmapId } from '../core/SmartObjects.ts';
+import { TransformSelectionState } from '../core/SelectionManager.ts';
 import {
   RichText,
   findLineForIndex,
@@ -60,14 +63,13 @@ import {
   prevWordIndex,
   renderVectorText,
   wordBoundsAt,
-} from '../core/skia/TextEngine.ts';
+} from '../core/TextEngine.ts';
 import {
   renderVectorPath,
   renderVectorLine,
   renderVectorShape,
-  markWindowedContext,
   shapeSnapPoints,
-} from '../core/skia/VectorRenderer.ts';
+} from '../core/VectorRenderer.ts';
 import {
   PEN_MODES,
   PenHit,
@@ -86,21 +88,35 @@ import {
   penCurveBounds,
   penModeAvailable,
   penNodeMode,
-  penSegments,
   penShapeKey,
   removeNode,
   setNodeMode,
   setSmoothFromDrag,
-} from '../core/skia/PenPath.ts';
+} from '../core/PenPath.ts';
 import type { PropsDescriptor, PropsApi } from './PropertiesPanel.tsx';
-import { fitFreehand } from '../core/skia/CurveFit.ts';
-import { VectorObject, vectorRichText } from '../core/skia/VectorObjects.ts';
-import type { Layer } from '../core/skia/Layer.ts';
-import { grayToAlpha } from '../core/skia/Layer.ts';
-import { compileCorrections, isFilterType } from '../core/skia/Corrections.ts';
-import type { GpuCrispSource, GpuWindow } from '../core/skia/GpuCompose.ts';
-import { VectorView } from '../core/skia/VectorView.ts';
+import { fitFreehand } from '../core/CurveFit.ts';
+import { VectorObject, newVectorId, vectorRichText } from '../core/VectorObjects.ts';
+import type { Layer } from '../core/Layer.ts';
+import { DiskImageRef, diskImageVersion, drawDiskBitmap } from '../core/DiskImages.ts';
+import {
+  BrushAdjustFns,
+  BrushParam,
+  paramLabel,
+  alphaToPct,
+  axesFor,
+  clampPct,
+  formatParam,
+  isBrushAdjustTool,
+  pctFromDrag,
+  sizeFromDrag,
+  spacingFromDrag,
+  clampSize,
+  dragBounds,
+  supportsOpacity,
+} from '../core/brushAdjust.ts';
+import { PointerLockDelta } from '../core/pointerLockDelta.ts';
 
+/** Właściwości widoku płótna: silnik, ustawienia narzędzi oraz wywołania zwrotne do reszty aplikacji. */
 interface CanvasViewportProps {
   engine: GraphicEngine;
   engineRevision: number;
@@ -132,6 +148,8 @@ interface CanvasViewportProps {
   primaryColor?: SKColor;
   secondaryColor?: SKColor;
   onChangeSelectionSettings?: (settings: Partial<SelectionSettings>) => void;
+  /** Szybka regulacja parametrów pędzla (Alt + przeciąganie / kółko). */
+  onAdjustBrush?: (tool: ToolType, f: BrushAdjustFns) => void;
   activeTool: ToolType;
   activeShapeType: ShapeKind;
   zoom: number;
@@ -147,15 +165,20 @@ interface CanvasViewportProps {
   onPenInfoChange?: (info: { active: boolean; closed: boolean; count: number }) => void;
   /** Rodzaj obiektu wektorowego otwartego do edycji narzędziem Manipulacja (null = brak). */
   onVectorEditKind?: (kind: 'line' | 'bezier' | 'shapes' | 'text' | 'smart-object' | null) => void;
-  /** Zmieniło się zaznaczenie obiektów warstwy wektorowej (odśwież panel warstw). */
+  /** Wywoływane po zmianie zaznaczenia obiektów warstwy wektorowej (odświeża panel warstw). */
   onVectorSelectionChange?: () => void;
   /** Żądanie z panelu warstw: otwórz obiekt wektorowy do edycji. */
   vectorEditRequest?: { n: number; layerIndex: number; id: string } | null;
+  /** Wklejony obiekt: otwierany jako świeżo narysowany (sesja na płótnie, bez zatwierdzania). */
+  vectorPasteRequest?: { n: number; object: VectorObject } | null;
   /** Panel „Właściwości”: opis zaznaczonego obiektu (sesji edycji) i funkcje jego zmiany. */
   onPropertiesChange?: (d: PropsDescriptor, api: PropsApi) => void;
   onShowToast?: (msg: string) => void;
+  /** Rozmiar obszaru płótna na ekranie (dla panelu Nawigator). */
+  onContainerSize?: (size: { width: number; height: number }) => void;
 }
 
+/** Uchwyt ramki transformacji: skalowanie (strony świata), pivot, obrót, przesunięcie oraz narożniki i przesunięcie w trybie perspektywy; null = brak. */
 type TransformHandleType =
   | 'nw'
   | 'n'
@@ -182,8 +205,11 @@ interface SmartPayload {
   fig: string | null;
   png: string | null;
   blend: SKBlendMode;
+  /** „Obraz z dysku”: odwołanie do pliku zamiast bitmapy (fig/png są wtedy null) */
+  disk?: DiskImageRef;
 }
 
+/** Sesja edycji ramki kształtu (także obiektu inteligentnego): środek, wymiary, kąt (rad) i punkt obrotu w pikselach dokumentu. */
 interface ActiveVectorShapeSession {
   smart?: SmartPayload;
   center: SKPoint;
@@ -196,12 +222,13 @@ interface ActiveVectorShapeSession {
 }
 
 interface ActiveTextSession extends ActiveVectorShapeSession {
-  /** true = wysokość ramki dopasowuje się do tekstu (ramka utworzona kliknięciem) */
+  /** Czy wysokość ramki dopasowuje się do tekstu (true dla ramki utworzonej kliknięciem). */
   autoHeight: boolean;
 }
 
 const TEXT_CHAR_KEYS: (keyof TextCharStyle)[] = ['fontFamily', 'fontSize', 'bold', 'italic', 'underline', 'script'];
 
+/** Sesja edycji odcinka: punkty końcowe w pikselach dokumentu. */
 interface ActiveVectorLineSession {
   p0: SKPoint;
   p1: SKPoint;
@@ -213,40 +240,11 @@ interface ActiveVectorBezierSession {
   closed: boolean;
   phase: 'drawing' | 'editing';
   selected: number;
-  /** obrót ramki całej krzywej (rad): ramka obraca się razem z krzywą, po zatwierdzeniu wraca do 0 */
+  /** Kąt obrotu ramki całej krzywej (rad): ramka obraca się razem z krzywą. */
   frameAngle?: number;
 }
 
-/** Tryb mieszania warstwy jako CSS mix-blend-mode (tryby spoza listy działają jak normalny). */
-function cssBlendFor(b: string): string {
-  switch (b) {
-    case 'Multiply': return 'multiply';
-    case 'Screen': return 'screen';
-    case 'Overlay': return 'overlay';
-    case 'Darken': return 'darken';
-    case 'Lighten': return 'lighten';
-    case 'ColorDodge': return 'color-dodge';
-    case 'ColorBurn': return 'color-burn';
-    case 'HardLight': return 'hard-light';
-    case 'SoftLight': return 'soft-light';
-    case 'Difference': return 'difference';
-    case 'Exclusion': return 'exclusion';
-    default: return 'normal';
-  }
-}
-
-/** Nakłada na płótno same korekcje kolorów warstwy (działają na pojedynczych pikselach, więc nie zależą od skali); filtry pomija. */
-function applyColorCorrectionsTo(layer: Layer, cv: HTMLCanvasElement): void {
-  const list = layer.activeCorrections.filter((c) => c.enabled && !isFilterType(c.type));
-  if (list.length === 0) return;
-  const ctx = cv.getContext('2d', { willReadFrequently: true });
-  if (!ctx || cv.width === 0 || cv.height === 0) return;
-  const img = ctx.getImageData(0, 0, cv.width, cv.height);
-  compileCorrections(list)(img.data);
-  ctx.putImageData(img, 0, 0);
-}
-
-/** Ramka całej krzywej w osiach jej ramki (kąt `frameAngle`): środek, wymiary i kąt; null dla krzywej bez ramki. */
+/** Zwraca ramkę całej krzywej w osiach jej własnej ramki (kąt `frameAngle`): środek, wymiary i kąt; null, gdy krzywa nie jest edytowana lub ma mniej niż dwa węzły. */
 function penBoxOf(sess: ActiveVectorBezierSession): { cx: number; cy: number; w: number; h: number; angle: number } | null {
   if (sess.phase !== 'editing' || sess.nodes.length < 2) return null;
   const a = sess.frameAngle ?? 0;
@@ -259,24 +257,27 @@ function penBoxOf(sess: ActiveVectorBezierSession): { cx: number; cy: number; w:
   return { cx: lx * ca - ly * sa, cy: lx * sa + ly * ca, w: bb.x1 - bb.x0, h: bb.y1 - bb.y0, angle: a };
 }
 
+/** Przeciągane przez wskaźnik elementy krzywej: nowy węzeł, węzeł, uchwyt styczny lub ramka całej krzywej. */
 interface PenDrag {
   kind: 'create' | 'node' | 'hin' | 'hout' | 'frame';
-  /** kind 'frame': uchwyt ramki całej krzywej (nw..w - skalowanie, rotate - obrót, move - przesunięcie) i jej prostokąt początkowy */
+  /** Dla kind 'frame': uchwyt ramki całej krzywej (nw..w - skalowanie, rotate - obrót, move - przesunięcie). */
   frame?: string;
+  /** Dla kind 'frame': prostokąt początkowy ramki. */
   bbox?: { x0: number; y0: number; x1: number; y1: number };
-  /** kind 'frame': kąt ramki w chwili chwycenia (bbox jest w lokalnych osiach ramki) */
+  /** Dla kind 'frame': kąt ramki w chwili chwycenia (bbox jest w lokalnych osiach ramki). */
   frameAngle?: number;
   index: number;
   startPt: SKPoint;
   startScreen: { x: number; y: number };
   moved: boolean;
   initNodes: PenNode[];
-  /** po wstawieniu węzła na odcinku kliknięcie bez przesunięcia nie otwiera menu */
+  /** Po wstawieniu węzła na odcinku kliknięcie bez przesunięcia nie otwiera menu. */
   inserted?: boolean;
 }
 
 const rotateCursorCache = new Map<number, string>();
 
+/** Zwraca CSS kursora obrotu (dwie strzałki na łuku) obróconego o kąt zaokrąglony do 5 stopni; wyniki są pamiętane. */
 function getRotateCursorUrl(angleDeg: number): string {
   const normAngle = ((Math.round(angleDeg / 5) * 5) % 360 + 360) % 360;
   const cached = rotateCursorCache.get(normAngle);
@@ -366,39 +367,16 @@ function getRotateCursorUrl(angleDeg: number): string {
   return cursorCss;
 }
 
-/** Od tylu pikseli dokument jest zawsze wyświetlany przez płótno kafelków wielkości widoku (patrz `presentIdle`). */
+/** Liczba pikseli dokumentu, od której jest on zawsze wyświetlany przez płótno kafelków wielkości widoku (patrz `presentIdle`). */
 const BIG_DOC_PIXELS = 2_000_000;
 
 type VecSelMode = 'replace' | 'add' | 'subtract' | 'intersect' | 'invert';
 
+/** Zwraca klucz zawartości sesji kształtu; zawartość obiektu inteligentnego jest w nim skrócona do identyfikatora bitmapy i trybu mieszania. */
 const sessionKeyShape = (sh: ActiveVectorShapeSession): string =>
-  JSON.stringify({ ...sh, smart: sh.smart ? { id: smartBitmapId(sh.smart.png), blend: sh.smart.blend } : undefined });
+  JSON.stringify({ ...sh, smart: sh.smart ? { id: smartBitmapId(sh.smart.png), blend: sh.smart.blend, disk: sh.smart.disk?.key } : undefined });
 
-/** Zaokrąglanie współrzędnych obiektów wektorowych: pełne piksele albo (tryb wektorowy) 0,001 px. Ustawiane przy każdym renderze. */
-let coordMode: UnitMode = 'px';
-const qr = (v: number): number => quantizeCoord(v, coordMode);
-
-const VEC_TILE = 256;
-const VEC_TILE_MAX = 480;
-interface VecTileInfo {
-  o: VectorObject;
-  h: number;
-  b: { x0: number; y0: number; x1: number; y1: number };
-}
-const hashStr = (str: string): number => {
-  let h = 5381;
-  for (let i = 0; i < str.length; i++) h = ((h << 5) + h + str.charCodeAt(i)) | 0;
-  return h;
-};
-/** Podpis obiektu wektorowego do porównań (duże ładunki obiektów inteligentnych skracamy do długości i końcówki). */
-const vecObjectSig = (o: VectorObject): string =>
-  JSON.stringify(o, (k, v) => {
-    if (typeof v !== 'string' || v.length <= 200) return v;
-    let sm = '';
-    for (let q = 0; q < 48; q++) sm += v[Math.floor((q * (v.length - 1)) / 47)];
-    return `${v.length}:${sm}`;
-  });
-
+/** Widok płótna z narzędziami edycji i sesjami wektorowymi. */
 export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   engine,
   engineRevision,
@@ -458,6 +436,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   primaryColor = { r: 0, g: 0, b: 0, a: 255 },
   secondaryColor = { r: 255, g: 255, b: 255, a: 255 },
   onChangeSelectionSettings,
+  onAdjustBrush,
   activeTool: activeToolProp,
   zoom,
   panOffset,
@@ -473,18 +452,25 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   onVectorEditKind,
   onVectorSelectionChange,
   vectorEditRequest,
+  vectorPasteRequest,
   onPropertiesChange,
   onShowToast,
+  onContainerSize,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
   // Płótno kafelków podglądu edycji (leży nad płótnem dokumentu) i jego renderer
   const tileCanvasRef = useRef<HTMLCanvasElement>(null);
+  // Kanały (panel „Kanały”): filtr kolorów R/G/B nakładany przez GPU przeglądarki na gotowy obraz i nakładka kanałów alfa
+  const channelOverlayRef = useRef<HTMLCanvasElement>(null);
+  const channelMatrixRef = useRef<SVGFEColorMatrixElement>(null);
+  const channelFilterId = useRef('figura-ch-' + Math.random().toString(36).slice(2, 9));
+  const channelRasterCache = useRef(new WeakMap<object, HTMLCanvasElement>());
   const tileRendererRef = useRef<ViewportTileRenderer | null>(null);
   const tileViewRef = useRef<{ zoom: number; left: number; top: number; width: number; height: number } | null>(null);
   const tileSessionRef = useRef(false);
-  /** Płótno kafelków wyświetla dokument także poza sesją podglądu (duże powiększenie) - patrz `presentIdle`. */
+  /** Czy płótno kafelków wyświetla dokument także poza sesją podglądu (duże powiększenie lub duży dokument; patrz `presentIdle`). */
   const tilePresentingRef = useRef(false);
   const tileWasSessionRef = useRef(false);
   const viewOnlyRef = useRef(false);
@@ -492,7 +478,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   const baseSigRef = useRef<string | null>(null);
   /** Sygnatura, dla której płótno dokumentu jest już aktualne po lokalnej zmianie (patrz koniec pociągnięcia pędzla). */
   const skipRedrawSigRef = useRef<string | null>(null);
-  /** Trwa rysowanie na płótnie przy otwartym oknie edycji efektów/stylizacji (patrz enterLiveOverSession). */
+  /** Trwa rysowanie na płótnie przy otwartym oknie edycji efektów/stylizacji (patrz `enterLiveOverSession`). */
   const liveOverSessionRef = useRef(false);
 
   const baseSelectionModeRef = useRef<SelectionSettings['mode'] | null>(null);
@@ -501,7 +487,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   const [isSpacePressed, setIsSpacePressed] = useState(false);
   const [containerSize, setContainerSize] = useState<{ width: number; height: number }>({ width: 0, height: 0 });
 
-  // SESJE EDYCJI WEKTOROWEJ NA ŻYWO
+  // ---- Sesje edycji wektorowej na żywo ----
   const [activeVectorLineSession, setActiveVectorLineSession] = useState<ActiveVectorLineSession | null>(null);
   const [activeVectorBezierSession, setActiveVectorBezierSession] = useState<ActiveVectorBezierSession | null>(null);
   // Lustro sesji krzywej dla obsługi zdarzeń (kilka zdarzeń może nadejść przed ponownym renderem)
@@ -513,10 +499,8 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   const units = useUnits();
   const unitsRef = useRef(units);
   unitsRef.current = units;
-  coordMode = units.mode;
-  const crispActiveIdsRef = useRef<string[]>([]);
-  const pointerDownRef = useRef(false);
-  // PROWADNICE: zaznaczona i przeciągana prowadnica (lista jest w silniku, bo należy do całego obrazu)
+  // ---- Prowadnice ----
+  // Zaznaczona i przeciągana prowadnica (lista jest w silniku, bo należy do całego obrazu)
   const guideSelRef = useRef<string | null>(null);
   const guideDragRef = useRef<string | null>(null);
   const snapEnabledRef = useRef(snapEnabled);
@@ -524,60 +508,29 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   const guidesVisibleRef = useRef(guidesVisible);
   guidesVisibleRef.current = guidesVisible;
   const snapMarkRef = useRef<SKPoint | null>(null);
+  // Współrzędne, do których kursor został przyciągnięty (przy naciśnięciu przycisku i przy ostatnim ruchu myszy):
+  // `rnd` nie zaokrągla ich do pikseli, żeby obiekt stał dokładnie tam, gdzie wskazuje znacznik przyciągania.
+  const snapDownValsRef = useRef<number[]>([]);
+  const snapMoveValsRef = useRef<number[]>([]);
+  const rnd = (v: number): number => {
+    for (const a of snapDownValsRef.current) if (Math.abs(v - a) < 1e-6) return a;
+    for (const a of snapMoveValsRef.current) if (Math.abs(v - a) < 1e-6) return a;
+    return Math.round(v);
+  };
   const guideAxisRef = useRef(guideAxis);
   guideAxisRef.current = guideAxis;
   const [guidesRev, setGuidesRev] = useState(0);
-  useEffect(() => {
-    const down = () => { pointerDownRef.current = true; };
-    const up = () => { pointerDownRef.current = false; };
-    const el = containerRef.current;
-    el?.addEventListener('pointerdown', down, true);
-    window.addEventListener('pointerup', up, true);
-    window.addEventListener('pointercancel', up, true);
-    return () => {
-      el?.removeEventListener('pointerdown', down, true);
-      window.removeEventListener('pointerup', up, true);
-      window.removeEventListener('pointercancel', up, true);
-    };
-  }, []);
-  // każda warstwa rysowana przez widok wektorowy ma własne płótno (tryb mieszania warstwy = CSS mix-blend-mode)
-  const crispCanvasesRef = useRef<Map<string, HTMLCanvasElement>>(new Map());
-  const crispSigRef = useRef('');
-  // tryb Wektory na GPU: kompozytor WebGL składa cały stos (z warstwami wektorowymi w rozdzielczości ekranu)
-  const gpuCrispCanvasRef = useRef<HTMLCanvasElement | null>(null);
-  const vectorViewsRef = useRef<Map<string, VectorView>>(new Map());
-  const gpuCrispActiveRef = useRef(false);
-  const gpuCrispSigRef = useRef('');
-  const gpuCrispFailRef = useRef('');
-  const crispSourceRef = useRef<GpuCrispSource | null>(null);
-  const gpuRasterBufRef = useRef<{ l: HTMLCanvasElement | null; m: HTMLCanvasElement | null }>({ l: null, m: null });
-  /**
-   * Pamięć podręczna kafelków ekranu warstw wektorowych (tryb Wektory): kafelek 256x256 pikseli urządzenia, indeksowany od
-   * początku dokumentu w skali widoku. Kafelek jest rysowany ponownie tylko wtedy, gdy zmieniły się obiekty, które go dotykają
-   * (albo skala), więc przesuwanie widoku i edycja jednego obiektu nie rasteryzują całego okna.
-   */
-  /** Czas ostatniego złożenia trybu Wektory (ms) i moment ostatniej zmiany powiększenia: przy ciężkiej scenie zoom pokazuje tymczasowo zwykły podgląd. */
-  const gpuCrispCostRef = useRef(0);
-  const zoomChangedAtRef = useRef(0);
-  const lastZoomSeenRef = useRef(0);
-  const zoomRefineTimerRef = useRef<number | null>(null);
-  const vecTileCacheRef = useRef<{
-    layers: Map<string, { S: number; contentKey: string; infos: VecTileInfo[]; tiles: Map<number, { cv: HTMLCanvasElement | null; h: number; used: number }> }>;
-    frame: number;
-    pool: HTMLCanvasElement[];
-  }>({ layers: new Map(), frame: 0, pool: [] });
-  const crispMaskRef = useRef<HTMLCanvasElement | null>(null);
-  const crispScratchRef = useRef<HTMLCanvasElement | null>(null);
   const smartSettingsRef = useRef(smartSettings);
   smartSettingsRef.current = smartSettings;
-  // pasek opcji -> sesja obiektu inteligentnego (rozmiar płótna obiektu w pikselach i tryb mieszania);
-  // rozmiar płótna można zmienić tylko dopóki obiekt jest pusty (nie ma jeszcze rysunku)
+  // Przenosi ustawienia z paska opcji do sesji obiektu inteligentnego (rozmiar płótna obiektu w pikselach i tryb mieszania).
+  // Rozmiar płótna można zmienić tylko dopóki obiekt jest pusty (bez rysunku).
   useEffect(() => {
     const sh = activeVectorShapeSession;
     if (!sh?.smart) return;
+    const diskImg = !!sh.smart.disk;
     const w = Math.max(1, Math.round(smartSettings.width));
     const h = Math.max(1, Math.round(smartSettings.height));
-    const empty = !sh.smart.fig && !sh.smart.png;
+    const empty = !diskImg && !sh.smart.fig && !sh.smart.png;
     const sizeChanged = empty && (sh.smart.docW !== w || sh.smart.docH !== h);
     if (sizeChanged || sh.smart.blend !== smartSettings.blendMode) {
       setActiveVectorShapeSession({
@@ -588,7 +541,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [smartSettings.width, smartSettings.height, smartSettings.blendMode]);
 
-  // SESJA EDYCJI TEKSTU (ramka + tekst z formatowaniem fragmentów)
+  // ---- Sesja edycji tekstu (ramka i tekst z formatowaniem fragmentów) ----
   const [activeTextSession, setActiveTextSession] = useState<ActiveTextSession | null>(null);
   // Narzędzia Manipulacja i Pisak działają na istniejących sesjach: gdy sesja jest otwarta, obowiązują zasady narzędzia jej rodzaju
   const sessionKindTool: ToolType | null = activeVectorLineSession
@@ -614,7 +567,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   const vecMarqueeRef = useRef<{ start: SKPoint; cur: SKPoint; base: string[]; mode: VecSelMode } | null>(null);
   const [vecBoxHover, setVecBoxHover] = useState(false);
   const vecGroupDragRef = useRef<{ start: SKPoint } | null>(null);
-  /** Otwarta krzywa pochodzi z Pisaka (trafia do obiektu z flagą freehand). */
+  /** Czy otwarta krzywa pochodzi z Pisaka (trafia wtedy do obiektu z flagą freehand). */
   const penFreehandSessionRef = useRef(false);
   const textRtRef = useRef<RichText>(new RichText());
   const [textVersion, setTextVersion] = useState(0);
@@ -673,7 +626,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   const textLayoutRef = useRef(textLayout);
   textLayoutRef.current = textLayout;
 
-  // UCHWYTY INTERAKTYWNE WEKTOROWE
+  // ---- Uchwyty interaktywne obiektów wektorowych ----
   const [activeVectorHandle, setActiveVectorHandle] = useState<string | null>(null);
   const activeVectorHandleRef = useRef<string | null>(null);
   const setActiveVectorHandleSynced = (val: string | null) => {
@@ -684,7 +637,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   const vectorDragStartPtRef = useRef<SKPoint | null>(null);
   const vectorInitialSessionStateRef = useRef<any>(null);
 
-  // STAN TRANSFORMACJI ZAZNACZENIA / ZAWARTOŚCI
+  // ---- Stan transformacji zaznaczenia i zawartości ----
   const isTransformTool = activeTool === 'transform-selection' || activeTool === 'transform-content';
   const [transformActiveHandle, setTransformActiveHandle] = useState<TransformHandleType>(null);
   const [transformHoverHandle, setTransformHoverHandle] = useState<TransformHandleType>(null);
@@ -810,7 +763,39 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     );
   }, []);
 
-  const isQuickPipetteActive = isCtrlKeyDown && isDrawingTool(activeTool) && activeTool !== 'stamp' && activeToolProp !== 'vector-select';
+  const [isAltKeyDown, setIsAltKeyDown] = useState(false);
+  // Czy kursor jest nad obszarem rysowania (podgląd linii prostej Shift nie ma się pokazywać nad suwakami i panelami)
+  const [cursorInside, setCursorInside] = useState(false);
+  const cursorInsideRef = useRef(false);
+  // Szybka regulacja pędzla (Alt / Ctrl+Alt + przeciąganie): stan sesji i podpowiedź na nakładce
+  type AdjustSession = {
+    tool: ToolType;
+    layer: 1 | 2;
+    startX: number;
+    startY: number;
+    lastX: number;
+    lastY: number;
+    ax: number;
+    ay: number;
+    tx: number;
+    ty: number;
+    lockAxis: 'x' | 'y' | null;
+    free: boolean;
+    offX: number;
+    offY: number;
+    /** przesunięcia „zjedzone” przez granice wartości (patrz handleBrushAdjustMove) */
+    cx: number;
+    cy: number;
+    pl: PointerLockDelta | null;
+    begun: boolean;
+    lockEngaged: boolean;
+    pointerId: number;
+    start: { size: number; hardness: number; spacing: number; opacity: number };
+  };
+  const adjustRef = useRef<AdjustSession | null>(null);
+  const [adjustHud, setAdjustHud] = useState<{ layer: 1 | 2; axis: 'x' | 'y' | null; rev: number } | null>(null);
+
+  const isQuickPipetteActive = isCtrlKeyDown && !isAltKeyDown && isDrawingTool(activeTool) && activeTool !== 'stamp' && activeToolProp !== 'vector-select';
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -829,6 +814,11 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     return () => obs.disconnect();
   }, []);
 
+  useEffect(() => {
+    onContainerSize?.(containerSize);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [containerSize.width, containerSize.height]);
+
   // Powiadomienie o stanie aktywnej sesji wektorowej
   const isAnyVectorSessionActive = !!(
     activeVectorLineSession ||
@@ -841,7 +831,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     onLiveVectorSessionChange?.(isAnyVectorSessionActive || lassoMultiActive);
   }, [isAnyVectorSessionActive, lassoMultiActive, onLiveVectorSessionChange]);
 
-  // FUNKCJE ZATWIERDZANIA I ANULOWANIA SESJI WEKTOROWYCH
+  // ---- Zatwierdzanie i anulowanie sesji wektorowych ----
   const commitActiveVectorSession = useCallback(() => {
     if (activeVectorLineSession) {
       engine.commitVectorLine(
@@ -863,11 +853,11 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     } else if (activeVectorShapeSession?.smart) {
       const sh = activeVectorShapeSession;
       const sm = sh.smart!;
-      const created = engine.commitVectorSmart(sh.center, sh.width, sh.height, sh.angle, sm.blend, sh.flipX, sh.flipY, Math.max(1, Math.round(sm.docW)), Math.max(1, Math.round(sm.docH)), sm.fig, sm.png);
+      const created = engine.commitVectorSmart(sh.center, sh.width, sh.height, sh.angle, sm.blend, sh.flipX, sh.flipY, Math.max(1, Math.round(sm.docW)), Math.max(1, Math.round(sm.docH)), sm.fig, sm.png, sm.disk);
       setActiveVectorShapeSession(null);
       onCanvasModified();
-      // nowo wstawiony obiekt inteligentny od razu otwiera swoje płótno w nowej zakładce
-      if (created && onOpenSmartObject) {
+      // Nowo wstawiony obiekt inteligentny od razu otwiera swoje płótno w nowej zakładce
+      if (created && onOpenSmartObject && !sm.disk) {
         const { layerId, id } = created;
         setTimeout(() => onOpenSmartObject(layerId, id), 0);
       }
@@ -910,13 +900,47 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     onCanvasModified,
   ]);
 
-  // silnik wywołuje to przy cofnięciu: otwarty element jest zatwierdzany, a następnie cofany (tak jak gradient)
+  // Silnik wywołuje to przy cofnięciu: otwarty element jest zatwierdzany, a następnie cofany (tak jak gradient)
   const commitVectorRef = useRef(commitActiveVectorSession);
   commitVectorRef.current = commitActiveVectorSession;
   const vectorActiveRef = useRef(false);
   vectorActiveRef.current = isAnyVectorSessionActive;
+  /** Rysowany / edytowany obiekt w jego bieżącym stanie (tak jak zostałby zatwierdzony) albo null, gdy nie ma czego kopiować. */
+  const pendingVectorObject = (): VectorObject | null => {
+    const base = { id: newVectorId(), name: null, visible: true } as const;
+    if (activeVectorLineSession) {
+      return { ...base, kind: 'line', p0: { ...activeVectorLineSession.p0 }, p1: { ...activeVectorLineSession.p1 }, settings: { ...lineAndCurveSettings } };
+    }
+    if (activeVectorBezierSession) {
+      const bs = activeVectorBezierSession;
+      if (bs.nodes.length < 2) return null;
+      return { ...base, kind: 'path', nodes: cloneNodes(normalizeOpenEnds(bs.nodes, bs.closed)), closed: bs.closed, settings: { ...lineAndCurveSettings }, freehand: penFreehandSessionRef.current };
+    }
+    const sh = activeVectorShapeSession;
+    if (sh?.smart) {
+      return {
+        ...base, kind: 'smart', center: { ...sh.center }, width: sh.width, height: sh.height, angle: sh.angle, flipX: sh.flipX, flipY: sh.flipY,
+        docW: Math.max(1, Math.round(sh.smart.docW)), docH: Math.max(1, Math.round(sh.smart.docH)), fig: sh.smart.fig, png: sh.smart.png, disk: sh.smart.disk, settings: { blendMode: sh.smart.blend },
+      };
+    }
+    if (sh) {
+      return { ...base, kind: 'shape', center: { ...sh.center }, width: sh.width, height: sh.height, angle: sh.angle, flipX: sh.flipX, flipY: sh.flipY, settings: { ...vectorShapeSettings } };
+    }
+    const ts = activeTextSession;
+    if (ts) {
+      const rt = textRtRef.current;
+      if (rt.length === 0) return null;
+      return {
+        ...base, kind: 'text', center: { ...ts.center }, width: ts.width, height: ts.height, angle: ts.angle, autoHeight: ts.autoHeight,
+        runs: rt.runs.map((r) => ({ text: r.text, style: { ...r.style } })), settings: { ...textSettings }, fallback: { ...(textPendingStyleRef.current ?? pickCharStyle(textSettings)) },
+      };
+    }
+    return null;
+  };
+  const pendingVectorRef = useRef(pendingVectorObject);
+  pendingVectorRef.current = pendingVectorObject;
   useEffect(() => {
-    engine.setVectorSessionHook({ active: () => vectorActiveRef.current, commit: () => commitVectorRef.current() });
+    engine.setVectorSessionHook({ active: () => vectorActiveRef.current, commit: () => commitVectorRef.current(), pending: () => pendingVectorRef.current(), discard: () => deleteWholeCurveRef.current() });
     return () => engine.setVectorSessionHook(null);
   }, [engine]);
 
@@ -940,7 +964,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     onCanvasModified();
   }, [engine, onCanvasModified]);
 
-  // ===== EDYCJA TEKSTU: historia, wstawianie, nawigacja, formatowanie =====
+  // ---- Edycja tekstu: historia, wstawianie, nawigacja, formatowanie ----
   const textSelRange = (): [number, number] => {
     const { anchor, focus } = textSelRef.current;
     return [Math.min(anchor, focus), Math.max(anchor, focus)];
@@ -1061,7 +1085,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     const rt = textRtRef.current;
     const [a, b] = textSelRange();
     pushTextHistory();
-    // Zaznaczenie → tylko fragment; brak zaznaczenia → cały tekst + styl nowo wpisywanych znaków
+    // Z zaznaczeniem zmiana dotyczy fragmentu, bez zaznaczenia całego tekstu i stylu nowo wpisywanych znaków
     if (b > a) rt.applyStyle(a, b, patch);
     else rt.applyStyle(0, rt.length, patch);
     textPendingStyleRef.current = { ...textPendingStyleRef.current, ...patch };
@@ -1098,8 +1122,8 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     const inset = getTextInset(textSettings);
     const w = 240;
     const h = Math.max(8, Math.round(textSettings.fontSize * 1.2) + 2 * inset);
-    const left = Math.round(start.x);
-    const top = Math.round(start.y);
+    const left = rnd(start.x);
+    const top = rnd(start.y);
     const center = { x: left + w / 2, y: top + h / 2 };
     setActiveTextSession({
       center,
@@ -1162,7 +1186,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         if (shift) redoText();
         else if (textHistoryRef.current.undo.length > 0) undoText();
         else {
-          // historia pisania wyczerpana: cofnięcie dotyczy już całego elementu tekstowego
+          // Historia pisania wyczerpana: cofnięcie dotyczy już całego elementu tekstowego
           if (rt.length === 0) cancelActiveVectorSession();
           else {
             engine.undo();
@@ -1294,7 +1318,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   useEffect(() => {
     if (hasTextSession) {
       if (textOpenedExistingRef.current) {
-        // istniejący obiekt tekstowy: zostaje jego tekst i styl, kursor na końcu
+        // Istniejący obiekt tekstowy: zostaje jego tekst i styl, kursor na końcu
         textOpenedExistingRef.current = false;
         const n = textRtRef.current.length;
         setTextSelection(n, n);
@@ -1313,7 +1337,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [textFocusTrigger]);
 
-  // Zmiany formatowania z paska opcji → zaznaczenie albo cały tekst
+  // Zmiany formatowania z paska opcji dotyczą zaznaczenia albo całego tekstu
   const lastTextRequestIdRef = useRef(0);
   useEffect(() => {
     const req = textFormatRequest;
@@ -1328,7 +1352,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [textFormatRequest]);
 
-  // Pasek opcji pokazuje styl w miejscu kursora / zaznaczenia
+  // Synchronizacja paska opcji ze stylem w miejscu kursora lub zaznaczenia
   useEffect(() => {
     if (!activeTextSession || !onSyncTextSettings) return;
     const [a, b] = textSelRange();
@@ -1341,7 +1365,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [textSel, textVersion, hasTextSession]);
 
-  // Automatyczna wysokość ramki (ramka utworzona kliknięciem)
+  // Automatyczna wysokość ramki utworzonej kliknięciem
   useEffect(() => {
     const sess = activeTextSession;
     if (!sess || !sess.autoHeight || !textLayout) return;
@@ -1355,7 +1379,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [textLayout, activeTextSession?.autoHeight, activeTextSession?.height, textSettings.strokeWidth]);
 
-  // Reakcja na zewnętrzne triggery (z paska opcji)
+  // Zatwierdzanie i anulowanie sesji wektorowej na żądanie z paska opcji
   const prevCommitTriggerRef = useRef(liveVectorCommitTrigger);
   useEffect(() => {
     if (liveVectorCommitTrigger && liveVectorCommitTrigger !== prevCommitTriggerRef.current) {
@@ -1372,7 +1396,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     }
   }, [liveVectorCancelTrigger, cancelActiveVectorSession]);
 
-  // Automatyczne zatwierdzenie przy zmianie narzędzia na inne oraz start/commit sesji transformacji
+  // Zatwierdzanie sesji po zmianie narzędzia oraz rozpoczynanie i kończenie sesji transformacji
   useEffect(() => {
     if (activeTool !== 'line' && activeVectorLineSession) {
       commitActiveVectorSession();
@@ -1427,11 +1451,11 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     }
   }, [activeTool, engine, selectionSettings.interpolation, onCanvasModified]);
 
-  // Reakcja na zmianę parametrów wiadra z farbą i koloru na żywo (gdy aktywna jest sesja wiadra)
+  // Odświeżanie wypełnienia wiadra po zmianie jego parametrów lub koloru, gdy trwa sesja wiadra
   useEffect(() => {
     if (activeTool === 'bucket' && engine.bucketSeedPoint) {
       const col = engine.bucketColorSource === 'secondary' ? secondaryColor : primaryColor;
-      // Liczenie obszaru idzie w tle; silnik sam odświeża widok, gdy wynik jest gotowy
+      // Obszar jest liczony w tle; silnik sam odświeża widok, gdy wynik jest gotowy
       engine.applyPaintBucket(
         engine.bucketSeedPoint,
         selectionSettings,
@@ -1452,9 +1476,8 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     onCanvasModified,
   ]);
 
-  // Reakcja na zmianę parametrów magicznej różdżki na żywo (gdy aktywna jest sesja różdżki)
   // Odświeżenia różdżki (suwak tolerancji, przeciąganie uchwytu) są łączone: najwyżej jedno na klatkę, z najnowszymi
-  // wartościami. Przy długim odświeżeniu zdarzenia nie ustawiają się w kolejkę, więc interfejs nie laguje po zatrzymaniu.
+  // wartościami. Przy długim odświeżeniu zdarzenia nie ustawiają się w kolejkę, więc interfejs nie zwalnia po zatrzymaniu.
   const selectionSettingsLatestRef = useRef(selectionSettings);
   selectionSettingsLatestRef.current = selectionSettings;
   const wandRefreshRafRef = useRef<number | null>(null);
@@ -1503,6 +1526,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     [runWandRefresh]
   );
 
+  // Odświeżanie zaznaczenia różdżki po zmianie jej parametrów, gdy trwa sesja różdżki
   useEffect(() => {
     if (activeTool === 'magic-wand' && engine.selectionManager.wandSeedPoint) {
       scheduleWandRefresh();
@@ -1516,7 +1540,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     scheduleWandRefresh,
   ]);
 
-  // Kopia pikseli próbkowanych przez różdżkę zajmuje dużo pamięci - zwalniamy ją po opuszczeniu narzędzia
+  // Kopia pikseli próbkowanych przez różdżkę zajmuje dużo pamięci, więc jest zwalniana po opuszczeniu różdżki i wiadra
   useEffect(() => {
     if (activeTool === 'magic-wand' || activeTool === 'bucket') return;
     engine.releaseWandSample();
@@ -1530,7 +1554,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     []
   );
 
-  // Reakcja na zmianę parametrów gradientu na żywo (gdy aktywna jest sesja gradientu)
+  // Odświeżanie gradientu po zmianie jego parametrów, gdy trwa sesja gradientu
   useEffect(() => {
     if (activeTool === 'gradient' && engine.gradientStartPoint && engine.gradientEndPoint) {
       engine.applyGradient(
@@ -1556,7 +1580,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
 
 
 
-  // REDRAW & COMPOSITE TO VIEWPORT
+  // Przerysowanie i kompozycja do widoku
   /**
    * Poza sesją podglądu przy dużym powiększeniu (piksele jako duże bloki) dokument wyświetla płótno kafelków - tym samym
    * rastrem co podgląd, więc wypełnienia i zaznaczenia pasują do pikseli bez przesunięć o 1 px i szczelin (zwykłe płótno
@@ -1618,7 +1642,8 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         );
       } else if (activeVectorShapeSession?.smart) {
         const sh = activeVectorShapeSession;
-        drawSmartBitmap(ctx, getSmartBitmap(sh.smart!.png), sh.center, sh.width, sh.height, sh.angle, sh.flipX, sh.flipY);
+        if (sh.smart!.disk) drawDiskBitmap(ctx, sh.smart!.disk, sh.center, sh.width, sh.height, sh.angle, sh.flipX, sh.flipY);
+        else drawSmartBitmap(ctx, getSmartBitmap(sh.smart!.png), sh.center, sh.width, sh.height, sh.angle, sh.flipX, sh.flipY);
       } else if (activeVectorShapeSession) {
         renderVectorShape(
           ctx,
@@ -1691,8 +1716,15 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       skipRedrawSigRef.current = null;
       tilePresentingRef.current = false;
       tileWasSessionRef.current = true;
-      // SZYBKI PODGLĄD EDYCJI: kafelki ekranu renderowane promieniowo od kursora, przerywane przy każdym ruchu.
+      // Szybki podgląd edycji: kafelki ekranu renderowane promieniowo od kursora, przerywane przy każdym ruchu.
       const tr = tileRendererRef.current!;
+
+      // Edycja obiektu na wierzchu: obiekt zostaje w pikselach warstwy, dopóki sesja nie różni się od oryginału. Dopiero pierwsza
+      // zmiana unosi go z pikseli (przebudowa jego obszaru) i od tej klatki rysuje go nakładka podglądu.
+      if (engine.vec.pendingLift && !gradientPreview && !bucketPreview && !contentSessionActive) {
+        const so = isAnyVectorSessionActive ? liveSessionObject() : null;
+        if (so && engine.vec.sessionDiffers(so)) engine.vec.lift();
+      }
 
       // Jeśli podkład zmienił się w trakcie sesji (np. cofnięcie), odśwież płótno dokumentu bez podglądu
       const sig = engine.getBaseSignature();
@@ -1701,6 +1733,26 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         tr.invalidateBase();
       }
       baseSigRef.current = sig;
+
+      // Edycja istniejącego obiektu wektorowego, nad którym leżą inne obiekty tej warstwy („na żywo”). Zmiany klatek NIE
+      // podbijają sygnatury podkładu (patrz GraphicEngine.markLiveChanged), więc dokument nie jest składany od nowa co klatkę.
+      // Płótno dokumentu trzeba odświeżyć tylko wtedy, gdy ono jest wyświetlane (poprzednia klatka nie poszła przez GPU) -
+      // i tylko w prostokącie zmiany. Gdy klatki składa GPU, obszar zmian zwyczajnie się kumuluje.
+      const vecLive = engine.vec.liveEditing && isAnyVectorSessionActive && !gradientPreview && !bucketPreview && !contentSessionActive;
+      if (vecLive) {
+        const dirty = engine.vec.peekLiveDirty();
+        if (dirty && !tr.isGpuShown()) {
+          const l = Math.max(0, Math.floor(dirty.x0));
+          const t = Math.max(0, Math.floor(dirty.y0));
+          const r = Math.min(engine.width, Math.ceil(dirty.x1));
+          const b = Math.min(engine.height, Math.ceil(dirty.y1));
+          if (r > l && b > t) {
+            engine.compositeToViewport(canvasRef.current, { left: l, top: t, right: r, bottom: b, width: r - l, height: b - t }, null, null, null, null, null, null);
+          }
+          engine.vec.clearLiveDirty();
+          tr.invalidateBase();
+        }
+      }
       tr.setBase(canvasRef.current);
       // Płótno kafelków pracuje w pikselach urządzenia (devicePixelRatio) i samo rysuje dokument, więc podgląd i reszta
       // widoku przechodzą przez ten sam resampler; zwykłe płótno jest wtedy tylko ukryte (zachowuje układ do getDocPoint).
@@ -1714,22 +1766,12 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       let bounds;
       let centerDoc: SKPoint;
       let contentKey: string | undefined;
-      // tryb Wektory: sesję aktywnej warstwy wektorowej rysuje widok wektorowo (osobna warstwa nad kafelkami)
-      const crispActiveLayer = engine.getActiveLayer();
-      const crispOn = !!crispActiveLayer && crispActiveIdsRef.current.includes(crispActiveLayer.id);
-      let previewRender: (ctx: CanvasRenderingContext2D) => void = crispOn ? () => {} : customPreview;
+      let previewRender: (ctx: CanvasRenderingContext2D) => void = customPreview;
       let previewBlend = currentBlendMode;
       const correctionOnly = correctionSessionActive && !isAnyVectorSessionActive && !gradientPreview && !bucketPreview && !contentSessionActive;
-      // Edycja istniejącego obiektu wektorowego, nad którym leżą inne: obiekt jest przebudowywany w pikselach warstwy
-      // (właściwa kolejność, tryby mieszania i efekty), więc nakładka niczego nie rysuje - tylko uchwyty
-      const vecLive = engine.vec.liveEditing && isAnyVectorSessionActive && !gradientPreview && !bucketPreview && !contentSessionActive;
-      if (vecLive) {
-        previewRender = () => {};
-        previewBlend = 'SrcOver';
-        bounds = { left: 0, top: 0, right: engine.width, bottom: engine.height, width: engine.width, height: engine.height };
-        centerDoc = { x: 0, y: 0 };
-        contentKey = 'vl:' + engine.vec.liveVersion + ':' + engine.activeLayerIndex;
-      } else if (correctionOnly) {
+      // Przy edycji „na żywo” (vecLive) podgląd obiektu liczy się tak samo jak dla obiektu na wierzchu; dalej (przy budowie
+      // prośby) trafia do kompozytora GPU jako `live`, a ścieżka procesorowa dostaje pustą nakładkę (obiekt jest w pikselach).
+      if (correctionOnly) {
         // Sama korekcja: brak własnego rysunku narzędzia, kafelki tylko składają dokument z korekcjami aktywnej warstwy
         previewRender = () => {};
         previewBlend = 'SrcOver';
@@ -1851,7 +1893,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
 
       // Klucz zawartości podglądu: zmienia się tylko przy modyfikacji (geometria, ustawienia, tryb mieszania), a nie
       // przy zoomie / przesunięciu. Dzięki temu renderer nie regeneruje podglądu przy zmianie widoku.
-      // Tekst celowo bez klucza (jego stan żyje w mutowalnych refach), więc zachowuje się jak dotychczas.
+      // Tekst celowo bez klucza (jego stan żyje w mutowalnych refach), więc nie jest odświeżany kluczem.
       let previewKey: string | undefined;
       // Linia, krzywa i figura: podgląd rasteryzowany raz w rozdzielczości dokumentu (identyczne piksele jak po zatwierdzeniu)
       const docSprite = contentKey === undefined && !gradientPreview && (!!activeVectorLineSession || !!activeVectorBezierSession || !!activeVectorShapeSession);
@@ -1901,7 +1943,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
               sh.flipY,
               r4(sh.pivot.x - sh.center.x),
               r4(sh.pivot.y - sh.center.y),
-              sh.smart ? smartBitmapId(sh.smart.png) : 0,
+              sh.smart ? (sh.smart.disk ? diskImageVersion(sh.smart.disk.key) + 1 : smartBitmapId(sh.smart.png)) : 0,
               vectorShapeSettings,
               previewBlend,
             ]),
@@ -1910,9 +1952,36 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         };
       }
 
+      let reqPreview: TilePreview;
+      if (vecLive) {
+        // Gdy kompozytor GPU potrafi złożyć tę warstwę z segmentów stosu, dostaje żywy podgląd obiektu; w przeciwnym razie
+        // (maska wektorowa, brak GPU) obiekt jest w pikselach warstwy, a nakładka jest pusta.
+        const liveLayer = engine.getActiveLayer();
+        // z aktywnym zaznaczeniem renderer przycina podgląd maską zaznaczenia, a segmenty stosu nie: wtedy zwykła przebudowa pikseli
+        const stage2 = !!liveLayer && !engine.selectionAffectsActiveLayer && !!engine.vec.gpuLive(liveLayer);
+        reqPreview = {
+          render: () => {},
+          blendMode: 'SrcOver',
+          bounds: { left: 0, top: 0, right: engine.width, bottom: engine.height, width: engine.width, height: engine.height },
+          key: 'vl:' + engine.vec.liveVersion + ':' + engine.activeLayerIndex,
+          empty: true,
+          live: stage2 ? { render: previewRender, blendMode: previewBlend, bounds, key: previewKey, docSprite: docSprite } : undefined,
+        };
+      } else if (engine.vec.pendingLift && !gradientPreview && !bucketPreview && !contentSessionActive) {
+        // obiekt jeszcze nietknięty: widać go w pikselach warstwy, więc nakładka nie rysuje go drugi raz
+        reqPreview = {
+          render: () => {},
+          blendMode: 'SrcOver',
+          bounds: { left: 0, top: 0, right: engine.width, bottom: engine.height, width: engine.width, height: engine.height },
+          key: 'vn:' + engine.activeLayerIndex,
+          empty: true,
+        };
+      } else {
+        reqPreview = { render: previewRender, blendMode: previewBlend, bounds, key: previewKey, move: previewMove, docSprite: docSprite };
+      }
       tr.request({
         view: { zoom: zoom * dpr, left, top, width: Math.round(cW * dpr), height: Math.round(cH * dpr) },
-        preview: { render: previewRender, blendMode: previewBlend, bounds, key: previewKey, move: previewMove, docSprite: docSprite },
+        preview: reqPreview,
         focus,
         // trwa przeciąganie uchwytu / gradientu: renderer może użyć niskiej rozdzielczości i wyostrzyć po pauzie
         interactive: dragging,
@@ -1920,6 +1989,22 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       // Nakładka: kafelki zawierają tylko podgląd, a tło to zwykłe płótno dokumentu (identyczne w całym widoku).
       // Gdy podgląd wymaga pełnej kompozycji (tryb mieszania, warstwy nad aktywną), dokument rysują kafelki, a płótno ukrywamy.
       if (canvasRef.current) canvasRef.current.style.visibility = tr.isOverlay() ? '' : 'hidden';
+      return;
+    }
+
+    // Przesuwanie grupy obiektów: sygnatura podkładu stoi w miejscu (patrz VectorLayerOps.groupMoveTo), więc zamiast składać
+    // cały dokument odświeżamy płótno tylko w prostokącie zmiany; kafelki / GPU dostają ten sam prostokąt przez onViewportComposited.
+    const groupDirty = engine.vec.groupMoving && !viewOnlyRef.current && baseSigRef.current === engine.getBaseSignature() ? engine.vec.peekLiveDirty() : null;
+    if (groupDirty) {
+      skipRedrawSigRef.current = null;
+      engine.vec.clearLiveDirty();
+      const l = Math.max(0, Math.floor(groupDirty.x0));
+      const t = Math.max(0, Math.floor(groupDirty.y0));
+      const r = Math.min(engine.width, Math.ceil(groupDirty.x1));
+      const b = Math.min(engine.height, Math.ceil(groupDirty.y1));
+      if (r > l && b > t) {
+        engine.compositeToViewport(canvasRef.current, { left: l, top: t, right: r, bottom: b, width: r - l, height: b - t }, null, null, null, null, null, null);
+      }
       return;
     }
 
@@ -1984,7 +2069,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     } else if (activeVectorShapeSession?.smart) {
       const sh = activeVectorShapeSession;
       const sm = sh.smart!;
-      o = { ...base, kind: 'smart', center: { ...sh.center }, width: sh.width, height: sh.height, angle: sh.angle, flipX: sh.flipX, flipY: sh.flipY, docW: Math.max(1, Math.round(sm.docW)), docH: Math.max(1, Math.round(sm.docH)), fig: sm.fig, png: sm.png, settings: { blendMode: sm.blend } };
+      o = { ...base, kind: 'smart', center: { ...sh.center }, width: sh.width, height: sh.height, angle: sh.angle, flipX: sh.flipX, flipY: sh.flipY, docW: Math.max(1, Math.round(sm.docW)), docH: Math.max(1, Math.round(sm.docH)), fig: sm.fig, png: sm.png, disk: sm.disk, settings: { blendMode: sm.blend } };
     } else if (activeVectorShapeSession) {
       const sh = activeVectorShapeSession;
       o = { ...base, kind: 'shape', center: { ...sh.center }, width: sh.width, height: sh.height, angle: sh.angle, flipX: sh.flipX, flipY: sh.flipY, settings: vectorShapeSettings };
@@ -2009,7 +2094,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   liveSessionObjectRef.current = liveSessionObject;
 
   useEffect(() => {
-    if (!engine.vec.liveEditing || !isAnyVectorSessionActive || crispActiveIdsRef.current.length > 0) return;
+    if (!engine.vec.liveEditing || !isAnyVectorSessionActive) return;
     const o = liveSessionObject();
     if (o) engine.vec.updateLive(o);
   }, [
@@ -2060,6 +2145,40 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     viewOnlyRef.current = false;
   }, [redraw, engineRevision, engine.width, engine.height, engine.activeLayerIndex]);
 
+  // Widok kanałów: filtr kolorów (feColorMatrix) na płótnach dokumentu + nakładka kanałów alfa. Zmiana widoczności kanału
+  // nie rusza warstw ani kafelków: przeglądarka filtruje już narysowany obraz, więc działa to także w trakcie rysowania.
+  useEffect(() => {
+    const d = engine.channels.display();
+    // w trakcie edycji kanału alfa płótno pokazuje sam kanał (silnik składa go jak podgląd maski): bez filtra kolorów i bez
+    // dublowania nakładką edytowanego kanału
+    const editingId = engine.channelEdit?.id ?? null;
+    const matrix = editingId ? null : d.matrix;
+    const overlayList = editingId ? d.overlay.filter((c) => c.id !== editingId) : d.overlay;
+    const m = channelMatrixRef.current;
+    if (m && matrix) m.setAttribute('values', matrix.join(' '));
+    const f = matrix ? `url(#${channelFilterId.current})` : '';
+    for (const el of [canvasRef.current, tileCanvasRef.current]) {
+      if (el && el.style.filter !== f) el.style.filter = f;
+    }
+    const ov = channelOverlayRef.current;
+    if (!ov) return;
+    const dpr = window.devicePixelRatio || 1;
+    const cW = containerSize.width || containerRef.current?.clientWidth || 0;
+    const cH = containerSize.height || containerRef.current?.clientHeight || 0;
+    const pw = Math.max(1, Math.round(cW * dpr));
+    const ph = Math.max(1, Math.round(cH * dpr));
+    if (overlayList.length === 0) {
+      if (ov.width !== 1) { ov.width = 1; ov.height = 1; }
+      ov.getContext('2d')?.clearRect(0, 0, 1, 1);
+      return;
+    }
+    if (ov.width !== pw || ov.height !== ph) { ov.width = pw; ov.height = ph; }
+    const left = (cW / 2 + panOffset.x - (engine.width * zoom) / 2) * dpr;
+    const top = (cH / 2 + panOffset.y - (engine.height * zoom) / 2) * dpr;
+    const ctx = ov.getContext('2d');
+    if (ctx) renderAlphaOverlay(ctx, pw, ph, left, top, zoom * dpr, engine.width, engine.height, overlayList, d.solo && !editingId, channelRasterCache.current as WeakMap<never, HTMLCanvasElement>);
+  }, [engine, engineRevision, zoom, panOffset.x, panOffset.y, containerSize.width, containerSize.height, engine.channels.version]);
+
   useEffect(() => {
     return () => {
       tileRendererRef.current?.dispose();
@@ -2068,7 +2187,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     };
   }, []);
 
-  // PRZELICZANIE WSPÓŁRZĘDNYCH DOKUMENTU
+  // Przeliczanie współrzędnych dokumentu
   const getDocPoint = useCallback(
     (e: React.PointerEvent | PointerEvent | MouseEvent, clamp: boolean = false): SKPoint | null => {
       if (!canvasRef.current) return null;
@@ -2111,8 +2230,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     if (el) {
       const u = unitsRef.current;
       const lab = UNIT_LABEL[u.unit];
-      // piksele: całkowite w trybie Piksele, w trybie Wektory z dokładnością do 0,01
-      const f = (v: number) => (u.unit === 'px' && u.mode !== 'vec' ? String(Math.floor(v)) : fmtUnit(v, u.unit, u.dpi, false));
+      const f = (v: number) => (u.unit === 'px' ? String(Math.floor(v)) : fmtUnit(v, u.unit, u.dpi, false));
       el.textContent = pt ? `Pozycja: ${f(pt.x)}, ${f(pt.y)} ${lab}` : `Pozycja: ${f(0)}, ${f(0)} ${lab}`;
     }
   };
@@ -2121,7 +2239,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     return shapeKind === 'round-rect' || shapeKind === 'star' || shapeKind === 'arrow';
   };
 
-  // OBLICZANIE PUNKTU MODYFIKATORA DLA FIGURY (ŻÓŁTY UCHWYT)
+  // Obliczanie punktu modyfikatora dla figury (żółty uchwyt)
   const getShapeModifierDocPoint = useCallback(
     (sess: ActiveVectorShapeSession, settings: VectorShapeSettings): SKPoint => {
       const { center, width, height, angle } = sess;
@@ -2191,7 +2309,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     []
   );
 
-  // HIT TESTING DLA UCHWYTÓW WEKTOROWYCH
+  // Hit testing dla uchwytów wektorowych
   const hitTestVectorHandles = useCallback(
     (e: React.PointerEvent | PointerEvent | MouseEvent): string | null => {
       const container = containerRef.current;
@@ -2301,7 +2419,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     ]
   );
 
-  // HIT TESTING TRANSFORM SELECTION
+  // Rozpoznawanie uchwytów transformacji zaznaczenia
   const getTransformScreenGeometry = useCallback(() => {
     const st = engine.selectionManager.transformState;
     const container = containerRef.current;
@@ -2357,7 +2475,6 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     return {
       docHandles,
       screenHandles,
-      pivotDoc: curPivotDoc,
       pivotScreen: curPivotScreen,
       rotDoc,
       rotScreen,
@@ -2431,7 +2548,10 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     [getTransformScreenGeometry, engine.selectionManager.transformState, getDocPoint, activeTool, engine, panOffset, zoom]
   );
 
-  // OBSŁUGA INTERAKCJI TRANSFORMACJI ZAZNACZENIA / ZAWARTOŚCI
+  /**
+   * Aktualizuje transformację zaznaczenia (przesunięcie, obrót, skalowanie, punkt obrotu lub narożniki perspektywy)
+   * podczas przeciągania aktywnego uchwytu. Shift ogranicza ruch do osi, krok obrotu i proporcje, Alt skaluje względem punktu obrotu.
+   */
   const updateTransformInteraction = useCallback(
     (pt: SKPoint, shiftKey: boolean, altKey: boolean) => {
       const activeHandle = transformActiveHandleRef.current;
@@ -2524,7 +2644,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         return;
       }
 
-      // Skalowanie z 8 uchwytów
+      // Skalowanie ośmioma uchwytami: bez Alt przeciwległy uchwyt pozostaje nieruchomy, z Alt skalowanie odbywa się względem punktu obrotu
       let uA = 0;
       let vA = 0;
 
@@ -2673,7 +2793,10 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     [engine, onCanvasModified]
   );
 
-  // OBSŁUGA INTERAKCJI UCHWYTÓW WEKTOROWYCH (FIGURA, LINIA, BEZIER)
+  /**
+   * Aktualizuje sesję linii, kształtu lub tekstu podczas przeciągania uchwytu. Shift ogranicza ruch do osi,
+   * kąty do wielokrotności kroku i zachowuje proporcje, Alt skaluje symetrycznie od środka.
+   */
   const updateVectorHandleInteraction = useCallback(
     (pt: SKPoint, shiftKey: boolean, altKey: boolean) => {
       const activeHandle = activeVectorHandleRef.current;
@@ -2682,13 +2805,13 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       }
 
       const startPt = vectorDragStartPtRef.current;
-      const dx = qr(pt.x - startPt.x);
-      const dy = qr(pt.y - startPt.y);
+      const dx = Math.round(pt.x - startPt.x);
+      const dy = Math.round(pt.y - startPt.y);
 
       if (activeVectorLineSession) {
         const init = vectorInitialSessionStateRef.current as ActiveVectorLineSession;
         if (activeHandle === 'p0') {
-          let p0 = { x: qr(pt.x), y: qr(pt.y) };
+          let p0 = { x: rnd(pt.x), y: rnd(pt.y) };
           if (shiftKey) {
             const ldx = p0.x - init.p1.x;
             const ldy = p0.y - init.p1.y;
@@ -2697,13 +2820,13 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
             const snappedAngle = Math.round(angle / step) * step;
             const dist = Math.hypot(ldx, ldy);
             p0 = {
-              x: qr(init.p1.x + Math.cos(snappedAngle) * dist),
-              y: qr(init.p1.y + Math.sin(snappedAngle) * dist),
+              x: Math.round(init.p1.x + Math.cos(snappedAngle) * dist),
+              y: Math.round(init.p1.y + Math.sin(snappedAngle) * dist),
             };
           }
           setActiveVectorLineSession({ p0, p1: init.p1 });
         } else if (activeHandle === 'p1') {
-          let p1 = { x: qr(pt.x), y: qr(pt.y) };
+          let p1 = { x: rnd(pt.x), y: rnd(pt.y) };
           if (shiftKey) {
             const ldx = p1.x - init.p0.x;
             const ldy = p1.y - init.p0.y;
@@ -2712,8 +2835,8 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
             const snappedAngle = Math.round(angle / step) * step;
             const dist = Math.hypot(ldx, ldy);
             p1 = {
-              x: qr(init.p0.x + Math.cos(snappedAngle) * dist),
-              y: qr(init.p0.y + Math.sin(snappedAngle) * dist),
+              x: Math.round(init.p0.x + Math.cos(snappedAngle) * dist),
+              y: Math.round(init.p0.y + Math.sin(snappedAngle) * dist),
             };
           }
           setActiveVectorLineSession({ p0: init.p0, p1 });
@@ -2803,8 +2926,8 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
             if (Math.abs(moveDx) >= Math.abs(moveDy)) moveDy = 0;
             else moveDx = 0;
           }
-          // granice (lewa / środek / prawa, góra / środek / dół) dorównują się do prowadnic w pobliżu
-          if (snapEnabledRef.current && guidesVisibleRef.current && engine.guides.length > 0) {
+          // Krawędzie i środek obwiedni obiektu przyciągają się do prowadnic w promieniu 8 pikseli ekranu
+          if (snapEnabledRef.current) {
             const ac = Math.abs(Math.cos(init.angle));
             const as = Math.abs(Math.sin(init.angle));
             const hw = (ac * init.width + as * init.height) / 2;
@@ -2812,7 +2935,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
             const tolG = 8 / Math.max(zoom, 0.05);
             let bestX: number | null = null;
             let bestY: number | null = null;
-            for (const g of engine.guides) {
+            for (const g of snapGuides()) {
               const cx = init.center.x + moveDx;
               const cy = init.center.y + moveDy;
               if (g.axis === 'v') {
@@ -2856,7 +2979,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
           return;
         }
 
-        // 8 Uchwytów skalowania figury (z pełną obsługą Alt = skalowanie symetryczne ze środka, Shift = zachowanie proporcji init.width / init.height)
+        // Skalowanie ośmioma uchwytami: Alt skaluje symetrycznie od środka, Shift zachowuje proporcje początkowe
         let uA = 0;
         let vA = 0;
 
@@ -2950,17 +3073,16 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
           newCenterY = anchorDocY - uA * newW * Ux.y - vA * newH * Uy.y;
         }
 
-        if (coordMode === 'vec') {
-          // tryb wektorowy: położenie i wymiary dokładne (do 0,001 px), bez przyciągania do pikseli
-          newW = qr(newW);
-          newH = qr(newH);
-          newCenterX = qr(newCenterX);
-          newCenterY = qr(newCenterY);
-        } else if (Math.abs(init.angle) < 0.001) {
-          newW = Math.round(newW);
-          newH = Math.round(newH);
-          const left = Math.round(newCenterX - newW / 2);
-          const top = Math.round(newCenterY - newH / 2);
+        if (Math.abs(init.angle) < 0.001) {
+          // krawędzie zaokrąglamy osobno, żeby przyciągnięta krawędź została dokładnie na swoim miejscu
+          const left = rnd(newCenterX - newW / 2);
+          const top = rnd(newCenterY - newH / 2);
+          let right = rnd(newCenterX + newW / 2);
+          let bottom = rnd(newCenterY + newH / 2);
+          if (right - left < 1) right = left + 1;
+          if (bottom - top < 1) bottom = top + 1;
+          newW = right - left;
+          newH = bottom - top;
           newCenterX = left + newW / 2;
           newCenterY = top + newH / 2;
         } else {
@@ -2995,7 +3117,10 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     ]
   );
 
-  // OBSŁUGA PIERWOTNEGO PRZECIĄGANIA NOWEJ FIGURY / LINII / KRZYWEJ
+  /**
+   * Aktualizuje sesję nowo rysowanej linii, kształtu, obiektu inteligentnego lub ramki tekstu podczas początkowego przeciągania.
+   * Ruchy krótsze niż 3 piksele dokumentu są pomijane. Alt traktuje punkt początkowy jako środek, Shift wymusza kąty co 45° lub proporcje.
+   */
   const updateInitialDrawingDrag = useCallback(
     (pt: SKPoint, shiftKey: boolean, altKey: boolean) => {
       const startPt = dragStartPointRef.current;
@@ -3016,29 +3141,29 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
           const snappedAngle = Math.round(angle / step) * step;
           const lineDist = Math.hypot(dx, dy);
           p1 = {
-            x: qr(startPt.x + Math.cos(snappedAngle) * lineDist),
-            y: qr(startPt.y + Math.sin(snappedAngle) * lineDist),
+            x: Math.round(startPt.x + Math.cos(snappedAngle) * lineDist),
+            y: Math.round(startPt.y + Math.sin(snappedAngle) * lineDist),
           };
         }
         setActiveVectorLineSession({
-          p0: { x: qr(startPt.x), y: qr(startPt.y) },
-          p1: { x: qr(p1.x), y: qr(p1.y) },
+          p0: { x: rnd(startPt.x), y: rnd(startPt.y) },
+          p1: { x: rnd(p1.x), y: rnd(p1.y) },
         });
         return;
       }
 
       if (activeTool === 'shapes' || activeTool === 'smart-object' || activeTool === 'text') {
-        const startX = qr(startPt.x);
-        const startY = qr(startPt.y);
-        const curX = qr(pt.x);
-        const curY = qr(pt.y);
+        const startX = rnd(startPt.x);
+        const startY = rnd(startPt.y);
+        const curX = rnd(pt.x);
+        const curY = rnd(pt.y);
 
         let w = 0;
         let h = 0;
         let center = { x: startX, y: startY };
 
         if (altKey) {
-          // Alt key: startPt is the center, pt is a corner
+          // Z Alt punkt początkowy jest środkiem, a bieżący narożnikiem
           let halfW = Math.abs(curX - startX);
           let halfH = Math.abs(curY - startY);
 
@@ -3058,7 +3183,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
           h = halfH * 2;
           center = { x: startX, y: startY };
         } else {
-          // Normal drag: startPt is a corner, pt is the opposite corner
+          // Bez Alt punkt początkowy i bieżący są przeciwległymi narożnikami
           w = Math.abs(curX - startX);
           h = Math.abs(curY - startY);
           let minX = Math.min(startX, curX);
@@ -3118,21 +3243,26 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   updateVectorHandleInteractionRef.current = updateVectorHandleInteraction;
   updateInitialDrawingDragRef.current = updateInitialDrawingDrag;
 
-  // ===== KRZYWA WIELOWĘZŁOWA (narzędzie "Krzywa Beziera"): wyklikiwanie, edycja węzłów i uchwytów =====
-  // Klik = węzeł ostry, przeciągnięcie = węzeł gładki. Enter / PPM kończy wyklikiwanie (krzywa pozostaje edytowalna),
-  // ponowny Enter zatwierdza. Kliknięcie węzła (po zakończeniu) otwiera menu rodzaju węzła.
+  // ---- Krzywa wielowęzłowa (narzędzie „Krzywa Beziera”) ----
+  // Kliknięcie tworzy węzeł ostry, przeciągnięcie węzeł gładki. Enter lub PPM kończy wyklikiwanie (krzywa pozostaje edytowalna),
+  // ponowny Enter zatwierdza. Kliknięcie węzła po zakończeniu wyklikiwania otwiera menu rodzaju węzła.
+
+  /** Zapisuje sesję krzywej w referencji (dla procedur obsługi zdarzeń) i w stanie komponentu. */
   const setPen = (next: ActiveVectorBezierSession) => {
     penRef.current = next;
     setActiveVectorBezierSession(next);
   };
 
-  // ===== PANEL „WŁAŚCIWOŚCI”: odczyt i zmiana zaznaczonego obiektu przez współrzędne =====
+  // ---- Panel „Właściwości”: odczyt i zmiana zaznaczonego obiektu przez współrzędne ----
   const activeShapeOrTextRef = useRef(false);
   activeShapeOrTextRef.current = !!(activeTextSession || activeVectorShapeSession);
   const setPenRef = useRef(setPen);
   setPenRef.current = setPen;
+  const onChangeVectorShapeSettingsRef = useRef(onChangeVectorShapeSettings);
+  onChangeVectorShapeSettingsRef.current = onChangeVectorShapeSettings;
   const propsApi = useMemo<PropsApi>(
     () => ({
+      setShapeSetting: (patch) => onChangeVectorShapeSettingsRef.current?.(patch),
       selectGuide: (id) => {
         guideSelRef.current = id || null;
         setGuidesRev((r) => r + 1);
@@ -3193,7 +3323,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
           const other = part === 'hin' ? nd.hout : nd.hin;
           if (part === 'hin') nd.hin = { x, y };
           else nd.hout = { x, y };
-          // węzeł gładki: drugi uchwyt pozostaje współliniowy (zachowuje swoją długość)
+          // Drugi uchwyt, jeśli istnieje, pozostaje współliniowy z przeciwnym zwrotem i zachowuje swoją długość
           if (other) {
             const vx = x - nd.x;
             const vy = y - nd.y;
@@ -3220,7 +3350,11 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       d = { kind: 'box', label: 'Tekst', cx: activeTextSession.center.x, cy: activeTextSession.center.y, w: activeTextSession.width, h: activeTextSession.height, angle: activeTextSession.angle };
     } else if (activeVectorShapeSession) {
       const sh = activeVectorShapeSession;
-      d = { kind: 'box', label: sh.smart ? 'Obiekt inteligentny' : 'Kształt', cx: sh.center.x, cy: sh.center.y, w: sh.width, h: sh.height, angle: sh.angle };
+      const vs = vectorShapeSettings;
+      d = {
+        kind: 'box', label: sh.smart ? (sh.smart.disk ? 'Obraz z dysku' : 'Obiekt inteligentny') : 'Kształt', cx: sh.center.x, cy: sh.center.y, w: sh.width, h: sh.height, angle: sh.angle,
+        shape: sh.smart ? undefined : { shapeKind: vs.shapeKind, cornerRadius: vs.cornerRadius, starPoints: vs.starPoints, starInnerRatio: vs.starInnerRatio, polygonSides: vs.polygonSides, arrowHeadWidth: vs.arrowHeadWidth, arrowShaftThickness: vs.arrowShaftThickness },
+      };
     } else if (activeVectorLineSession) {
       d = { kind: 'line', p0: { ...activeVectorLineSession.p0 }, p1: { ...activeVectorLineSession.p1 } };
     } else if (activeVectorBezierSession) {
@@ -3231,15 +3365,15 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         selected: Math.max(0, Math.min(activeVectorBezierSession.nodes.length - 1, activeVectorBezierSession.selected)),
       };
     }
-    // dane prowadnicy pokazujemy tylko, gdy któraś jest zaznaczona
+    // Prowadnice trafiają do panelu tylko wtedy, gdy nie ma aktywnej sesji, a któraś prowadnica jest zaznaczona
     if (!d && engine.guides.some((g) => g.id === guideSelRef.current)) {
       d = { kind: 'guide', guides: engine.guides.map((g) => ({ ...g })), selected: guideSelRef.current };
     }
     onPropertiesChange(d, propsApi);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTextSession, activeVectorShapeSession, activeVectorLineSession, activeVectorBezierSession, guidesRev, engine]);
+  }, [activeTextSession, activeVectorShapeSession, activeVectorLineSession, activeVectorBezierSession, guidesRev, engine, vectorShapeSettings]);
 
-  // Delete usuwa zaznaczoną prowadnicę (narzędzie Prowadnice)
+  // Delete lub Backspace usuwa zaznaczoną prowadnicę
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((activeTool !== 'guides' && activeTool !== 'vector-select') || !guideSelRef.current) return;
@@ -3248,7 +3382,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
       e.preventDefault();
-      // zaznaczona prowadnica przejmuje Delete: skrót usuwający zawartość warstwy nie może się już wykonać
+      // Nasłuch w fazie przechwytywania: zdarzenie nie dociera do skrótu usuwającego zawartość warstwy
       e.stopImmediatePropagation();
       engine.removeGuide(guideSelRef.current);
       guideSelRef.current = null;
@@ -3264,7 +3398,10 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     return { x: e.clientX - (rect?.left ?? 0), y: e.clientY - (rect?.top ?? 0) };
   };
 
-  /** Ramka całej krzywej (po zakończeniu wyklikiwania): obrócony prostokąt z zapasem, 8 uchwytów skalowania, obrót i przesunięcie. */
+  /**
+   * Zwraca geometrię ramki całej krzywej (po zakończeniu wyklikiwania): obróconego prostokąta z zapasem 12 pikseli ekranu,
+   * ośmiu uchwytów skalowania, uchwytu obrotu i środka służącego do przesuwania. Poza fazą edycji lub dla mniej niż dwóch węzłów zwraca null.
+   */
   const penFrameGeom = (sess: ActiveVectorBezierSession) => {
     if (sess.phase !== 'editing' || sess.nodes.length < 2) return null;
     const a = sess.frameAngle ?? 0;
@@ -3298,6 +3435,11 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     return { a, x0, y0, x1, y1, lcx, lcy, cx: c.x, cy: c.y, bbox: bb, handles, toLocal, toDoc };
   };
 
+  /**
+   * Zwraca element krzywej pod kursorem (mx, my w pikselach ekranu, docPt w pikselach dokumentu) albo null.
+   * Kolejność sprawdzania: uchwyty stycznych (zaznaczony węzeł najpierw), węzły, ramka, odcinek krzywej.
+   * W trakcie wyklikiwania trafić można tylko w pierwszy węzeł, który zamyka krzywą.
+   */
   const hitTestPen = (
     sess: ActiveVectorBezierSession,
     mx: number,
@@ -3329,7 +3471,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     if (fr) {
       for (const [key, hp] of Object.entries(fr.handles)) if (near(hp)) return { kind: 'frame', index: -1, frame: key };
       if (near({ x: fr.cx, y: fr.cy })) return { kind: 'frame', index: -1, frame: 'move' };
-      // krawędź ramki przeciąga całą krzywą
+      // Krawędź ramki (tolerancja 5 pikseli ekranu) przesuwa całą krzywą
       const lp = fr.toLocal(docPt);
       const d = (a: number, b: number, v: number) => Math.min(Math.abs(v - a), Math.abs(v - b));
       const inX = lp.x >= fr.x0 - 5 / zoom && lp.x <= fr.x1 + 5 / zoom;
@@ -3374,7 +3516,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     setPen({ ...sess, nodes, selected: Math.min(idx, nodes.length - 1) });
   };
 
-  /** Zamyka / otwiera całą krzywą (przycisk na pasku opcji). Otwarcie usuwa odcinek zamykający. */
+  /** Przełącza zamknięcie całej krzywej (przycisk na pasku opcji). Otwarcie usuwa odcinek zamykający. */
   const penToggleClosed = () => {
     const sess = penRef.current;
     if (!sess || sess.nodes.length < 3) return;
@@ -3424,9 +3566,10 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     const step = Math.PI / 4;
     const a = Math.round(Math.atan2(dy, dx) / step) * step;
     const d = Math.hypot(dx, dy);
-    return { x: qr(origin.x + Math.cos(a) * d), y: qr(origin.y + Math.sin(a) * d) };
+    return { x: Math.round(origin.x + Math.cos(a) * d), y: Math.round(origin.y + Math.sin(a) * d) };
   };
 
+  /** Obsługuje naciśnięcie przycisku wskaźnika: dodaje węzeł, rozpoczyna przeciąganie elementu krzywej albo zatwierdza krzywą i zaczyna nową. */
   const penPointerDown = (e: React.PointerEvent, pt: SKPoint) => {
     const sess = penRef.current;
     setPenMenu(null);
@@ -3435,7 +3578,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       return;
     }
     const ms = penScreenPos(e);
-    const rounded = { x: qr(pt.x), y: qr(pt.y) };
+    const rounded = { x: rnd(pt.x), y: rnd(pt.y) };
     const startDrag = (kind: PenDrag['kind'], index: number, nodes: PenNode[], inserted?: boolean) => {
       penDragRef.current = { kind, index, startPt: pt, startScreen: ms, moved: false, initNodes: nodes, inserted };
     };
@@ -3444,7 +3587,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       const hit = hitTestPen(sess, ms.x, ms.y, pt);
       if (sess.phase === 'drawing') {
         if (hit && hit.kind === 'node' && hit.index === 0) {
-          // kliknięcie pierwszego węzła zamyka krzywą
+          // Kliknięcie pierwszego węzła zamyka krzywą
           setPen({ ...sess, closed: true, phase: 'editing', selected: 0 });
           return;
         }
@@ -3491,7 +3634,10 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     startDrag('create', 0, nodes);
   };
 
-  /** Zwraca true, gdy zdarzenie zostało obsłużone przez narzędzie krzywej. */
+  /**
+   * Obsługuje ruch wskaźnika: przeciąganie węzłów, uchwytów i ramki oraz podświetlanie elementu pod kursorem.
+   * Zwraca true, gdy zdarzenie zostało obsłużone przez narzędzie krzywej.
+   */
   const penPointerMove = (e: React.PointerEvent, pt: SKPoint | null): boolean => {
     if (activeTool !== 'bezier' || isSamplingPipetteRef.current) return false;
     const sess = penRef.current;
@@ -3501,7 +3647,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     if (d && sess) {
       if (!d.moved && Math.hypot(ms.x - d.startScreen.x, ms.y - d.startScreen.y) < 3) return true;
       d.moved = true;
-      const rounded = { x: qr(pt.x), y: qr(pt.y) };
+      const rounded = { x: rnd(pt.x), y: rnd(pt.y) };
       let nodes = d.initNodes;
       if (d.kind === 'create') {
         const n = d.initNodes[d.index];
@@ -3520,8 +3666,8 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         const lcy = (bb.y0 + bb.y1) / 2;
         const fh = d.frame ?? 'move';
         if (fh === 'move') {
-          let dx = qr(pt.x - d.startPt.x);
-          let dy = qr(pt.y - d.startPt.y);
+          let dx = Math.round(pt.x - d.startPt.x);
+          let dy = Math.round(pt.y - d.startPt.y);
           if (e.shiftKey) {
             if (Math.abs(dx) >= Math.abs(dy)) dy = 0;
             else dx = 0;
@@ -3537,7 +3683,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
           setPen({ ...sess, nodes, frameAngle: fa + ang });
           return true;
         } else {
-          // skalowanie w osiach ramki jak dla kształtu: Shift = proporcje (także dla boków), Alt = symetrycznie od środka
+          // Skalowanie w osiach ramki jak dla kształtu: Shift zachowuje proporcje (także przy uchwytach boków), Alt skaluje symetrycznie od środka
           const dl = toLocal({ x: pt.x - d.startPt.x, y: pt.y - d.startPt.y });
           const west = fh.includes('w');
           const east = fh.includes('e');
@@ -3570,8 +3716,8 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
           });
         }
       } else if (d.kind === 'node') {
-        let dx = qr(pt.x - d.startPt.x);
-        let dy = qr(pt.y - d.startPt.y);
+        let dx = Math.round(pt.x - d.startPt.x);
+        let dy = Math.round(pt.y - d.startPt.y);
         if (e.shiftKey) {
           if (Math.abs(dx) >= Math.abs(dy)) dy = 0;
           else dx = 0;
@@ -3593,6 +3739,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     return true;
   };
 
+  /** Kończy przeciąganie; krótkie kliknięcie w zaznaczony węzeł otwiera menu rodzaju węzła. */
   const penPointerUp = (): boolean => {
     if (activeTool !== 'bezier' || isSamplingPipetteRef.current) return false;
     const d = penDragRef.current;
@@ -3610,7 +3757,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   const penMenuRef = useRef<{ index: number } | null>(null);
   penMenuRef.current = penMenu;
 
-  /** Lasso punkt po punkcie: zatwierdzenie (>= 3 punkty), anulowanie i cofnięcie ostatniego punktu. */
+  /** Kończy sesję lassa punkt po punkcie i czyści jej stan. */
   const lassoEnd = () => {
     lassoMultiRef.current = false;
     lassoPressRef.current = null;
@@ -3620,6 +3767,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     setDragStartPointSynced(null);
     setCurrentDragPoint(null);
   };
+  /** Operacje lassa punkt po punkcie: zatwierdzenie (od 3 punktów), anulowanie i cofnięcie ostatniego punktu. */
   const lassoApiRef = useRef({
     finish: (_ctrl: boolean, _alt: boolean) => {},
     cancel: () => {},
@@ -3646,14 +3794,35 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     },
   };
 
-  // Zmiana narzędzia (lub trybu lasso) w trakcie sesji zatwierdza ją albo porzuca
+  // Zmiana narzędzia lub trybu lasso w trakcie sesji zatwierdza ją (od 3 punktów) albo porzuca
   useEffect(() => {
     if (lassoMultiRef.current && (activeTool !== 'select-lasso' || selectionSettings.lassoMode !== 'polygon')) {
       lassoApiRef.current.finish(false, false);
     }
   }, [activeTool, selectionSettings.lassoMode]);
 
-  // OBSŁUGA SKRÓTÓW KLAWIATUROWYCH (Enter = Zatwierdź, Esc = Anuluj, Natychmiastowa reakcja na Shift / Alt)
+  // Szybka regulacja pędzla: Esc lub utrata blokady wskaźnika przez przeglądarkę anuluje zmianę
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && adjustRef.current) {
+        e.preventDefault();
+        e.stopPropagation();
+        endBrushAdjustRef.current(true);
+      }
+    };
+    const onLockChange = () => {
+      const a = adjustRef.current;
+      if (a && a.lockEngaged && document.pointerLockElement !== containerRef.current) endBrushAdjustRef.current(true);
+    };
+    window.addEventListener('keydown', onKey, true);
+    document.addEventListener('pointerlockchange', onLockChange);
+    return () => {
+      window.removeEventListener('keydown', onKey, true);
+      document.removeEventListener('pointerlockchange', onLockChange);
+    };
+  }, []);
+
+  // Obsługa skrótów klawiaturowych (Enter = Zatwierdź, Esc = Anuluj, Natychmiastowa reakcja na Shift / Alt)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const isInteracting =
@@ -3674,6 +3843,9 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       }
       if (e.key === 'Control' || e.key === 'Meta') {
         setIsCtrlKeyDown(true);
+      }
+      if (e.key === 'Alt') {
+        setIsAltKeyDown(true);
       }
 
       const isSelectionTool =
@@ -3814,6 +3986,11 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       if (e.key === 'Control' || e.key === 'Meta') {
         setIsCtrlKeyDown(false);
       }
+      if (e.key === 'Alt') {
+        setIsAltKeyDown(false);
+        // Samo puszczenie Alt nie może uaktywniać menu przeglądarki w narzędziach pędzlowych
+        if (isBrushAdjustTool(activeTool) && !['INPUT', 'SELECT', 'TEXTAREA'].includes((e.target as HTMLElement).tagName)) e.preventDefault();
+      }
 
       const isSelectionTool =
         activeTool === 'select-rect' ||
@@ -3862,6 +4039,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       setIsSpacePressed(false);
       setIsShiftKeyDown(false);
       setIsCtrlKeyDown(false);
+      setIsAltKeyDown(false);
       isSamplingPipetteRef.current = false;
       if (baseSelectionModeRef.current !== null) {
         onChangeSelectionSettings?.({ mode: baseSelectionModeRef.current });
@@ -3894,548 +4072,11 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     onChangeSelectionSettings,
   ]);
 
-  /** Pokazuje zwykłe płótna dokumentu (kafelki / płótno główne) i chowa wynik GPU trybu Wektory. */
-  const restoreBaseCanvases = () => {
-    vectorViewsRef.current.clear(); // bufory widoku wektorów (okno x kilka) - zwalniamy poza trybem Wektory
-    if (!gpuCrispActiveRef.current) return;
-    gpuCrispActiveRef.current = false;
-    gpuCrispSigRef.current = '';
-    if (canvasRef.current) canvasRef.current.style.opacity = '';
-    if (tileCanvasRef.current) tileCanvasRef.current.style.opacity = '';
-    if (gpuCrispCanvasRef.current) gpuCrispCanvasRef.current.style.display = 'none';
-  };
-
-  /**
-   * Tryb Wektory na karcie graficznej: kompozytor WebGL składa cały stos w skali widoku. Warstwy wektorowe dostają ostre
-   * tekstury w rozdzielczości ekranu, a maski, korekcje, filtry, stylizacje, krycie i tryby mieszania liczy GPU tak jak dla
-   * pozostałych warstw - więc działa też z warstwami (rastrowymi, wektorowymi, korekcyjnymi) nad wektorową.
-   * false = ta ścieżka nie obsługuje bieżącego stanu (sesje rastrowe, grupy z izolacją itp.) - działa nakładka 2D.
-   */
-  const tryGpuCrisp = (): boolean => {
-    crispSourceRef.current = null;
-    engine.vec.deferLiveRebuild = false;
-    for (const id of [...vectorViewsRef.current.keys()]) if (!engine.layers.some((l) => l.id === id && l.isVector)) vectorViewsRef.current.delete(id);
-    const container = containerRef.current;
-    const tr = tileRendererRef.current;
-    const tv = tileViewRef.current;
-    if (!container || !tr || !tv || tv.width <= 0 || tv.height <= 0) return false;
-    if ((globalThis as { __figuraGpuCrisp?: boolean }).__figuraGpuCrisp === false || /[?&]nogpucrisp\b/.test(location.search)) return false;
-    if (!engine.layers.some((l) => l.isVector && l.ownVisible)) return false;
-    const act = engine.getActiveLayer();
-    const gpu = tr.sharedGpu();
-    if (!gpu) return false;
-    const live = act && act.isVector && isAnyVectorSessionActiveRef.current ? liveSessionObjectRef.current() : null;
-    const liveKey = live ? JSON.stringify(live) : '';
-    const editing = engine.vec.editingInfo;
-    const baseKeyOf = (l: Layer) => source.key(l).split('|').slice(0, 4).join('|');
-    const source: GpuCrispSource = {
-      vector: (l) => l.isVector,
-      key: (l) => {
-        let h = 0;
-        const add = (g: { tiles: ReadonlyArray<ReadonlyArray<{ version: number; hasContent: boolean }>> } | null | undefined) => {
-          if (!g) return;
-          for (const row of g.tiles) for (const t of row) h = (h * 31 + t.version * 2 + (t.hasContent ? 1 : 0)) | 0;
-        };
-        if (l.isVector) h = l.vecRev | 0; // piksele warstwy wektorowej są pochodną obiektów (nie czytamy ich: leniwe)
-        else add(l.pixelGrid);
-        add(l.maskGrid);
-        return `${h}|${l.layerObjects.length}|${l.maskObjects.length}|${l.maskEnabled ? 1 : 0}|${act === l ? liveKey + '|' + (editing?.id ?? '') : ''}`;
-      },
-      raster: (l, win, kind) => rasterVectorForGpu(l, win, kind, act === l ? live : null, editing?.layerId === l.id ? editing.id : null, source.key(l), baseKeyOf(l)),
-      takeDirty: (l) => vectorViewsRef.current.get(l.id)?.takeDirty() ?? null,
-    };
-    crispSourceRef.current = source;
-    // sesje rastrowe (pędzel, gradient, wiadro, transformacja, narzędzia wektorowe na rastrze) składa kafelkowy podgląd z ostrymi wektorami
-    // (także edycja rastrowej maski warstwy wektorowej: jej pociągnięcia to sesja rastrowa)
-    if (pointerDownRef.current && act && !act.vectorTarget) return false;
-    if (engine.gradientPreview || engine.getBucketPreview() || engine.transformContentSession) return false;
-    if (act && !act.isVector && isAnyVectorSessionActiveRef.current) return false;
-    let lsig = 0;
-    const tileSig = (g: { tiles: ReadonlyArray<ReadonlyArray<{ version: number; hasContent: boolean }>> } | null | undefined) => {
-      if (!g) return;
-      for (const row of g.tiles) for (const t of row) lsig = (lsig * 31 + t.version * 2 + (t.hasContent ? 1 : 0)) | 0;
-    };
-    for (const l of engine.layers) {
-      if (l.isVector) lsig = (lsig * 31 + (l.vecRev | 0)) | 0;
-      else tileSig(l.pixelGrid);
-      tileSig(l.maskGrid);
-    }
-    const sig = `${engine.getBaseSignature()}|${engine.correctionSessionSignature}|${lsig}|${tv.zoom}|${tv.left},${tv.top}|${tv.width}x${tv.height}|${liveKey}|${editing?.id ?? ''}`;
-    if (sig === gpuCrispSigRef.current && gpuCrispActiveRef.current) {
-      engine.vec.deferLiveRebuild = true;
-      return true;
-    }
-    if (sig === gpuCrispFailRef.current) {
-      crispSourceRef.current = null; // kompozytor GPU tego nie obsługuje: nakładka 2D
-      return false;
-    }
-    const tc0 = performance.now();
-    const tr0 = (globalThis as { __figuraProf?: Record<string, number> }).__figuraProf?.tilesRastered ?? 0;
-    const glc = gpu.compose(tv, null, source);
-    // koszt "zimnego" złożenia (z rastrowaniem kafelków) - to on decyduje, czy zoom ma przejść przez tymczasowy zwykły podgląd;
-    // złożenia z gotowej pamięci kafelków (np. kolejne ruchy edytowanego obiektu) są tanie i nie mówią nic o koszcie zmiany powiększenia
-    const rastered = ((globalThis as { __figuraProf?: Record<string, number> }).__figuraProf?.tilesRastered ?? 0) - tr0;
-    if (rastered > 2) gpuCrispCostRef.current = performance.now() - tc0;
-    if (!glc) {
-      crispSourceRef.current = null;
-      gpuCrispFailRef.current = sig;
-      return false;
-    }
-    let gc = gpuCrispCanvasRef.current;
-    if (!gc) {
-      gc = document.createElement('canvas');
-      gc.setAttribute('data-crisp-gpu', '1');
-      gc.className = 'absolute inset-0 pointer-events-none';
-      gc.style.zIndex = '4';
-      gc.style.width = '100%';
-      gc.style.height = '100%';
-      gpuCrispCanvasRef.current = gc;
-      container.appendChild(gc);
-    }
-    if (gc.width !== tv.width || gc.height !== tv.height) {
-      gc.width = tv.width;
-      gc.height = tv.height;
-    }
-    const gctx = gc.getContext('2d')!;
-    gctx.setTransform(1, 0, 0, 1, 0, 0);
-    gctx.globalCompositeOperation = 'copy';
-    gctx.drawImage(glc, 0, 0);
-    gctx.globalCompositeOperation = 'source-over';
-    gc.style.display = '';
-    if (canvasRef.current) canvasRef.current.style.opacity = '0';
-    if (tileCanvasRef.current) tileCanvasRef.current.style.opacity = '0';
-    gpuCrispActiveRef.current = true;
-    gpuCrispSigRef.current = sig;
-    engine.vec.deferLiveRebuild = true;
-    return true;
-  };
-
-  /** Rysuje obiekty warstwy wektorowej w oknie z pamięci podręcznej kafelków ekranu (patrz `vecTileCacheRef`). */
-  const drawVectorTiles = (
-    ctx: CanvasRenderingContext2D,
-    layer: Layer,
-    objs: VectorObject[],
-    S: number,
-    left: number,
-    top: number,
-    W: number,
-    H: number,
-    layerKey: string,
-    cacheId: string = layer.id
-  ) => {
-    const T = VEC_TILE;
-    const cache = vecTileCacheRef.current;
-    cache.frame++;
-    let tl = cache.layers.get(cacheId);
-    if (!tl || tl.S !== S) {
-      if (tl) for (const t of tl.tiles.values()) if (t.cv) cache.pool.push(t.cv);
-      tl = { S, contentKey: '', infos: [], tiles: new Map() };
-      cache.layers.set(cacheId, tl);
-    }
-    // klucz zawartości warstwy (wersje kafelków dokumentu, liczba obiektów, sesja na żywo) zmienia się przy każdej edycji;
-    // dopiero wtedy liczymy podpisy obiektów i porównujemy kafelki
-    if (tl.contentKey !== layerKey) {
-      tl.contentKey = layerKey;
-      tl.infos = objs.map((o) => ({ o, h: hashStr(vecObjectSig(o)), b: vectorObjectBounds(o) }));
-    }
-    const infos = tl.infos;
-    const docW = engine.width * S;
-    const docH = engine.height * S;
-    const i0 = Math.max(0, Math.floor(-left / T));
-    const j0 = Math.max(0, Math.floor(-top / T));
-    const i1 = Math.min(Math.ceil(docW / T) - 1, Math.floor((W - 1 - left) / T));
-    const j1 = Math.min(Math.ceil(docH / T) - 1, Math.floor((H - 1 - top) / T));
-    const tilesPerRow = Math.ceil(docW / T) + 1;
-    for (let j = j0; j <= j1; j++) {
-      for (let i = i0; i <= i1; i++) {
-        // obiekty dotykające kafelka (w pikselach urządzenia od początku dokumentu)
-        const tx0 = i * T;
-        const ty0 = j * T;
-        const tx1 = tx0 + T;
-        const ty1 = ty0 + T;
-        let h = 17;
-        let n = 0;
-        for (const inf of infos) {
-          const b = inf.b;
-          if (b.x1 * S < tx0 - 1 || b.y1 * S < ty0 - 1 || b.x0 * S > tx1 + 1 || b.y0 * S > ty1 + 1) continue;
-          h = (h * 31 + inf.h) | 0;
-          n++;
-        }
-        const id = j * tilesPerRow + i;
-        let t = tl.tiles.get(id);
-        if (!t || t.h !== h) {
-          if (n === 0) {
-            if (t?.cv) cache.pool.push(t.cv);
-            t = { cv: null, h, used: cache.frame };
-          } else {
-            const pfr = ((globalThis as { __figuraProf?: Record<string, number> }).__figuraProf ??= { vecRaster: 0, vecCalls: 0 });
-            pfr.tilesRastered = (pfr.tilesRastered ?? 0) + 1;
-            let cv = t?.cv ?? cache.pool.pop() ?? document.createElement('canvas');
-            if (cv.width !== T || cv.height !== T) {
-              cv.width = T;
-              cv.height = T;
-            }
-            const tctx = cv.getContext('2d')!;
-            // kafelek jest oknem rastra: obiekt (w skali ekranu, więc przy dużym zoomie ogromny) rysowany jest tylko w jego granicach
-            markWindowedContext(tctx);
-            tctx.setTransform(1, 0, 0, 1, 0, 0);
-            tctx.globalCompositeOperation = 'source-over';
-            tctx.globalAlpha = 1;
-            tctx.clearRect(0, 0, T, T);
-            for (const inf of infos) {
-              const b = inf.b;
-              if (b.x1 * S < tx0 - 1 || b.y1 * S < ty0 - 1 || b.x0 * S > tx1 + 1 || b.y0 * S > ty1 + 1) continue;
-              const so = scaleVectorObject(inf.o, S, -tx0, -ty0);
-              if (vectorObjectBlend(so) === 'SrcOver') drawVectorObject(tctx, so);
-              else compositeVectorObject(tctx, so, T, T, 0, 0, true);
-            }
-            t = { cv, h, used: cache.frame };
-          }
-          tl.tiles.set(id, t);
-        }
-        t.used = cache.frame;
-        if (t.cv) ctx.drawImage(t.cv, left + tx0, top + ty0);
-      }
-    }
-    // ograniczenie pamięci: najdawniej używane kafelki (ze wszystkich warstw) wypadają
-    let total = 0;
-    for (const l of cache.layers.values()) total += l.tiles.size;
-    if (total > VEC_TILE_MAX) {
-      const all: { l: typeof tl; id: number; used: number }[] = [];
-      for (const l of cache.layers.values()) for (const [id, t] of l.tiles) all.push({ l, id, used: t.used });
-      all.sort((a, b) => a.used - b.used);
-      for (let k = 0; k < total - VEC_TILE_MAX * 0.8 && k < all.length; k++) {
-        const t = all[k].l.tiles.get(all[k].id);
-        if (t?.cv) cache.pool.push(t.cv);
-        all[k].l.tiles.delete(all[k].id);
-      }
-      if (cache.pool.length > 64) cache.pool.length = 64;
-    }
-    if (cache.layers.size > 40) {
-      const live = new Set(engine.layers.map((l) => l.id));
-      for (const id of Array.from(cache.layers.keys())) if (!live.has(id.split('^')[0])) cache.layers.delete(id);
-    }
-  };
-
-  /** Rysuje warstwę wektorową (obiekty) albo jej maskę w oknie rastra kompozytora GPU; efekty i krycie nakłada GPU. */
-  const rasterVectorForGpu = (
-    layer: Layer,
-    win: GpuWindow,
-    kind: 'layer' | 'mask',
-    live: ReturnType<typeof liveSessionObjectRef.current> | null,
-    editingId: string | null,
-    layerKey: string,
-    baseKey: string
-  ): HTMLCanvasElement | null => {
-    const W = win.W;
-    const H = win.H;
-    const S = win.s;
-    const left = Math.round(-win.ox * S);
-    const top = Math.round(-win.oy * S);
-    if (kind === 'layer') {
-      // warstwa: sprite'y obiektów w skali widoku, podział „pod / edytowane / nad”, zmiany tylko w odświeżanym prostokącie
-      const profV0 = performance.now();
-      let view = vectorViewsRef.current.get(layer.id);
-      if (!view) vectorViewsRef.current.set(layer.id, (view = new VectorView()));
-      let vobjs = layer.layerObjects.filter((o) => o.visible);
-      const liveIds = new Set<string>(engine.vec.liveIdsOf(layer) ?? []);
-      // podczas edycji maski obiekt na żywo trafia do maski (kind 'mask'), nie do warstwy
-      if (live && !(layer.editMask && layer.maskGrid)) {
-        if (editingId) {
-          const at = vobjs.findIndex((o) => o.id === editingId);
-          const lv = { ...live, id: editingId } as VectorObject;
-          vobjs = at >= 0 ? vobjs.map((o, i) => (i === at ? lv : o)) : [...vobjs, lv];
-          liveIds.add(editingId);
-        } else {
-          vobjs = [...vobjs, { ...live, id: '__live' } as VectorObject];
-          liveIds.add('__live');
-        }
-      }
-      const cvv = view.produce(vobjs, liveIds, { S, left, top, W, H, docW: engine.width, docH: engine.height });
-      const pv = ((globalThis as { __figuraProf?: { vecRaster: number; vecCalls: number } }).__figuraProf ??= { vecRaster: 0, vecCalls: 0 });
-      pv.vecRaster += performance.now() - profV0;
-      pv.vecCalls++;
-      return cvv;
-    }
-    const bufs = gpuRasterBufRef.current;
-    const slot = 'm';
-    let cv = bufs[slot];
-    if (!cv) cv = bufs[slot] = document.createElement('canvas');
-    if (cv.width !== W || cv.height !== H) {
-      cv.width = W;
-      cv.height = H;
-    }
-    const ctx = cv.getContext('2d', { willReadFrequently: false })!;
-    markWindowedContext(ctx);
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.globalCompositeOperation = 'source-over';
-    ctx.globalAlpha = 1;
-    ctx.clearRect(0, 0, W, H);
-    const profT0 = performance.now();
-    if (layer.maskGrid) {
-      const vecMask = layer.maskObjects.length > 0 && !!layer.maskBase;
-      const baseGrid = vecMask ? layer.maskBase! : layer.maskGrid;
-      ctx.imageSmoothingEnabled = false;
-      ctx.drawImage(baseGrid.compositeToFlatCanvas(), left, top, engine.width * S, engine.height * S);
-      if (vecMask || (live && layer.editMask)) {
-        let mobjs = layer.maskObjects.filter((o) => o.visible);
-        if (live && layer.editMask) {
-          if (editingId) {
-            const at = mobjs.findIndex((o) => o.id === editingId);
-            const lv = { ...live, id: editingId };
-            mobjs = at >= 0 ? mobjs.map((o, i) => (i === at ? lv : o)) : [...mobjs, lv];
-          } else mobjs = [...mobjs, live];
-        }
-        for (const o of mobjs) {
-          const so = scaleVectorObject(o, S, left, top);
-          const b = vectorObjectBounds(so);
-          if (b.x1 < 0 || b.y1 < 0 || b.x0 > W || b.y0 > H) continue;
-          compositeVectorObject(ctx, so, W, H, 0, 0, true);
-        }
-      }
-    }
-    // poza dokumentem nic nie ma być widać
-    ctx.globalCompositeOperation = 'destination-in';
-    ctx.fillStyle = '#000';
-    ctx.fillRect(left, top, engine.width * S, engine.height * S);
-    ctx.globalCompositeOperation = 'source-over';
-    const prof = ((globalThis as { __figuraProf?: { vecRaster: number; vecCalls: number } }).__figuraProf ??= { vecRaster: 0, vecCalls: 0 });
-    prof.vecRaster += performance.now() - profT0;
-    prof.vecCalls++;
-    return cv;
-  };
-
-  /**
-   * Tryb Wektory: warstwy wektorowe z góry stosu rysowane są osobno, w rozdzielczości ekranu, z obiektami przeskalowanymi
-   * tymi samymi rendererami (ostre krawędzie przy dowolnym powiększeniu); kompozyt dokumentu ich wtedy nie zawiera.
-   */
-  const syncCrispVectors = () => {
-    const container = containerRef.current;
-    if (!container) return;
-    let wantCrisp = unitsRef.current.mode === 'vec';
-    // zoomowanie (kółko, +/-) przy ciężkiej scenie: na czas serii zmian pokazujemy zwykły (nieostry) podgląd, ostry wektorowy wraca po chwili spokoju
-    if (lastZoomSeenRef.current !== zoomRef.current) {
-      lastZoomSeenRef.current = zoomRef.current;
-      zoomChangedAtRef.current = performance.now();
-    }
-    if (wantCrisp && gpuCrispCostRef.current > 60 && performance.now() - zoomChangedAtRef.current < 220) {
-      wantCrisp = false;
-      // piksele warstwy edytowanego obiektu są w tyle (tryb Wektory ich nie odświeża): najpierw je doganiamy, a przez ten czas zostaje na ekranie
-      // poprzedni (aktualny) obraz wektorowy; zwykły podgląd pokazujemy dopiero w następnej klatce, gdy jest już odświeżony
-      if (engine.vec.hasDeferred && gpuCrispActiveRef.current) {
-        engine.vec.flushDeferred();
-        zoomChangedAtRef.current = performance.now();
-        requestAnimationFrame(() => requestAnimationFrame(() => syncCrispRef.current()));
-        return;
-      }
-      if (zoomRefineTimerRef.current != null) window.clearTimeout(zoomRefineTimerRef.current);
-      zoomRefineTimerRef.current = window.setTimeout(() => {
-        zoomRefineTimerRef.current = null;
-        crispSigRef.current = '';
-        syncCrispRef.current();
-      }, 240);
-    }
-    const actRaw = engine.getActiveLayer();
-    // najpierw ścieżka GPU (cały stos w kompozytorze WebGL); gdy jej nie da się użyć, działa nakładka 2D
-    const gpuOn = wantCrisp && tryGpuCrisp();
-    if (!gpuOn) {
-      engine.vec.deferLiveRebuild = false;
-      engine.vec.flushDeferred();
-      restoreBaseCanvases();
-    }
-    {
-      const trc = tileRendererRef.current;
-      if (trc) trc.crisp = wantCrisp && !gpuOn ? crispSourceRef.current : null;
-    }
-    // w trakcie pociągnięcia na warstwie rastrowej podgląd kreski rysuje kafelkowy kompozyt, więc na ten czas ta warstwa wraca do niego
-    // nakładka 2D tylko wtedy, gdy kompozytor GPU nie może pokazać trybu Wektory (brak WebGL2, nieobsługiwany stos); w sesjach rastrowych ostre wektory składa sam kompozytor kafelkowego podglądu
-    const layers = wantCrisp && !gpuOn && !crispSourceRef.current ? engine.crispEligibleLayers(pointerDownRef.current && actRaw && !actRaw.isVector ? actRaw.id : null) : [];
-    const ids = layers.map((l) => l.id);
-    if (ids.join(',') !== crispActiveIdsRef.current.join(',')) {
-      crispActiveIdsRef.current = ids;
-      engine.setCrispLayers(ids);
-      crispSigRef.current = '';
-      onCanvasModified();
-    }
-    const dpr = window.devicePixelRatio || 1;
-    const cW = container.clientWidth;
-    const cH = container.clientHeight;
-    const pw = Math.max(1, Math.round(cW * dpr));
-    const ph = Math.max(1, Math.round(cH * dpr));
-    const act = engine.getActiveLayer();
-    const live = layers.length > 0 && act && ids.includes(act.id) && isAnyVectorSessionActiveRef.current ? liveSessionObjectRef.current() : null;
-    const liveKey = live ? JSON.stringify(live) : '';
-    let rasterSig = 0;
-    for (const l of layers) {
-      for (let ci = 0; ci < l.correctionsSignature.length; ci++) rasterSig = (rasterSig * 31 + l.correctionsSignature.charCodeAt(ci)) | 0;
-      rasterSig = (rasterSig * 31 + Math.round(l.opacity * 1000)) | 0;
-      if (l.isVector) {
-        rasterSig = (rasterSig * 31 + (l.vecRev | 0)) | 0; // piksele wektorowej są leniwą pochodną obiektów (nie czytamy ich)
-        if (l.maskGrid) {
-          rasterSig = (rasterSig * 31 + (l.maskEnabled ? 1 : 2) + l.maskObjects.length * 7) | 0;
-          for (const row of l.maskGrid.tiles) for (const t of row) rasterSig = (rasterSig * 31 + t.version * 2 + (t.hasContent ? 1 : 0)) | 0;
-        }
-        continue;
-      }
-      for (const row of l.tileGrid.tiles) for (const t of row) rasterSig = (rasterSig * 31 + t.version * 2 + (t.hasContent ? 1 : 0)) | 0;
-    }
-    const sig = `${ids.join(',')}|${rasterSig}|${engine.getBaseSignature()}|${zoomRef.current}|${panRef.current.x},${panRef.current.y}|${pw}x${ph}|${liveKey}|${engine.vec.editingInfo?.id ?? ''}`;
-    if (sig === crispSigRef.current) return;
-    crispSigRef.current = sig;
-    // zsynchronizuj płótna warstw: usuń zbędne, utwórz brakujące, ułóż w kolejności stosu
-    const cmap = crispCanvasesRef.current;
-    let domChanged = false;
-    for (const [id, c] of cmap) {
-      if (!ids.includes(id)) {
-        c.remove();
-        cmap.delete(id);
-        domChanged = true;
-      }
-    }
-    for (const l of layers) {
-      if (!cmap.has(l.id)) {
-        const c = document.createElement('canvas');
-        c.setAttribute('data-crisp-layer', l.id);
-        c.className = 'absolute inset-0 pointer-events-none';
-        c.style.zIndex = '4';
-        c.style.width = '100%';
-        c.style.height = '100%';
-        cmap.set(l.id, c);
-        domChanged = true;
-      }
-    }
-    if (domChanged) for (const l of layers) container.appendChild(cmap.get(l.id)!);
-    for (const l of layers) {
-      const c = cmap.get(l.id)!;
-      if (c.width !== pw || c.height !== ph) {
-        c.width = pw;
-        c.height = ph;
-      }
-      c.style.mixBlendMode = cssBlendFor(l.blendMode);
-      c.getContext('2d')!.clearRect(0, 0, pw, ph);
-    }
-    if (layers.length === 0) return;
-    const zoomNow = zoomRef.current;
-    const S = zoomNow * dpr;
-    const left = (cW / 2 + panRef.current.x - (engine.width * zoomNow) / 2) * dpr;
-    const top = (cH / 2 + panRef.current.y - (engine.height * zoomNow) / 2) * dpr;
-    let scratch = crispScratchRef.current;
-    if (!scratch) scratch = crispScratchRef.current = document.createElement('canvas');
-    if (scratch.width !== pw || scratch.height !== ph) {
-      scratch.width = pw;
-      scratch.height = ph;
-    }
-    const sctx = scratch.getContext('2d')!;
-    markWindowedContext(sctx);
-    const editing = engine.vec.editingInfo;
-    for (const layer of layers) {
-      const ctx = cmap.get(layer.id)!.getContext('2d')!;
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(left, top, engine.width * S, engine.height * S);
-      ctx.clip();
-      if (!layer.isVector) {
-        // zwykła warstwa rastrowa nad wektorową: piksele płótna, bez wygładzania; korekcje kolorów tak jak w kompozycie
-        const flat = layer.tileGrid.compositeToFlatCanvas();
-        applyColorCorrectionsTo(layer, flat);
-        ctx.imageSmoothingEnabled = false;
-        ctx.globalAlpha = layer.opacity;
-        ctx.drawImage(flat, left, top, engine.width * S, engine.height * S);
-        ctx.globalAlpha = 1;
-        ctx.imageSmoothingEnabled = true;
-        ctx.restore();
-        continue;
-      }
-      sctx.setTransform(1, 0, 0, 1, 0, 0);
-      sctx.clearRect(0, 0, pw, ph);
-      const list = layer.layerObjects.filter((o) => o.visible).map((o) => o);
-      const isActive = act === layer;
-      let objs = list;
-      if (live && isActive) {
-        if (editing && editing.layerId === layer.id) {
-          const at = objs.findIndex((o) => o.id === editing.id);
-          const lv = { ...live, id: editing.id };
-          if (at >= 0) objs = objs.map((o, i) => (i === at ? lv : o));
-          else objs = [...objs, lv];
-        } else {
-          objs = [...objs, live];
-        }
-      }
-      for (const o of objs) {
-        const so = scaleVectorObject(o, S, left, top);
-        const b = vectorObjectBounds(so);
-        if (b.x1 < 0 || b.y1 < 0 || b.x0 > pw || b.y0 > ph) continue;
-        if (vectorObjectBlend(so) === 'SrcOver') drawVectorObject(sctx, so);
-        else compositeVectorObject(sctx, so, pw, ph, 0, 0, true);
-      }
-      // korekcje kolorów warstwy (filtry i stylizacje są w tym widoku pomijane)
-      applyColorCorrectionsTo(layer, scratch);
-      // maska warstwy: podkład + obiekty maski (z ich trybami mieszania, np. Ekran), narysowane wektorowo
-      if (layer.maskGrid && layer.maskEnabled) {
-        let mcan = crispMaskRef.current;
-        if (!mcan) mcan = crispMaskRef.current = document.createElement('canvas');
-        if (mcan.width !== pw || mcan.height !== ph) {
-          mcan.width = pw;
-          mcan.height = ph;
-        }
-        const mctx = mcan.getContext('2d', { willReadFrequently: true })!;
-        markWindowedContext(mctx);
-        mctx.setTransform(1, 0, 0, 1, 0, 0);
-        mctx.clearRect(0, 0, pw, ph);
-        const vecMask = layer.maskObjects.length > 0 && !!layer.maskBase;
-        const baseGrid = vecMask ? layer.maskBase! : layer.maskGrid;
-        mctx.imageSmoothingEnabled = false;
-        mctx.drawImage(baseGrid.compositeToFlatCanvas(), left, top, engine.width * S, engine.height * S);
-        if (vecMask) {
-          for (const o of layer.maskObjects) {
-            if (!o.visible) continue;
-            const so = scaleVectorObject(o, S, left, top);
-            const b = vectorObjectBounds(so);
-            if (b.x1 < 0 || b.y1 < 0 || b.x0 > pw || b.y0 > ph) continue;
-            compositeVectorObject(mctx, so, pw, ph, 0, 0, true);
-          }
-        }
-        const img = mctx.getImageData(0, 0, pw, ph);
-        grayToAlpha(img.data);
-        mctx.putImageData(img, 0, 0);
-        sctx.globalCompositeOperation = 'destination-in';
-        sctx.drawImage(mcan, 0, 0);
-        sctx.globalCompositeOperation = 'source-over';
-      }
-      ctx.globalAlpha = layer.opacity;
-      ctx.drawImage(scratch, 0, 0);
-      ctx.globalAlpha = 1;
-      ctx.restore();
-    }
-  };
-  const syncCrispRef = useRef(syncCrispVectors);
-  syncCrispRef.current = syncCrispVectors;
-  const zoomRef = useRef(zoom);
-  zoomRef.current = zoom;
-  const panRef = useRef(panOffset);
-  panRef.current = panOffset;
-  const isAnyVectorSessionActiveRef = useRef(false);
-  isAnyVectorSessionActiveRef.current = isAnyVectorSessionActive;
-  // zmiana dokumentu: poprzedni wraca do zwykłego wyświetlania warstw
-  useEffect(() => {
-    return () => {
-      restoreBaseCanvases();
-      gpuCrispCanvasRef.current?.remove();
-      gpuCrispCanvasRef.current = null;
-      engine.setCrispLayers([]);
-      crispActiveIdsRef.current = [];
-      for (const c of crispCanvasesRef.current.values()) c.remove();
-      crispCanvasesRef.current.clear();
-      crispSigRef.current = '';
-    };
-  }, [engine]);
-
-  // RENDEROWANIE NAKŁADKI: MASZERUJĄCE MRÓWKI, UCHWYTY TRANSFORMACJI, EDYCJA WEKTOROWA
+  // Renderowanie nakładki: maszerujące mrówki, uchwyty transformacji, edycja wektorowa
   useEffect(() => {
     let animId: number;
 
     const renderOverlay = () => {
-      syncCrispRef.current();
       const oCanvas = overlayCanvasRef.current;
       const container = containerRef.current;
 
@@ -4506,12 +4147,8 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
           oCtx.scale(zoom, zoom);
           oCtx.translate(-engine.width / 2, -engine.height / 2);
 
-          // 0. PROWADNICE OBRAZU (na całą szerokość / wysokość widoku)
+          // Prowadnice obrazu (na całą szerokość / wysokość widoku)
           if (engine.guides.length > 0 && guidesVisibleRef.current) {
-            const vx0 = (0 - screenCenterX) / zoom + engine.width / 2;
-            const vx1 = (cWidth - screenCenterX) / zoom + engine.width / 2;
-            const vy0 = (0 - screenCenterY) / zoom + engine.height / 2;
-            const vy1 = (cHeight - screenCenterY) / zoom + engine.height / 2;
             // linie prowadnic rysowane w pikselach urządzenia: dokładnie 1 piksel, środek piksela
             oCtx.save();
             oCtx.setTransform(oDpr, 0, 0, oDpr, 0, 0);
@@ -4544,7 +4181,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
             oCtx.restore();
           }
 
-          // 1. MASZERUJĄCE MRÓWKI DLA ZAZNACZENIA
+          // Maszerujące mrówki dla zaznaczenia
           if (engine.selectionManager.hasActiveSelection) {
             const time = performance.now();
             const dashOffset = (time / 60) % 8;
@@ -4574,7 +4211,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
             oCtx.restore();
           }
 
-          // 2. PODGLĄD ZAZNACZANIA NA ŻYWO (PROSTOKĄT, ELIPSA, LASSO)
+          // Podgląd zaznaczania na żywo (prostokąt, elipsa, lasso)
           if (isDrawing && dragStartPoint && currentDragPoint) {
             oCtx.save();
             oCtx.lineWidth = 1 / zoom;
@@ -4637,7 +4274,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
 
               if (w > 0 && h > 0) {
                 oCtx.save();
-                // 1. Semi-transparentny niebieski podkład
+                // 1. Półprzezroczysty niebieski podkład
                 oCtx.fillStyle = 'rgba(0, 162, 255, 0.22)';
                 oCtx.fillRect(minX, minY, w, h);
 
@@ -4655,7 +4292,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
             oCtx.restore();
           }
 
-          // 3. UCHWYT MAGICZNEJ RÓŻDŻKI LUB WIADRA
+          // Uchwyt magicznej różdżki lub wiadra
           const activeHandlePoint =
             activeTool === 'magic-wand'
               ? engine.selectionManager.wandSeedPoint
@@ -4689,7 +4326,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
             oCtx.restore();
           }
 
-          // 4. UCHWYTY WYPEŁNIENIA GRADIENTOWEGO
+          // Uchwyty wypełnienia gradientowego
           if (activeTool === 'gradient' && engine.gradientStartPoint && engine.gradientEndPoint) {
             const p0 = engine.gradientStartPoint;
             const p1 = engine.gradientEndPoint;
@@ -4738,7 +4375,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
             oCtx.restore();
           }
 
-          // 4b. ZAZNACZENIE OBIEKTÓW WEKTOROWYCH: ramka zbiorcza (bez uchwytów obiektów) i zaznaczanie obszarem
+          // Zaznaczenie obiektów wektorowych: ramka zbiorcza (bez uchwytów obiektów) i zaznaczanie obszarem
           {
             const vl = engine.getActiveLayer();
             if (vl && vl.vectorTarget && !vectorActiveRef.current) {
@@ -4782,7 +4419,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
             }
           }
 
-          // 5. INTERFEJS EDYCJI LINII NA ŻYWO (P0, P1, ŚRODEK) - PUSTE ZNACZNIKI
+          // Interfejs edycji linii na żywo (P0, P1, środek) - puste znaczniki
           if (activeVectorLineSession) {
             const { p0, p1 } = activeVectorLineSession;
             const mid: SKPoint = { x: (p0.x + p1.x) / 2, y: (p0.y + p1.y) / 2 };
@@ -4813,7 +4450,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
             drawHollowRing(mid, hoverVectorHandle === 'move', 4);
           }
 
-          // 6. INTERFEJS EDYCJI KRZYWEJ WIELOWĘZŁOWEJ NA ŻYWO (węzły, uchwyty, linia pomocnicza do kursora)
+          // Interfejs edycji krzywej wielowęzłowej na żywo (węzły, uchwyty, linia pomocnicza do kursora)
           if (activeVectorBezierSession && !freehandRef.current) {
             const { nodes, closed, phase, selected } = activeVectorBezierSession;
             const nN = nodes.length;
@@ -4826,7 +4463,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
               const cur = lastDocPtRef.current;
               if (cur) {
                 const last = nodes[nN - 1];
-                const c = { x: Math.round(cur.x), y: Math.round(cur.y) };
+                const c = { x: rnd(cur.x), y: rnd(cur.y) };
                 oCtx.lineWidth = 1 / zoom;
                 oCtx.strokeStyle = 'rgba(168, 85, 247, 0.9)';
                 oCtx.setLineDash([4 / zoom, 3 / zoom]);
@@ -4975,7 +4612,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
             }
           }
 
-          // 7. INTERFEJS EDYCJI FIGURY NA ŻYWO (RAMKA, 8 UCHWYTÓW, OBRÓT, MODYFIKATOR)
+          // Interfejs edycji figury na żywo (ramka, 8 uchwytów, obrót, modyfikator)
           const overlayGeomSess = activeVectorShapeSession ?? activeTextSession;
           if (overlayGeomSess) {
             const sess = overlayGeomSess;
@@ -4984,7 +4621,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
 
             oCtx.save();
 
-            // Ramka obwiedni (Bounding box)
+            // Ramka obwiedni
             oCtx.translate(sess.center.x, sess.center.y);
             oCtx.rotate(sess.angle);
 
@@ -5042,7 +4679,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
 
             oCtx.restore();
 
-            // 8. ŻÓŁTY PUNKT MODYFIKATORA (TYLKO DLA FIGUR, KTÓRE GO MAJĄ)
+            // Żółty punkt modyfikatora (tylko dla figur, które go mają)
             if (activeVectorShapeSession && !activeVectorShapeSession.smart && hasShapeModifier(vectorShapeSettings.shapeKind)) {
               const modDoc = getShapeModifierDocPoint(sess, vectorShapeSettings);
               const modR = 7 / zoom;
@@ -5093,7 +4730,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
             }
           }
 
-          // 7a. TEKST: ZAZNACZENIE I KURSOR
+          // Tekst: zaznaczenie i kursor
           if (activeTextSession && textLayoutRef.current) {
             const sess = activeTextSession;
             const lay = textLayoutRef.current;
@@ -5122,10 +4759,13 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
             oCtx.restore();
           }
 
-          // 7b. PODGLĄD LINII PROSTEJ SHIFT+KLIK DLA PĘDZLA I GUMKI
+          // Podgląd linii prostej Shift+klik dla pędzla i gumki
           if (
             (activeTool === 'brush' || activeTool === 'eraser') &&
             isShiftKeyDown &&
+            cursorInside &&
+            !adjustHud &&
+            !isAltKeyDown &&
             !isQuickPipetteActive &&
             lastBrushStrokeDocPointRef.current &&
             lastDocPtRef.current &&
@@ -5161,7 +4801,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
             oCtx.restore();
           }
 
-          // 8. INTERFEJS PRZEKSZTAŁCANIA ZAZNACZENIA / ZAWARTOŚCI NA ŻYWO (RAMKA, 8 UCHWYTÓW, PIVOT)
+          // Interfejs przekształcania zaznaczenia / zawartości na żywo (ramka, 8 uchwytów, pivot)
           const perspQuad = activeTool === 'transform-content' ? engine.getPerspectiveQuad() : null;
           if (perspQuad) {
             oCtx.save();
@@ -5196,7 +4836,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
             oCtx.translate(st.pos.x, st.pos.y);
             oCtx.rotate(st.angle);
 
-            // Podwójna ramka obwiedni (Bounding box): niebieska + biała przerywana
+            // Podwójna ramka obwiedni: niebieska + biała przerywana
             if (!devFrame(st.pos.x, st.pos.y, st.width, st.height, st.angle, '#007acc')) {
               oCtx.lineWidth = 1.2 / zoom;
               oCtx.strokeStyle = '#007acc';
@@ -5252,7 +4892,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
               );
             }
 
-            // Punkt obrotu / Pivot (celownik)
+            // Punkt obrotu (celownik)
             const cos = Math.cos(st.angle);
             const sin = Math.sin(st.angle);
             const pdx = st.pivot.x - st.pos.x;
@@ -5283,7 +4923,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
             oCtx.restore();
           }
 
-          // 7c. WSKAŹNIK PUNKTU BAZOWEGO PIECZĄTKI (CLONE STAMP)
+          // Wskaźnik punktu bazowego pieczątki
           if (activeTool === 'stamp' && (stampBasePointRef.current || externalStampBasePoint)) {
             const bp = stampBasePointRef.current || externalStampBasePoint!;
             let srcPos: SKPoint = { ...bp };
@@ -5331,7 +4971,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
 
           oCtx.restore();
 
-          // 9. KURSOR OKRĘGU I PLUSIKA DLA PĘDZLA, GUMKI, PĘDZLA KOREKCYJNEGO, DEFORMACJI, ZMIANY KOLORU I PIECZĄTKI (W PRZESTRZENI EKRANU)
+          // Kursor okręgu i plusika dla pędzla, gumki, pędzla korekcyjnego, deformacji, zmiany koloru i pieczątki (w przestrzeni ekranu)
           if (
             cursorPosRef.current &&
             (activeTool === 'brush' ||
@@ -5369,6 +5009,94 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
               oCtx.beginPath();
               oCtx.arc(cx, cy, brushRadiusScreen, 0, Math.PI * 2);
               oCtx.stroke();
+            }
+
+            // Szybka regulacja pędzla: podgląd twardości w obrysie oraz podpis z wartościami
+            if (adjustHud && adjustRef.current) {
+              const cur =
+                activeTool === 'stamp'
+                  ? stampSettings
+                  : activeTool === 'deform'
+                  ? deformSettings
+                  : activeTool === 'color-replace'
+                  ? colorReplaceSettings
+                  : activeTool === 'correction-brush'
+                  ? correctionBrushSettings
+                  : brushSettings;
+              if (brushRadiusScreen >= 3) {
+                const hf = Math.max(0, Math.min(1, cur.hardness / 100));
+                const grad = oCtx.createRadialGradient(cx, cy, 0, cx, cy, brushRadiusScreen);
+                grad.addColorStop(0, 'rgba(70, 150, 255, 0.40)');
+                grad.addColorStop(hf, 'rgba(70, 150, 255, 0.40)');
+                grad.addColorStop(1, 'rgba(70, 150, 255, 0)');
+                oCtx.fillStyle = grad;
+                oCtx.beginPath();
+                oCtx.arc(cx, cy, brushRadiusScreen, 0, Math.PI * 2);
+                oCtx.fill();
+                if (hf > 0.02 && hf < 0.98) {
+                  oCtx.setLineDash([3, 3]);
+                  oCtx.strokeStyle = 'rgba(255,255,255,0.8)';
+                  oCtx.lineWidth = 1;
+                  oCtx.beginPath();
+                  oCtx.arc(cx, cy, brushRadiusScreen * hf, 0, Math.PI * 2);
+                  oCtx.stroke();
+                  oCtx.setLineDash([]);
+                }
+              }
+              const [hp, vp] = axesFor(activeTool, adjustHud.layer);
+              const valueFor = (pr: BrushParam): number =>
+                pr === 'opacity' ? alphaToPct(primaryColor.a) : pr === 'size' ? clampSize(cur.size) : pr === 'hardness' ? cur.hardness : cur.spacing;
+              const rows: { arrow: string; param: BrushParam; axis: 'x' | 'y' }[] = [];
+              if (hp) rows.push({ arrow: '↔', param: hp, axis: 'x' });
+              if (vp) rows.push({ arrow: '↕', param: vp, axis: 'y' });
+              const lineH = 18;
+              const showStrip = adjustHud.layer === 2;
+              const hudW = 196;
+              const hudH = rows.length * lineH + 12 + (showStrip ? 26 : 0);
+              let hx = cx - hudW / 2;
+              // pod obrysem pędzla, a gdy brakuje miejsca, przyklejony do dolnej krawędzi obszaru rysowania
+              let hy = cy + Math.max(brushRadiusScreen, 6) + 16;
+              hy = Math.min(hy, cHeight - hudH - 4);
+              hx = Math.max(4, Math.min(cWidth - hudW - 4, hx));
+              hy = Math.max(4, hy);
+              oCtx.fillStyle = 'rgba(30, 30, 30, 0.92)';
+              oCtx.strokeStyle = 'rgba(255,255,255,0.18)';
+              oCtx.lineWidth = 1;
+              oCtx.beginPath();
+              oCtx.roundRect(hx, hy, hudW, hudH, 5);
+              oCtx.fill();
+              oCtx.stroke();
+              oCtx.font = '12px system-ui, "Segoe UI", sans-serif';
+              oCtx.textBaseline = 'middle';
+              rows.forEach((r, i) => {
+                const y = hy + 6 + lineH * i + lineH / 2;
+                const dim = adjustHud.axis !== null && adjustHud.axis !== r.axis;
+                oCtx.fillStyle = dim ? '#777' : '#ffffff';
+                oCtx.textAlign = 'left';
+                oCtx.fillText(`${r.arrow}  ${paramLabel(r.param, activeTool)}`, hx + 10, y);
+                oCtx.textAlign = 'right';
+                oCtx.fillText(formatParam(r.param, valueFor(r.param)), hx + hudW - 10, y);
+              });
+              if (showStrip) {
+                // pasek próbny: kropki w zadanych odstępach i z zadanym kryciem
+                const d = 12;
+                const gap = Math.max(1, (d * cur.spacing) / 100);
+                const op = supportsOpacity(activeTool) ? alphaToPct(primaryColor.a) / 100 : 1;
+                const sy = hy + 6 + rows.length * lineH + 12;
+                oCtx.save();
+                oCtx.beginPath();
+                oCtx.rect(hx + 8, sy - 10, hudW - 16, 20);
+                oCtx.clip();
+                oCtx.fillStyle = `rgba(255,255,255,${Math.max(0.06, op * 0.4)})`;
+                for (let x = hx + 14, n = 0; x < hx + hudW - 8 && n < 200; x += gap, n++) {
+                  oCtx.beginPath();
+                  oCtx.arc(x, sy, d / 2, 0, Math.PI * 2);
+                  oCtx.fill();
+                }
+                oCtx.restore();
+              }
+              oCtx.textAlign = 'start';
+              oCtx.textBaseline = 'alphabetic';
             }
 
             // Standardowy, idealnie ostry czarny plusik 1px z białym obramowaniem 1px w centrum kursora
@@ -5433,7 +5161,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
             oCtx.restore();
           }
 
-          // 9b. KURSOR I MODYFIKATOR DLA NARZĘDZI ZAZNACZANIA (W PRZESTRZENI EKRANU)
+          // Kursor i modyfikator dla narzędzi zaznaczania (w przestrzeni ekranu)
           const isSelectionTool =
             activeTool === 'select-rect' ||
             activeTool === 'select-ellipse' ||
@@ -5532,7 +5260,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
             oCtx.restore();
           }
 
-          // 10. INTERAKTYWNA LUPA DLA PIPETY I SZYBKIEJ PIPETY (W PRZESTRZENI EKRANU)
+          // Interaktywna lupa dla pipety i szybkiej pipety (w przestrzeni ekranu)
           const isPipetteTool = activeTool === 'pipette' || isQuickPipetteActive;
           if (isPipetteTool && cursorPosRef.current) {
             const { x: cx, y: cy } = cursorPosRef.current;
@@ -5642,7 +5370,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
               oCtx.setTransform(pk, 0, 0, pk, 0, 0);
               const ix = Math.round((cx * oDpr) / pk);
               const iy = Math.round((cy * oDpr) / pk);
-              const pArm = 5;
+              const pArm = 4;
 
               // 1. Białe obramowanie 1px (podkład pod spodem)
               oCtx.fillStyle = '#ffffff';
@@ -5656,14 +5384,14 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
 
               oCtx.restore();
             } else {
-              // Standalone ostry celownik gdy lupa jest wyłączona lub poza płótnem
+              // Samodzielny ostry celownik, gdy lupa jest wyłączona lub poza płótnem
               oCtx.save();
               // piksel-art w całkowitej wielokrotności pikseli urządzenia: ostry przy każdym devicePixelRatio
               const pk = Math.max(1, Math.round(oDpr));
               oCtx.setTransform(pk, 0, 0, pk, 0, 0);
               const ix = Math.round((cx * oDpr) / pk);
               const iy = Math.round((cy * oDpr) / pk);
-              const pArm = 5;
+              const pArm = 4;
 
               // 1. Białe obramowanie 1px
               oCtx.fillStyle = '#ffffff';
@@ -5699,6 +5427,19 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     selectionSettings,
     pipetteSettings,
     brushSettings.size,
+    cursorInside,
+    isAltKeyDown,
+    brushSettings.hardness,
+    brushSettings.spacing,
+    correctionBrushSettings.hardness,
+    correctionBrushSettings.spacing,
+    deformSettings.hardness,
+    deformSettings.spacing,
+    colorReplaceSettings.hardness,
+    colorReplaceSettings.spacing,
+    stampSettings.hardness,
+    stampSettings.spacing,
+    adjustHud,
     correctionBrushSettings.size,
     deformSettings.size,
     colorReplaceSettings.size,
@@ -5729,6 +5470,15 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   // ZOOM I PAN
   const handleWheel = (e: React.WheelEvent) => {
     e.preventDefault();
+    // Alt + kółko w narzędziach pędzlowych: rozmiar (z Shift: twardość) zamiast zoomu
+    if (e.altKey && isBrushAdjustTool(activeTool) && !adjustRef.current) {
+      const d = e.deltaY || e.deltaX;
+      if (d !== 0) {
+        if (e.shiftKey) onAdjustBrush?.(activeTool, { hardness: (v) => v - d * 0.05 });
+        else onAdjustBrush?.(activeTool, { size: (v) => (d < 0 ? Math.max(v * Math.exp(-d * 0.001), v + 1) : Math.min(v * Math.exp(-d * 0.001), v - 1)) });
+      }
+      return;
+    }
     if (!containerRef.current) return;
 
     const rect = containerRef.current.getBoundingClientRect();
@@ -5775,7 +5525,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     };
   };
 
-  // POINTER DOWN
+  // Obsługa wciśnięcia wskaźnika
   const enterLiveOverSession = () => {
     const cv = canvasRef.current;
     if (!cv || liveOverSessionRef.current) return;
@@ -5812,7 +5562,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
           pivot: { ...o.center },
           flipX: o.flipX,
           flipY: o.flipY,
-          smart: { docW: o.docW, docH: o.docH, fig: o.fig, png: o.png, blend: o.settings.blendMode },
+          smart: { docW: o.docW, docH: o.docH, fig: o.fig, png: o.png, blend: o.settings.blendMode, disk: o.disk },
         });
         break;
       case 'shape':
@@ -5872,6 +5622,15 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [vectorEditRequest]);
 
+  const lastPasteRequestRef = useRef<number>(vectorPasteRequest?.n ?? 0);
+  useEffect(() => {
+    if (!vectorPasteRequest || vectorPasteRequest.n === lastPasteRequestRef.current) return;
+    lastPasteRequestRef.current = vectorPasteRequest.n;
+    if (isAnyVectorSessionActive) commitActiveVectorSession();
+    openVectorObject(vectorPasteRequest.object);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [vectorPasteRequest]);
+
   /** Powiadamia panel warstw o zmianie zaznaczenia obiektów wektorowych. */
   const notifyVecSelection = () => {
     onVectorSelectionChange?.();
@@ -5930,6 +5689,62 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   const notifyVecRef = useRef<() => void>(() => {});
   notifyVecRef.current = notifyVecSelection;
 
+  /**
+   * Naciśnięcie na niezaznaczony obiekt otwiera go do edycji i od razu zaczyna przeciąganie (ruch myszy przesuwa obiekt),
+   * bez konieczności puszczenia przycisku i ponownego naciśnięcia. Zwykłe kliknięcie (bez ruchu) niczego nie przesuwa.
+   */
+  const startMoveOnOpen = (o: VectorObject, e: React.PointerEvent, pt: SKPoint) => {
+    const raw = getDocPoint(e) ?? pt;
+    if (o.kind === 'line') {
+      setActiveVectorHandleSynced('move');
+      vectorDragStartPtRef.current = pt;
+      vectorInitialSessionStateRef.current = { p0: { ...o.p0 }, p1: { ...o.p1 } };
+    } else if (o.kind === 'shape' || o.kind === 'smart') {
+      setActiveVectorHandleSynced('move');
+      vectorDragStartPtRef.current = raw;
+      vectorInitialSessionStateRef.current = {
+        center: { ...o.center },
+        width: o.width,
+        height: o.height,
+        angle: o.angle,
+        pivot: { ...o.center },
+        flipX: o.flipX,
+        flipY: o.flipY,
+        settings: { ...o.settings },
+      };
+    } else if (o.kind === 'text') {
+      setActiveVectorHandleSynced('move');
+      vectorDragStartPtRef.current = raw;
+      vectorInitialSessionStateRef.current = {
+        center: { ...o.center },
+        width: o.width,
+        height: o.height,
+        angle: o.angle,
+        pivot: { ...o.center },
+        flipX: false,
+        flipY: false,
+        autoHeight: o.autoHeight,
+      };
+    } else if (o.kind === 'path') {
+      // krzywa: przeciąganie całej ramki, tak jak po złapaniu jej krawędzi
+      const sess = penRef.current;
+      const gm = sess ? penFrameGeom(sess) : null;
+      if (sess && gm) {
+        penDragRef.current = {
+          kind: 'frame',
+          index: -1,
+          startPt: pt,
+          startScreen: penScreenPos(e),
+          moved: false,
+          initNodes: sess.nodes,
+          frame: 'move',
+          bbox: gm.bbox,
+          frameAngle: gm.a ?? 0,
+        };
+      }
+    }
+  };
+
   /** Manipulacja (wybór i edycja obiektu) i Pisak (rysowanie odręczne). Zwraca true, gdy zdarzenie obsłużone. */
   const vectorToolPointerDown = (e: React.PointerEvent, pt: SKPoint): boolean => {
     const layer = engine.getActiveLayer();
@@ -5962,7 +5777,10 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
           return true;
         }
         const loaded = engine.vec.beginEdit(idx, o.id);
-        if (loaded) openVectorObject(loaded);
+        if (loaded) {
+          openVectorObject(loaded);
+          startMoveOnOpen(loaded, e, pt);
+        }
         notifyVecSelection();
         return true;
       }
@@ -5985,8 +5803,21 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     return true;
   };
 
+  /** Prowadnice, do których działa przyciąganie: widoczne prowadnice użytkownika oraz cztery krawędzie płótna jako prowadnice. */
+  const snapGuides = (skipId?: string): { axis: 'h' | 'v'; pos: number }[] => {
+    const list: { axis: 'h' | 'v'; pos: number }[] = [
+      { axis: 'v', pos: 0 },
+      { axis: 'v', pos: engine.width },
+      { axis: 'h', pos: 0 },
+      { axis: 'h', pos: engine.height },
+    ];
+    if (guidesVisibleRef.current) for (const g of engine.guides) if (g.id !== skipId) list.push({ axis: g.axis, pos: g.pos });
+    return list;
+  };
+
   /** Przyciąganie kursora do istniejących punktów obiektów wektorowych i do prowadnic (pasek statusu: „Przyciąganie”). */
   const snapDocPoint = (pt: SKPoint | null): SKPoint | null => {
+    snapMoveValsRef.current = [];
     if (!pt || !snapEnabledRef.current || !(activeTool.startsWith('select-') || activeToolProp === 'vector-select' || activeToolProp === 'pen' || ['shapes', 'line', 'bezier', 'text', 'smart-object', 'guides', 'transform-selection'].includes(activeTool))) {
       snapMarkRef.current = null;
       return pt;
@@ -5994,6 +5825,9 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     const tol = 8 / Math.max(zoom, 0.05);
     const skipId = engine.vec.editingInfo?.id ?? null;
     let best: { x: number; y: number; d: number } | null = null;
+    // Tworzenie i przesuwanie prowadnicy: punkt musi być blisko kursora (w obu osiach), a prowadnica przejmuje tylko jego jedną współrzędną
+    const dragG = guideDragRef.current ? engine.guides.find((g) => g.id === guideDragRef.current) ?? null : null;
+    const gAxis: 'h' | 'v' | null = dragG ? dragG.axis : activeTool === 'guides' ? guideAxisRef.current : null;
     const consider = (x: number, y: number) => {
       const d = Math.hypot(x - pt.x, y - pt.y);
       if (d <= tol && (!best || d < best.d)) best = { x, y, d };
@@ -6033,14 +5867,21 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     let y = pt.y;
     let snapped = false;
     const b = best as { x: number; y: number; d: number } | null;
+    if (b && gAxis) {
+      // pozycja prowadnicy to tylko jedna współrzędna punktu; znacznik pokazuje cały punkt charakterystyczny
+      snapMarkRef.current = { x: b.x, y: b.y };
+      snapMoveValsRef.current = [gAxis === 'v' ? b.x : b.y];
+      return gAxis === 'v' ? { x: b.x, y: pt.y } : { x: pt.x, y: b.y };
+    }
     if (b) {
       x = b.x;
       y = b.y;
       snapped = true;
-    } else if (guidesVisibleRef.current) {
+    } else {
       let bx: number | null = null;
       let by: number | null = null;
-      for (const g of engine.guides) {
+      // Krawędzie płótna przyciągają jak prowadnice (także przy ukrytych prowadnicach)
+      for (const g of snapGuides(dragG?.id)) {
         if (g.axis === 'v' && Math.abs(g.pos - pt.x) <= tol && (bx === null || Math.abs(g.pos - pt.x) < Math.abs(bx - pt.x))) bx = g.pos;
         if (g.axis === 'h' && Math.abs(g.pos - pt.y) <= tol && (by === null || Math.abs(g.pos - pt.y) < Math.abs(by - pt.y))) by = g.pos;
       }
@@ -6054,6 +5895,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       }
     }
     snapMarkRef.current = snapped ? { x, y } : null;
+    if (snapped) snapMoveValsRef.current = b ? [x, y] : [...(x !== pt.x ? [x] : []), ...(y !== pt.y ? [y] : [])];
     return snapped ? { x, y } : pt;
   };
 
@@ -6067,10 +5909,53 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       return;
     }
 
+    // Alt (lub Ctrl+Alt) + przycisk w narzędziach pędzlowych: szybka regulacja parametrów zamiast rysowania
+    if (isBrushAdjustTool(activeTool) && e.altKey && (e.button === 0 || e.button === 2) && !isDrawingRef.current && !adjustRef.current) {
+      const st =
+        activeTool === 'stamp'
+          ? stampSettings
+          : activeTool === 'deform'
+          ? deformSettings
+          : activeTool === 'color-replace'
+          ? colorReplaceSettings
+          : activeTool === 'correction-brush'
+          ? correctionBrushSettings
+          : brushSettings;
+      const layer: 1 | 2 = e.ctrlKey || e.metaKey ? 2 : 1;
+      adjustRef.current = {
+        tool: activeTool,
+        layer,
+        startX: e.clientX,
+        startY: e.clientY,
+        lastX: e.clientX,
+        lastY: e.clientY,
+        ax: 0,
+        ay: 0,
+        tx: 0,
+        ty: 0,
+        lockAxis: null,
+        free: false,
+        offX: 0,
+        offY: 0,
+        cx: 0,
+        cy: 0,
+        pl: null,
+        begun: false,
+        lockEngaged: false,
+        pointerId: e.pointerId,
+        start: { size: st.size, hardness: st.hardness, spacing: st.spacing, opacity: alphaToPct(primaryColor.a) },
+      };
+      try {
+        (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+      } catch {}
+      setAdjustHud({ layer, axis: null, rev: 0 });
+      return;
+    }
+
     // Narzędzia inne niż różdżka i wiadro czytają zaznaczenie i warstwy, więc najpierw dokończ liczenie w tle
     if (activeTool !== 'magic-wand' && activeTool !== 'bucket') engine.flushPendingFill();
 
-    const isQuickPipette = (e.ctrlKey || e.metaKey || isCtrlKeyDown) && isDrawingTool(activeTool) && activeTool !== 'stamp' && activeToolProp !== 'vector-select';
+    const isQuickPipette = (e.ctrlKey || e.metaKey || isCtrlKeyDown) && !e.altKey && !isAltKeyDown && isDrawingTool(activeTool) && activeTool !== 'stamp' && activeToolProp !== 'vector-select';
     const isRightButtonAllowed =
       e.button === 2 &&
       (activeTool === 'correction-brush' ||
@@ -6093,15 +5978,17 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       };
     }
 
+    snapDownValsRef.current = [];
     const pt = snapDocPoint(getDocPoint(e));
     if (!pt) return;
+    snapDownValsRef.current = [...snapMoveValsRef.current];
     lastDocPtRef.current = pt;
 
     try {
       (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     } catch {}
 
-    // PROWADNICE: chwycenie istniejącej (obojętnie jakiego kierunku) albo wstawienie nowej w miejscu kliknięcia
+    // Prowadnice: chwycenie istniejącej (obojętnie jakiego kierunku) albo wstawienie nowej w miejscu kliknięcia
     if (activeTool === 'guides') {
       if (!guidesVisibleRef.current) {
         onShowToast?.('Prowadnice są ukryte (przełącznik „Prowadnice” na pasku statusu)');
@@ -6113,7 +6000,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         const d = Math.abs((g.axis === 'v' ? pt.x : pt.y) - g.pos);
         if (d <= tol && (!hit || d < hit.d)) hit = { id: g.id, d };
       }
-      const id = hit ? hit.id : engine.addGuide(guideAxisRef.current, guideAxisRef.current === 'v' ? qr(pt.x) : qr(pt.y));
+      const id = hit ? hit.id : engine.addGuide(guideAxisRef.current, guideAxisRef.current === 'v' ? rnd(pt.x) : rnd(pt.y));
       guideSelRef.current = id;
       guideDragRef.current = id;
       setGuidesRev((r) => r + 1);
@@ -6121,7 +6008,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       return;
     }
 
-    // MANIPULACJA: kliknięcie prowadnicy (poza obiektami) ją zaznacza, kliknięcie gdziekolwiek indziej odznacza prowadnice
+    // Manipulacja: kliknięcie prowadnicy (poza obiektami) ją zaznacza, kliknięcie gdziekolwiek indziej odznacza prowadnice
     {
       if (activeToolProp === 'vector-select' && guidesVisibleRef.current) {
         const vl = engine.getActiveLayer();
@@ -6158,7 +6045,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       return;
     }
 
-    // SZYBKA PIPETA (Ctrl + Klik / Przeciąganie we wszystkich narzędziach rysowania) lub narzędzie pipety
+    // Szybka pipeta (Ctrl + Klik / Przeciąganie we wszystkich narzędziach rysowania) lub narzędzie pipety
     if (activeTool === 'pipette' || isQuickPipette) {
       isSamplingPipetteRef.current = true;
       const isSecondary = e.button === 2;
@@ -6174,7 +6061,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       return;
     }
 
-    // PIECZĄTKA: Ctrl+Klik ustala punkt bazowy (próbkowany)
+    // Pieczątka: Ctrl+Klik ustala punkt bazowy (próbkowany)
     if (activeTool === 'stamp') {
       if (e.ctrlKey || e.metaKey || isCtrlKeyDown) {
         const basePt = { x: pt.x, y: pt.y };
@@ -6191,7 +6078,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       }
     }
 
-    // SPRAWDZENIE CZY WARSTWA JEST ZABLOKOWANA DLA NARZĘDZI EDYCYJNYCH
+    // Sprawdzenie czy warstwa jest zablokowana dla narzędzi edycyjnych
     const activeLayer = engine.getActiveLayer();
     if (activeLayer?.locked) {
       if (isDrawingTool(activeTool) || activeToolProp === 'pen' || activeToolProp === 'vector-select' || activeTool === 'transform-content') {
@@ -6200,16 +6087,16 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       }
     }
 
-    // MANIPULACJA / PISAK na warstwie wektorowej
+    // Manipulacja / pisak na warstwie wektorowej
     if ((activeToolProp === 'vector-select' || activeToolProp === 'pen') && vectorToolPointerDown(e, pt)) return;
 
-    // KRZYWA WIELOWĘZŁOWA
+    // Krzywa wielowęzłowa
     if (activeTool === 'bezier') {
       penPointerDown(e, pt);
       return;
     }
 
-    // OBSŁUGA NARZĘDZI TRANSFORMACJI ZAZNACZENIA / ZAWARTOŚCI
+    // Obsługa narzędzi transformacji zaznaczenia / zawartości
     if (isTransformTool) {
       if (activeTool === 'transform-content' && !engine.transformContentSession) {
         engine.beginTransformContent(selectionSettings.interpolation || 'bilinear');
@@ -6242,7 +6129,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       return;
     }
 
-    // OBSŁUGA AKTYWNYCH UCHWYTÓW WEKTOROWYCH (LINIA, BEZIER, FIGURA)
+    // Obsługa aktywnych uchwytów wektorowych (linia, bezier, figura)
     const vecHit = hitTestVectorHandles(e);
     if (vecHit === 'text-body') {
       // Klik we wnętrzu ramki tekstu: kursor, zaznaczanie przeciąganiem, dwuklik = słowo, trzy kliknięcia = akapit
@@ -6292,7 +6179,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       return;
     }
 
-    // JEŚLI KLIKNIĘTO POZA ISTNIEJĄCĄ SESJĄ WEKTOROWĄ LUB TRANSFORMACJĄ, ZATWIERDŹ POPRZEDNIĄ
+    // Kliknięcie poza istniejącą sesją wektorową lub transformacją zatwierdza poprzednią
     if (
       activeTool === 'select-rect' ||
       activeTool === 'select-ellipse' ||
@@ -6320,7 +6207,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       if (activeVectorLineSession || activeVectorBezierSession || activeVectorShapeSession || activeTextSession) {
         commitActiveVectorSession();
       }
-      const p = { x: qr(pt.x), y: qr(pt.y) };
+      const p = { x: rnd(pt.x), y: rnd(pt.y) };
       setDragStartPointSynced(p);
       setCurrentDragPoint(p);
       setIsDrawingSynced(true);
@@ -6328,7 +6215,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     }
 
     const layer = engine.getActiveLayer();
-    if (!layer || !layer.paintable) return;
+    if (!layer || !layer.visible) return;
 
     if (activeTool === 'magic-wand') {
       const sp = engine.selectionManager.wandSeedPoint;
@@ -6444,7 +6331,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     if (activeTool === 'brush' || activeTool === 'eraser') {
       setIsDrawingSynced(true);
       const isEraser = activeTool === 'eraser';
-      const isMaskMode = !!engine.maskView || !!(layer.editMask && layer.maskGrid) || layer.grayView;
+      const isMaskMode = !!engine.maskView || (layer.editMask && layer.hasMask) || layer.grayView;
       const effectiveIsEraser = isEraser && !isMaskMode;
       const isSecondary = !isEraser && e.button === 2;
       brushIsSecondaryRef.current = isSecondary;
@@ -6607,8 +6494,111 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     }
   };
 
-  // POINTER MOVE
+  // Obsługa ruchu wskaźnika
+  const endBrushAdjust = (revert: boolean) => {
+    const a = adjustRef.current;
+    if (!a) return;
+    adjustRef.current = null;
+    if (revert) {
+      const f: BrushAdjustFns = { size: () => a.start.size, hardness: () => a.start.hardness, spacing: () => a.start.spacing };
+      if (supportsOpacity(a.tool)) f.opacity = () => a.start.opacity;
+      onAdjustBrush?.(a.tool, f);
+    }
+    try {
+      if (document.pointerLockElement === containerRef.current) document.exitPointerLock();
+    } catch {}
+    try {
+      containerRef.current?.releasePointerCapture(a.pointerId);
+    } catch {}
+    setAdjustHud(null);
+  };
+  const endBrushAdjustRef = useRef(endBrushAdjust);
+  endBrushAdjustRef.current = endBrushAdjust;
+
+  const handleBrushAdjustMove = (e: React.PointerEvent) => {
+    const a = adjustRef.current;
+    const box = containerRef.current;
+    if (!a || !box) return;
+    if (!a.begun) {
+      if (Math.hypot(e.clientX - a.startX, e.clientY - a.startY) <= 3) return;
+      a.begun = true;
+      a.pl = new PointerLockDelta(e.clientX, e.clientY);
+      a.pl.request(box);
+    }
+    if (document.pointerLockElement === box) a.lockEngaged = true;
+    const [ddx, ddy] = a.pl ? a.pl.next(e, box) : [0, 0];
+    const scale = e.shiftKey ? 0.25 : 1;
+    a.ax += ddx * scale;
+    a.ay += ddy * scale;
+    a.tx += Math.abs(ddx);
+    a.ty += Math.abs(ddy);
+    // Miękka blokada osi: dominująca oś po 8 px ruchu, drugą oś odblokowuje dopiero wyraźne przesunięcie (48 px)
+    if (!a.free) {
+      if (!a.lockAxis && a.tx + a.ty >= 8) a.lockAxis = a.tx >= a.ty ? 'x' : 'y';
+      if (a.lockAxis === 'x' && Math.abs(a.ay) > 48) {
+        a.free = true;
+        a.offY = a.ay;
+      } else if (a.lockAxis === 'y' && Math.abs(a.ax) > 48) {
+        a.free = true;
+        a.offX = a.ax;
+      }
+    }
+    const [hp, vp] = axesFor(a.tool, a.layer);
+    // Ruch poza granicami wartości jest ignorowany (przesuwam punkt odniesienia), więc powrót myszy działa od razu
+    const bounded = (raw: number, param: BrushParam | null, startVal: number, axis: 'x' | 'y'): number => {
+      if (!param) return 0;
+      const [lo, hi] = dragBounds(param, startVal);
+      if (raw > hi) {
+        if (axis === 'x') a.cx += raw - hi;
+        else a.cy += raw - hi;
+        return hi;
+      }
+      if (raw < lo) {
+        if (axis === 'x') a.cx += raw - lo;
+        else a.cy += raw - lo;
+        return lo;
+      }
+      return raw;
+    };
+    const startOf = (p: BrushParam | null) => (p === 'size' ? a.start.size : p === 'spacing' ? a.start.spacing : p === 'hardness' ? a.start.hardness : a.start.opacity);
+    const rawX = (a.free ? a.ax - a.offX : a.lockAxis === 'y' ? 0 : a.ax) - a.cx;
+    const rawY = (a.free ? a.ay - a.offY : a.lockAxis === 'x' ? 0 : a.ay) - a.cy;
+    const ex = bounded(rawX, hp, startOf(hp), 'x');
+    const ey = bounded(rawY, vp, startOf(vp), 'y');
+    const fns: BrushAdjustFns = {};
+    const valueOf = (param: BrushParam, dx: number, dy: number): number => {
+      switch (param) {
+        case 'size':
+          return sizeFromDrag(a.start.size, dx);
+        case 'spacing':
+          return spacingFromDrag(a.start.spacing, dx);
+        case 'hardness':
+          return pctFromDrag(a.start.hardness, dy);
+        default:
+          return pctFromDrag(a.start.opacity, dy);
+      }
+    };
+    if (hp) {
+      const v = valueOf(hp, ex, 0);
+      fns[hp as 'size' | 'spacing'] = () => v;
+    }
+    if (vp) {
+      const v = valueOf(vp, 0, ey);
+      fns[vp as 'hardness' | 'opacity'] = () => v;
+    }
+    onAdjustBrush?.(a.tool, fns);
+    setAdjustHud((h) => ({ layer: a.layer, axis: a.free ? null : a.lockAxis, rev: (h?.rev ?? 0) + 1 }));
+  };
+
   const handlePointerMove = (e: React.PointerEvent) => {
+    if (!cursorInsideRef.current) {
+      cursorInsideRef.current = true;
+      setCursorInside(true);
+    }
+    if (adjustRef.current) {
+      handleBrushAdjustMove(e);
+      return;
+    }
     {
       const d0 = transformDownScreenRef.current;
       if (d0 && !transformMovedRef.current && Math.hypot(e.clientX - d0.x, e.clientY - d0.y) >= 4) transformMovedRef.current = true;
@@ -6636,13 +6626,13 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     if (guideDragRef.current && pt) {
       const g = engine.guides.find((x) => x.id === guideDragRef.current);
       if (g) {
-        engine.moveGuide(g.id, g.axis === 'v' ? qr(pt.x) : qr(pt.y));
+        engine.moveGuide(g.id, g.axis === 'v' ? rnd(pt.x) : rnd(pt.y));
         setGuidesRev((r) => r + 1);
       }
       return;
     }
 
-    // MANIPULACJA: przeciąganie zaznaczonych obiektów i zaznaczanie obszarem
+    // Manipulacja: przeciąganie zaznaczonych obiektów i zaznaczanie obszarem
     if (vecGroupDragRef.current && pt) {
       const g = vecGroupDragRef.current;
       engine.vec.groupMoveTo(pt.x - g.start.x, pt.y - g.start.y);
@@ -6686,7 +6676,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
 
     if (penPointerMove(e, pt)) return;
 
-    // INTERAKCJA PRZEKSZTAŁCANIA ZAZNACZENIA
+    // Interakcja przekształcania zaznaczenia
     if (isTransformTool) {
       if (
         transformActiveHandle &&
@@ -6703,14 +6693,14 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       return;
     }
 
-    // ZAZNACZANIE TEKSTU PRZECIĄGANIEM
+    // Zaznaczanie tekstu przeciąganiem
     if (textDragRef.current && pt && activeTextSession) {
       setTextSelection(textDragRef.current.anchor, textIndexAtDocPoint(pt));
       textDesiredXRef.current = null;
       return;
     }
 
-    // INTERAKCJA PRZECIĄGANIA UCHWYTU WEKTOROWEGO
+    // Interakcja przeciągania uchwytu wektorowego
     if (activeVectorHandle && pt) {
       const rawPt = activeVectorHandle === 'move' && (activeVectorShapeSession || activeTextSession) ? getDocPoint(e) ?? pt : pt;
       updateVectorHandleInteraction(rawPt, e.shiftKey, e.altKey);
@@ -6724,7 +6714,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       setHoverVectorHandle(hover);
     }
 
-    // PIERWOTNE ROZCIĄGANIE NOWEJ FIGURY / LINII / KRZYWEJ
+    // Rozciąganie nowej figury, linii lub krzywej
     if (isDrawing && pt && dragStartPoint) {
       if (activeTool === 'line' || activeTool === 'bezier' || activeTool === 'shapes' || activeTool === 'smart-object' || activeTool === 'text') {
         updateInitialDrawingDrag(pt, e.shiftKey, e.altKey);
@@ -6898,7 +6888,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
 
     if (activeTool === 'brush' || activeTool === 'eraser') {
       const isEraser = activeTool === 'eraser';
-      const isMaskMode = !!engine.maskView || !!(layer.editMask && layer.maskGrid) || layer.grayView;
+      const isMaskMode = !!engine.maskView || (layer.editMask && layer.hasMask) || layer.grayView;
       const effectiveIsEraser = isEraser && !isMaskMode;
 
       const baseColor = isEraser && isMaskMode
@@ -7052,8 +7042,12 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     }
   };
 
-  // POINTER UP
+  // Obsługa puszczenia wskaźnika
   const handlePointerUp = (e: React.PointerEvent) => {
+    if (adjustRef.current) {
+      endBrushAdjust(false);
+      return;
+    }
     try {
       (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
     } catch {}
@@ -7144,7 +7138,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       return;
     }
 
-    // ZAKOŃCZENIE PRZECIĄGANIA UCHWYTU WEKTOROWEGO
+    // Zakończenie przeciągania uchwytu wektorowego
     if (activeVectorHandle) {
       setActiveVectorHandleSynced(null);
       vectorDragStartPtRef.current = null;
@@ -7154,7 +7148,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       return;
     }
 
-    // ZAKOŃCZENIE TRANSFORMACJI ZAZNACZENIA
+    // Zakończenie transformacji zaznaczenia
     if (isTransformTool && transformActiveHandle) {
       const downPos = transformDownScreenRef.current;
       const wasClick = !!downPos && !transformMovedRef.current && Math.hypot(e.clientX - downPos.x, e.clientY - downPos.y) < 4;
@@ -7310,7 +7304,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       return;
     }
 
-    // LASSO PUNKT PO PUNKCIE: puszczenie przycisku nie kończy sesji; zwykłe kliknięcie dodaje odcinek prosty
+    // Lasso punkt po punkcie: puszczenie przycisku nie kończy sesji; zwykłe kliknięcie dodaje odcinek prosty
     if (activeTool === 'select-lasso' && lassoMultiRef.current) {
       const pr = lassoPressRef.current;
       lassoPressRef.current = null;
@@ -7321,14 +7315,14 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       return;
     }
 
-    // OBIEKT INTELIGENTNY: kliknięcie (bez przeciągania) wstawia ramkę o wymiarach z paska opcji
+    // Obiekt inteligentny: kliknięcie (bez przeciągania) wstawia ramkę o wymiarach z paska opcji
     if (activeTool === 'smart-object' && isDrawingRef.current && dragStartPointRef.current) {
       const st = smartSettingsRef.current;
       const sh = activeVectorShapeSession;
       if (!sh || (sh.width < 4 && sh.height < 4)) {
         const c = dragStartPointRef.current;
-        const left = qr(c.x);
-        const top = qr(c.y);
+        const left = rnd(c.x);
+        const top = rnd(c.y);
         const center = { x: left + st.width / 2, y: top + st.height / 2 };
         setActiveVectorShapeSession({
           center,
@@ -7348,7 +7342,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       createDefaultTextSession(dragStartPointRef.current);
     }
 
-    // ZAKOŃCZENIE POCZĄTKOWEGO RYSOWANIA WEKTOROWEGO
+    // Zakończenie początkowego rysowania wektorowego
     if (activeTool === 'line' || activeTool === 'bezier' || activeTool === 'shapes' || activeTool === 'smart-object' || activeTool === 'text') {
       setIsDrawingSynced(false);
       setDragStartPointSynced(null);
@@ -7357,7 +7351,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       return;
     }
 
-    // ZAKOŃCZENIE PRÓBKOWANIA PIPETY / SZYBKIEJ PIPETY
+    // Zakończenie próbkowania pipety / szybkiej pipety
     if (activeTool === 'pipette' || isSamplingPipetteRef.current) {
       isSamplingPipetteRef.current = false;
       pipetteIsSecondaryRef.current = false;
@@ -7525,7 +7519,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     }
   };
 
-  // KURSOR MYSZY
+  // Kursor myszy
   const cursorStyleRef = useRef('default');
   const getCursorStyle = (): string => {
     if (isPanning || isSpacePressed || activeTool === 'pan') {
@@ -7588,7 +7582,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     if (activeTool.startsWith('select') || activeTool === 'magic-wand') {
       return 'none';
     }
-    // jednolity, mały plusik rysowany na nakładce (patrz sekcja 9b) zamiast systemowych kursorów
+    // kursor rysowany na nakładce (patrz „Kursor i modyfikator dla narzędzi zaznaczania”)
     if (activeTool === 'line' || activeTool === 'bezier' || activeTool === 'shapes' || activeTool === 'smart-object' || activeTool === 'text' || activeTool === 'bucket') {
       return 'none';
     }
@@ -7664,6 +7658,11 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       }}
       onDrop={handleDrop}
       onPointerLeave={() => {
+        // przy trwającej regulacji pędzla (zablokowany wskaźnik) kursor logicznie zostaje nad płótnem
+        if (!adjustRef.current) {
+          cursorInsideRef.current = false;
+          setCursorInside(false);
+        }
         updateStatusBarPos(null);
         setTransformHoverHandle(null);
         setHoverVectorHandle(null);
@@ -7672,7 +7671,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       className="relative flex-1 h-full overflow-hidden select-none bg-[#6f6f6f] touch-none"
       style={{ cursor: cursorStyleRef.current }}
     >
-      {/* JEDNOLITA STRUKTURA PŁÓTNA: SZACHOWNICA + RYSUNEK + 1PX RAMKA */}
+      {/* Struktura płótna: szachownica, rysunek i ramka 1 px */}
       <div
         className="absolute origin-top-left overflow-hidden"
         style={{
@@ -7711,6 +7710,18 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         className="absolute inset-0 pointer-events-none"
         style={{ zIndex: 3, width: '100%', height: '100%' }}
       />
+
+      <canvas
+        ref={channelOverlayRef}
+        data-testid="channel-overlay"
+        className="absolute inset-0 pointer-events-none"
+        style={{ zIndex: 4, width: '100%', height: '100%' }}
+      />
+      <svg width="0" height="0" style={{ position: 'absolute' }} aria-hidden="true">
+        <filter id={channelFilterId.current} colorInterpolationFilters="sRGB">
+          <feColorMatrix ref={channelMatrixRef} type="matrix" values="1 0 0 0 0 0 1 0 0 0 0 0 1 0 0 0 0 0 1 0" />
+        </filter>
+      </svg>
 
       <canvas
         ref={overlayCanvasRef}
@@ -7841,20 +7852,3 @@ const PenModeIcon: React.FC<{ mode: PenMode }> = ({ mode }) => {
   );
 };
 
-const crosshairSvg = (badge: string) => {
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
-    <!-- White outline crosshair for dark backgrounds -->
-    <path d="M16,5 L16,11 M16,21 L16,27 M5,16 L11,16 M21,16 L27,16" stroke="#ffffff" stroke-width="3" stroke-linecap="round"/>
-    <!-- Black core lines -->
-    <path d="M16,5 L16,11 M16,21 L16,27 M5,16 L11,16 M21,16 L27,16" stroke="#000000" stroke-width="1.2" stroke-linecap="round"/>
-    <!-- Central dot -->
-    <circle cx="16" cy="16" r="1.5" fill="#ffffff" stroke="#000000" stroke-width="0.8"/>
-    
-    <!-- Badge text -->
-    ${badge ? `
-      <text x="24" y="26" font-family="system-ui, -apple-system, sans-serif" font-size="12" font-weight="900" fill="#ffffff" stroke="#ffffff" stroke-width="2.5" paint-order="stroke fill" text-anchor="middle">${badge}</text>
-      <text x="24" y="26" font-family="system-ui, -apple-system, sans-serif" font-size="12" font-weight="900" fill="#00bcd4" stroke="#000000" stroke-width="0.5" paint-order="stroke fill" text-anchor="middle">${badge}</text>
-    ` : ''}
-  </svg>`;
-  return 'url("data:image/svg+xml;utf8,' + encodeURIComponent(svg) + '") 16 16, crosshair';
-};

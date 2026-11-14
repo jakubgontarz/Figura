@@ -32,7 +32,7 @@ export const TitleBar: React.FC<TitleBarProps> = ({
   return (
     <div className="h-8 bg-[#1e1e1e] select-none flex items-center justify-between border-b border-[#111111] px-2 text-xs">
       <div className="flex items-center gap-2 overflow-x-auto h-full scrollbar-none">
-        {/* Nazwa programu FIGURA (App Title Branding) */}
+        {/* Nazwa programu */}
         <div className="flex items-center gap-1.5 px-2 py-0.5 mr-1">
           <span className="font-bold text-[12px] tracking-widest text-[#00a8ff] select-none font-mono">
             FIGURA
@@ -56,19 +56,17 @@ export const TitleBar: React.FC<TitleBarProps> = ({
                 }`}
               >
                 <span className="truncate max-w-[130px]">{tab.title}</span>
-                {tabs.length > 1 && (
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onCloseTab(tab.id);
-                    }}
-                    className="opacity-0 group-hover:opacity-100 hover:bg-[#444] rounded p-0.5 text-[#aaa] hover:text-white"
-                    title="Zamknij dokument"
-                  >
-                    <X size={11} />
-                  </button>
-                )}
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onCloseTab(tab.id);
+                  }}
+                  className="opacity-0 group-hover:opacity-100 hover:bg-[#444] rounded p-0.5 text-[#aaa] hover:text-white"
+                  title="Zamknij dokument"
+                >
+                  <X size={11} />
+                </button>
               </div>
             );
           })}
@@ -111,7 +109,7 @@ export const TitleBar: React.FC<TitleBarProps> = ({
         <button
           type="button"
           onClick={() => {
-            if (tabs.length > 1) {
+            if (tabs.length > 0) {
               onCloseTab(activeTabId);
             }
           }}

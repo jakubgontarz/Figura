@@ -6,11 +6,23 @@
 import React, { useState } from 'react';
 import { ChevronLeft, ChevronRight, Link2, Link2Off } from 'lucide-react';
 import { LengthField, UnitLabel } from './Units.tsx';
+import { ScrubField } from './ScrubField.tsx';
 
 /** Opis zaznaczonego obiektu wektorowego przekazywany z widoku płótna do panelu (współrzędne w pikselach dokumentu). */
+/** Dodatkowe wymiary kształtu zależne od jego rodzaju (wartości z ustawień figur). */
+export interface ShapeExtras {
+  shapeKind: string;
+  cornerRadius: number;
+  starPoints: number;
+  starInnerRatio: number;
+  polygonSides: number;
+  arrowHeadWidth: number;
+  arrowShaftThickness: number;
+}
+
 export type PropsDescriptor =
   | { kind: 'guide'; guides: { id: string; axis: 'h' | 'v'; pos: number }[]; selected: string | null }
-  | { kind: 'box'; label: string; cx: number; cy: number; w: number; h: number; angle: number }
+  | { kind: 'box'; label: string; cx: number; cy: number; w: number; h: number; angle: number; shape?: ShapeExtras }
   | { kind: 'line'; p0: { x: number; y: number }; p1: { x: number; y: number } }
   | { kind: 'path'; box: { cx: number; cy: number; w: number; h: number; angle: number } | null; nodes: { x: number; y: number; hin: { x: number; y: number } | null; hout: { x: number; y: number } | null }[]; selected: number }
   | null;
@@ -19,13 +31,13 @@ export interface PropsApi {
   selectGuide: (id: string) => void;
   setGuidePos: (id: string, pos: number) => void;
   removeGuide: (id: string) => void;
+  setShapeSetting: (patch: Partial<Omit<ShapeExtras, 'shapeKind'>>) => void;
   setBox: (next: { cx: number; cy: number; w: number; h: number; angle: number }) => void;
   setLinePoint: (index: 0 | 1, x: number, y: number) => void;
   selectNode: (index: number) => void;
   setNodePoint: (index: number, part: 'anchor' | 'hin' | 'hout', x: number, y: number) => void;
 }
 
-const INPUT = 'w-[62px] h-5 bg-[#252525] border border-[#444] rounded px-1 text-center text-xs text-white font-mono focus:outline-none focus:border-[#007acc]';
 const BIG = 1e6;
 
 const Row: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
@@ -38,11 +50,11 @@ const Row: React.FC<{ label: string; children: React.ReactNode }> = ({ label, ch
 const XY: React.FC<{ x: number; y: number; onChange: (x: number, y: number) => void; xl?: string; yl?: string }> = ({ x, y, onChange, xl = 'X', yl = 'Y' }) => (
   <div className="flex flex-col gap-1">
     <Row label={xl}>
-      <LengthField valuePx={x} minPx={-BIG} maxPx={BIG} integerPx={false} className={INPUT} onCommitPx={(v) => onChange(v, y)} />
+      <LengthField valuePx={x} minPx={-BIG} maxPx={BIG} integerPx={false} onCommitPx={(v) => onChange(v, y)} />
       <UnitLabel />
     </Row>
     <Row label={yl}>
-      <LengthField valuePx={y} minPx={-BIG} maxPx={BIG} integerPx={false} className={INPUT} onCommitPx={(v) => onChange(x, v)} />
+      <LengthField valuePx={y} minPx={-BIG} maxPx={BIG} integerPx={false} onCommitPx={(v) => onChange(x, v)} />
       <UnitLabel />
     </Row>
   </div>
@@ -50,7 +62,53 @@ const XY: React.FC<{ x: number; y: number; onChange: (x: number, y: number) => v
 
 const rot = (x: number, y: number, a: number) => ({ x: x * Math.cos(a) - y * Math.sin(a), y: x * Math.sin(a) + y * Math.cos(a) });
 
-const BoxEditor: React.FC<{ label: string; box: { cx: number; cy: number; w: number; h: number; angle: number }; api: PropsApi }> = ({ label, box, api }) => {
+const SliderRow: React.FC<{ label: string; title: string; value: number; min: number; max: number; onChange: (v: number) => void }> = ({ label, title, value, min, max, onChange }) => (
+  <div className="flex items-center gap-1.5">
+    <span className="w-[44px] text-[10.5px] text-[#aaa] shrink-0">{label}</span>
+    <ScrubField value={Math.round(value * 100)} min={min} max={max} suffix="%" width={92} title={title} onChange={(v) => onChange(v / 100)} />
+  </div>
+);
+
+/** Wymiary zależne od rodzaju kształtu: promień narożnika, ramiona i ostrość gwiazdy, boki wielokąta, grot i trzon strzałki. */
+const ShapeExtrasEditor: React.FC<{ shape: ShapeExtras; api: PropsApi }> = ({ shape, api }) => {
+  const k = shape.shapeKind;
+  if (k === 'round-rect') {
+    return (
+      <Row label="Promień">
+        <LengthField valuePx={shape.cornerRadius} minPx={0} maxPx={2000} integerPx={false} title="Promień zaokrąglenia narożników" onCommitPx={(v) => api.setShapeSetting({ cornerRadius: v })} />
+        <UnitLabel />
+      </Row>
+    );
+  }
+  if (k === 'star') {
+    return (
+      <div className="flex flex-col gap-1.5" data-testid="props-shape-star">
+        <Row label="Ramiona">
+          <ScrubField value={shape.starPoints} min={3} max={32} width={92} onChange={(v) => api.setShapeSetting({ starPoints: v })} />
+        </Row>
+        <SliderRow label="Ostrość" title="Ostrość ramion gwiazdy" value={1 - shape.starInnerRatio} min={10} max={90} onChange={(v) => api.setShapeSetting({ starInnerRatio: 1 - v })} />
+      </div>
+    );
+  }
+  if (k === 'polygon') {
+    return (
+      <Row label="Boki">
+        <ScrubField value={shape.polygonSides} min={3} max={16} width={92} onChange={(v) => api.setShapeSetting({ polygonSides: v })} />
+      </Row>
+    );
+  }
+  if (k === 'arrow') {
+    return (
+      <div className="flex flex-col gap-1.5" data-testid="props-shape-arrow">
+        <SliderRow label="Grot" title="Szerokość grotu strzałki" value={shape.arrowHeadWidth} min={15} max={85} onChange={(v) => api.setShapeSetting({ arrowHeadWidth: v })} />
+        <SliderRow label="Trzon" title="Grubość trzonu strzałki" value={shape.arrowShaftThickness} min={10} max={85} onChange={(v) => api.setShapeSetting({ arrowShaftThickness: v })} />
+      </div>
+    );
+  }
+  return null;
+};
+
+const BoxEditor: React.FC<{ label: string; box: { cx: number; cy: number; w: number; h: number; angle: number; shape?: ShapeExtras }; api: PropsApi }> = ({ label, box, api }) => {
   // punkt odniesienia: -1/0/1 w poziomie i w pionie (środek ramki = 0,0)
   const [anchor, setAnchor] = useState<{ ax: number; ay: number }>({ ax: 0, ay: 0 });
   const [lock, setLock] = useState(false);
@@ -87,11 +145,11 @@ const BoxEditor: React.FC<{ label: string; box: { cx: number; cy: number; w: num
         <div className="flex items-center gap-2">
           <div className="flex flex-col gap-1">
             <Row label="H">
-              <LengthField valuePx={w} minPx={1} maxPx={BIG} integerPx={false} className={INPUT} title="Wymiar poziomy (H)" onCommitPx={(v) => apply(v, lock ? (v * h) / w : h, angle, P)} />
+              <LengthField valuePx={w} minPx={1} maxPx={BIG} integerPx={false} title="Wymiar poziomy (H)" onCommitPx={(v) => apply(v, lock ? (v * h) / w : h, angle, P)} />
               <UnitLabel />
             </Row>
             <Row label="V">
-              <LengthField valuePx={h} minPx={1} maxPx={BIG} integerPx={false} className={INPUT} title="Wymiar pionowy (V)" onCommitPx={(v) => apply(lock ? (v * w) / h : w, v, angle, P)} />
+              <LengthField valuePx={h} minPx={1} maxPx={BIG} integerPx={false} title="Wymiar pionowy (V)" onCommitPx={(v) => apply(lock ? (v * w) / h : w, v, angle, P)} />
               <UnitLabel />
             </Row>
           </div>
@@ -106,21 +164,22 @@ const BoxEditor: React.FC<{ label: string; box: { cx: number; cy: number; w: num
           </button>
         </div>
         <Row label="Kąt">
-          <input
-            type="number"
-            step={0.1}
-            title="Kąt obrotu (stopnie)"
-            data-testid="props-angle"
+          <ScrubField
             value={Math.round(deg * 100) / 100}
-            onChange={(e) => {
-              const v = parseFloat(e.target.value);
-              if (!isNaN(v)) apply(w, h, (v * Math.PI) / 180, P);
-            }}
-            onKeyDown={(e) => e.stopPropagation()}
-            className={INPUT}
+            min={-100000}
+            max={100000}
+            step={0.01}
+            openEnded
+            speed={0.5}
+            wheelStep={1}
+            width={62}
+            title="Kąt obrotu (stopnie)"
+            testId="props-angle"
+            onChange={(v) => apply(w, h, (v * Math.PI) / 180, P)}
           />
           <span className="text-[10px] text-[#888]">°</span>
         </Row>
+        {box.shape && <ShapeExtrasEditor shape={box.shape} api={api} />}
       </div>
     );
 };
@@ -211,7 +270,7 @@ const GuideEditor: React.FC<{ desc: Extract<PropsDescriptor, { kind: 'guide' }>;
       {sel && (
         <>
           <Row label={sel.axis === 'v' ? 'X' : 'Y'}>
-            <LengthField valuePx={sel.pos} minPx={-BIG} maxPx={BIG} integerPx={false} className={INPUT} onCommitPx={(v) => api.setGuidePos(sel.id, v)} />
+            <LengthField valuePx={sel.pos} minPx={-BIG} maxPx={BIG} integerPx={false} onCommitPx={(v) => api.setGuidePos(sel.id, v)} />
             <UnitLabel />
           </Row>
           <button

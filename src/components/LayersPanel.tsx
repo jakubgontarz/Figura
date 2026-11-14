@@ -23,6 +23,7 @@ import {
   Link2Off,
   Lock,
   ImagePlus,
+  FileImage,
   Minus,
   PenTool,
   Shapes,
@@ -36,21 +37,25 @@ import {
   Wand2,
   Drama
 } from 'lucide-react';
-import { Layer, subscribeThumbnails } from '../core/skia/Layer.ts';
-import { BLEND_MODES, SKBlendMode } from '../core/skia/types.ts';
-import { CORRECTION_DEFS, FILTER_DEFS, CorrectionType, correctionName, isFilterType } from '../core/skia/Corrections.ts';
-import { stylesCount } from '../core/skia/Styles.ts';
-import { VectorObject, vectorObjectLabel } from '../core/skia/VectorObjects.ts';
+import { Layer, subscribeThumbnails } from '../core/Layer.ts';
+import { BLEND_MODES, SKBlendMode } from '../core/types.ts';
+import { CORRECTION_DEFS, FILTER_DEFS, CorrectionType, correctionName, isFilterType } from '../core/Corrections.ts';
+import { stylesCount } from '../core/Styles.ts';
+import { vectorObjectLabel } from '../core/VectorObjects.ts';
+import { ScrubField } from './ScrubField.tsx';
 
 interface LayersPanelProps {
+  /** Zakładka dolnego panelu: warstwy, kanały albo historia */
+  tab?: 'layers' | 'channels' | 'history';
+  onChangeTab?: (t: 'layers' | 'channels' | 'history') => void;
+  historyContent?: React.ReactNode;
+  channelsContent?: React.ReactNode;
   layers: Layer[];
   activeLayerIndex: number;
   onSelectLayer: (index: number) => void;
   onAddLayer: () => void;
   /** Nowa warstwa wektorowa (przycisk na dole panelu) */
   onAddVectorLayer?: () => void;
-  /** Obiekt wektorowy edytowany narzędziem Manipulacja (podświetlenie wiersza) */
-  editingVectorObject?: { layerId: string; id: string } | null;
   /** Zaznaczone obiekty wektorowe (podświetlenie na liście) i zmiana zaznaczenia (Ctrl / Shift + klik). */
   selectedVectorObjects?: { layerId: string; ids: string[] } | null;
   /** Nowy obiekt w trakcie rysowania (jeszcze nie zatwierdzony): wiersz zastępczy na szczycie listy obiektów. */
@@ -60,7 +65,6 @@ interface LayersPanelProps {
   /** Dwuklik na obiekcie inteligentnym: otwiera jego dokument w zakładce. */
   onOpenSmartObject?: (layerId: string, id: string) => void;
   onToggleVectorObject?: (layerIndex: number, id: string, visible: boolean, ids?: string[]) => void;
-  onRemoveVectorObject?: (layerIndex: number, id: string) => void;
   onRenameVectorObject?: (layerIndex: number, id: string, name: string) => void;
   onMoveVectorObject?: (fromLayerIndex: number, id: string, toLayerIndex: number, toPos: number) => void;
   onRemoveLayer: () => void;
@@ -110,13 +114,14 @@ interface LayersPanelProps {
   onOpenCorrection: (layerIndex: number, type: CorrectionType, onlyActive: boolean) => void;
   onEditCorrection: (layerIndex: number, id: string) => void;
   onToggleCorrection: (layerIndex: number, id: string) => void;
-  onRemoveCorrection: (layerIndex: number, id: string) => void;
-  onDuplicateCorrection: (layerIndex: number, id: string) => void;
   /** `insertIndex`: pozycja w tablicy docelowej warstwy liczona przed wyjęciem (duża liczba = na koniec) */
   onMoveCorrection: (fromLayerIndex: number, id: string, toLayerIndex: number, insertIndex: number) => void;
   onToggleCorrectionsExpanded: (layerIndex: number) => void;
   /** Id korekcji otwartej w oknie edycji (podświetlenie wiersza) */
   editingCorrectionId: string | null;
+  /** „Tylko aktywna warstwa” przy dodawaniu efektów: wspólne z menu Warstwy (gdy nie podano, panel trzyma własną wartość) */
+  corrOnlyActive?: boolean;
+  onChangeCorrOnlyActive?: (v: boolean) => void;
 }
 
 const IconBtn: React.FC<{
@@ -150,9 +155,8 @@ const IconBtn: React.FC<{
 };
 
 /**
- * Miniatura warstwy jako element <canvas> kopiowany z płótna miniatury. Wcześniej był to <img> z adresem data: z
- * toDataURL, a ten odczyt wymusza synchroniczne dokończenie wszystkich zaległych operacji płótna (na dużym płótnie
- * to setki ms zacięcia tuż po pociągnięciu pędzlem).
+ * Miniatura warstwy jako element <canvas> kopiowany z płótna miniatury. Unika odczytu `toDataURL`, który wymusza
+ * synchroniczne dokończenie wszystkich zaległych operacji płótna (na dużym płótnie to setki ms zacięcia).
  */
 const ThumbCanvas: React.FC<{ source: HTMLCanvasElement; version: number }> = ({ source, version }) => {
   const ref = useRef<HTMLCanvasElement>(null);
@@ -170,19 +174,21 @@ const ThumbCanvas: React.FC<{ source: HTMLCanvasElement; version: number }> = ({
 };
 
 export const LayersPanel: React.FC<LayersPanelProps> = ({
+  tab = 'layers',
+  onChangeTab,
+  historyContent,
+  channelsContent,
   layers,
   activeLayerIndex,
   onSelectLayer,
   onAddLayer,
   onAddVectorLayer,
-  editingVectorObject,
   onEditVectorObject,
   onOpenSmartObject,
   selectedVectorObjects,
   pendingVectorObject,
   onSelectVectorObjects,
   onToggleVectorObject,
-  onRemoveVectorObject,
   onRenameVectorObject,
   onMoveVectorObject,
   onRemoveLayer,
@@ -220,11 +226,11 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
   onOpenCorrection,
   onEditCorrection,
   onToggleCorrection,
-  onRemoveCorrection,
-  onDuplicateCorrection,
   onMoveCorrection,
   onToggleCorrectionsExpanded,
   editingCorrectionId,
+  corrOnlyActive: corrOnlyActiveProp,
+  onChangeCorrOnlyActive,
 }) => {
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [editingName, setEditingName] = useState('');
@@ -240,7 +246,12 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
   const [objDrag, setObjDrag] = useState<{ layerIndex: number; id: string } | null>(null);
   const [objOver, setObjOver] = useState<{ layerIndex: number; id: string | null; place: 'before' | 'after' } | null>(null);
   const [renamingObj, setRenamingObj] = useState<{ id: string; name: string } | null>(null);
-  const [corrOnlyActive, setCorrOnlyActive] = useState(true);
+  const [corrOnlyActiveLocal, setCorrOnlyActiveLocal] = useState(true);
+  const corrOnlyActive = corrOnlyActiveProp ?? corrOnlyActiveLocal;
+  const setCorrOnlyActive = (v: boolean) => {
+    setCorrOnlyActiveLocal(v);
+    onChangeCorrOnlyActive?.(v);
+  };
   const [corrMenu, setCorrMenu] = useState<{ left: number; bottom: number; maxHeight: number; kind: 'corr' | 'filter' } | null>(null);
   const corrBtnRef = useRef<HTMLDivElement | null>(null);
   const filterBtnRef = useRef<HTMLDivElement | null>(null);
@@ -266,7 +277,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
     setEditingIndex(null);
   };
 
-  // Drag and Drop obsługa (blokowana podczas edycji nazwy warstwy)
+  // Obsługa przeciągania i upuszczania (blokowana podczas edycji nazwy warstwy)
   const handleDragStart = (e: React.DragEvent, index: number) => {
     if (editingIndex !== null) {
       e.preventDefault();
@@ -409,17 +420,43 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
     .reverse()
     .filter(({ layer }) => !(layer.groupId && collapsedGroupIds.has(layer.groupId)));
 
+  const tabStrip = (
+    <div className="flex items-center border-b border-[#333] mb-2 pb-0.5 shrink-0">
+      {(['layers', 'channels', 'history'] as const).map((t) => (
+        <button
+          key={t}
+          type="button"
+          data-testid={`layers-tab-${t}`}
+          onClick={() => onChangeTab?.(t)}
+          className={`text-[11px] font-semibold tracking-wide pb-1 px-0.5 mr-3 border-b-2 focus:outline-none cursor-pointer ${tab === t ? 'text-white border-[#007acc]' : 'text-[#888] border-transparent hover:text-[#ccc]'}`}
+        >
+          {t === 'layers' ? 'Warstwy' : t === 'channels' ? 'Kanały' : 'Historia'}
+        </button>
+      ))}
+    </div>
+  );
+
+  if (tab === 'channels') {
+    return (
+      <div className="bg-transparent text-xs select-none flex flex-col flex-1 min-h-0">
+        {tabStrip}
+        {channelsContent}
+      </div>
+    );
+  }
+
+  if (tab === 'history') {
+    return (
+      <div className="bg-transparent text-xs select-none flex flex-col flex-1 min-h-0">
+        {tabStrip}
+        {historyContent}
+      </div>
+    );
+  }
+
   return (
     <div className="bg-transparent text-xs select-none flex flex-col flex-1 min-h-0">
-      {/* Pasek Zakładek (Tab Strip) */}
-      <div className="flex items-center border-b border-[#333] mb-2 pb-0.5 shrink-0">
-        <button
-          type="button"
-          className="text-[11px] font-semibold tracking-wide text-white border-b-2 border-[#007acc] pb-1 px-0.5 focus:outline-none cursor-pointer"
-        >
-          Warstwy
-        </button>
-      </div>
+      {tabStrip}
 
       {/* Opcje aktywnej warstwy: Tryb mieszania i Krycie */}
       <div
@@ -449,31 +486,24 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
         <div className="flex items-center justify-between gap-1.5 w-full">
           <label className="text-[10.5px] text-[#aaa] shrink-0">Krycie:</label>
           <div className="flex items-center gap-1.5 flex-1 min-w-0">
-            <input
-              type="range"
-              min="0"
-              max="100"
+            <ScrubField
               value={Math.round((activeLayer?.opacity ?? 1) * 100)}
-              onPointerDown={() => {
+              min={0}
+              max={100}
+              suffix="%"
+              width="100%"
+              disabled={!!activeLayer?.isAdjustment}
+              onScrubStart={() => {
                 startOpacityRef.current = activeLayer?.opacity ?? 1.0;
               }}
-              onChange={(e) => {
-                const val = parseInt(e.target.value) / 100;
-                onChangeOpacity(activeLayerIndex, val, undefined);
-              }}
-              onPointerUp={(e) => {
-                const val = parseInt((e.target as HTMLInputElement).value) / 100;
+              onChange={(v) => onChangeOpacity(activeLayerIndex, v / 100, undefined)}
+              onScrubEnd={(v) => {
                 if (startOpacityRef.current !== null) {
-                  onChangeOpacity(activeLayerIndex, val, startOpacityRef.current);
+                  onChangeOpacity(activeLayerIndex, v / 100, startOpacityRef.current);
                   startOpacityRef.current = null;
                 }
               }}
-              disabled={!!activeLayer?.isAdjustment}
-              className="flex-1 min-w-0 h-1 bg-[#444] accent-[#007acc] rounded-lg appearance-none cursor-pointer disabled:opacity-40"
             />
-            <span className="text-[10px] text-[#eee] font-mono w-8 text-right shrink-0">
-              {Math.round((activeLayer?.opacity ?? 1) * 100)}%
-            </span>
           </div>
         </div>
       </div>
@@ -1053,7 +1083,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                     const over = objOver && objOver.layerIndex === index && objOver.id === o.id ? objOver.place : null;
                     const beingDragged = !!objDrag && objDrag.layerIndex === index && objDrag.id === o.id;
                     const editing = !!selectedVectorObjects && selectedVectorObjects.layerId === layer.id && selectedVectorObjects.ids.includes(o.id);
-                    const KindIcon = o.kind === 'line' ? Minus : o.kind === 'path' ? Spline : o.kind === 'shape' ? Shapes : o.kind === 'smart' ? ImagePlus : Type;
+                    const KindIcon = o.kind === 'line' ? Minus : o.kind === 'path' ? Spline : o.kind === 'shape' ? Shapes : o.kind === 'smart' ? (o.disk ? FileImage : ImagePlus) : Type;
                     return (
                       <div
                         key={o.id}
@@ -1130,7 +1160,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                         {o.kind === 'smart' && onOpenSmartObject ? (
                           <span
                             data-testid="smart-icon"
-                            title="Obiekt inteligentny. Kliknij dwukrotnie aby edytować"
+                            title={o.disk ? `Obraz z dysku: ${o.disk.path ?? o.disk.name}. Kliknij dwukrotnie aby wskazać plik ponownie` : 'Obiekt inteligentny. Kliknij dwukrotnie aby edytować'}
                             onDoubleClick={(e) => {
                               e.stopPropagation();
                               onOpenSmartObject(layer.id, o.id);
