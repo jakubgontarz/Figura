@@ -44,6 +44,10 @@ import {
   VectorShapeSettings,
 } from '../core/types.ts';
 import { useUnits } from './Units.tsx';
+import { RulerBar, RULER_SIZE } from './Rulers.tsx';
+import { settings } from '../core/Settings.ts';
+import { useSettings } from './useSettings.ts';
+import type { LengthUnit } from '../core/Units.ts';
 import { UNIT_LABEL, fmtUnit } from '../core/Units.ts';
 import { drawSmartBitmap, getSmartBitmap, smartBitmapId } from '../core/SmartObjects.ts';
 import { TransformSelectionState } from '../core/SelectionManager.ts';
@@ -117,6 +121,11 @@ import {
 import { PointerLockDelta } from '../core/pointerLockDelta.ts';
 
 /** Właściwości widoku płótna: silnik, ustawienia narzędzi oraz wywołania zwrotne do reszty aplikacji. */
+const WORKSPACE_COLOR = { dark: '#3c3c3c', gray: '#6f6f6f', light: '#b4b4b4', black: '#111111' } as const;
+const CHECKER_COLORS = { light: ['#ffffff', '#e4e4e4'], medium: ['#ffffff', '#c4c4c4'], dark: ['#7a7a7a', '#5c5c5c'] } as const;
+const GRID_STRENGTH = { low: 0.55, normal: 1, high: 1.8 } as const;
+const ANTS_SPEED = { slow: 0.4, normal: 1, fast: 2 } as const;
+
 interface CanvasViewportProps {
   engine: GraphicEngine;
   engineRevision: number;
@@ -135,6 +144,11 @@ interface CanvasViewportProps {
   guideAxis?: 'h' | 'v';
   snapEnabled?: boolean;
   guidesVisible?: boolean;
+  /** Siatka między pikselami (widoczna przy dużym powiększeniu) */
+  gridVisible?: boolean;
+  /** Linijki na górnej i lewej krawędzi obszaru rysowania (podziałka w jednostce `rulerUnit`) */
+  rulersVisible?: boolean;
+  rulerUnit?: LengthUnit;
   onChangeSmartSettings?: (n: Partial<SmartObjectSettings>) => void;
   /** Dwuklik na obiekcie inteligentnym (płótno lub lista): otwiera jego dokument w zakładce. */
   onOpenSmartObject?: (layerId: string, objectId: string) => void;
@@ -377,6 +391,22 @@ const sessionKeyShape = (sh: ActiveVectorShapeSession): string =>
   JSON.stringify({ ...sh, smart: sh.smart ? { id: smartBitmapId(sh.smart.png), blend: sh.smart.blend, disk: sh.smart.disk?.key } : undefined });
 
 /** Widok płótna z narzędziami edycji i sesjami wektorowymi. */
+/** Tło pod przezroczystymi pikselami dokumentu: szachownica (rozmiar i kontrast z ustawień) albo jednolity kolor. */
+function transparencyStyle(c: ReturnType<typeof useSettings>, left: number, top: number): React.CSSProperties {
+  if (c.transparency === 'white') return { backgroundColor: '#ffffff' };
+  if (c.transparency === 'gray') return { backgroundColor: '#808080' };
+  if (c.transparency === 'black') return { backgroundColor: '#000000' };
+  const [base, sq] = CHECKER_COLORS[c.checkerStyle];
+  const h = c.checkerSize;
+  const d = h * 2;
+  return {
+    backgroundImage: `linear-gradient(45deg, ${sq} 25%, transparent 25%), linear-gradient(-45deg, ${sq} 25%, transparent 25%), linear-gradient(45deg, transparent 75%, ${sq} 75%), linear-gradient(-45deg, transparent 75%, ${sq} 75%)`,
+    backgroundSize: `${d}px ${d}px`,
+    backgroundPosition: `${-left}px ${-top}px, ${-left}px ${-top + h}px, ${-left + h}px ${-top - h}px, ${-left - h}px ${-top}px`,
+    backgroundColor: base,
+  };
+}
+
 export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   engine,
   engineRevision,
@@ -424,6 +454,9 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   guideAxis = 'v',
   snapEnabled = false,
   guidesVisible = true,
+  gridVisible = false,
+  rulersVisible = false,
+  rulerUnit = 'px',
   onChangeSmartSettings,
   onOpenSmartObject,
   onChangeVectorShapeSettings,
@@ -457,6 +490,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   onShowToast,
   onContainerSize,
 }) => {
+  const cfgUi = useSettings();
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -507,6 +541,10 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   snapEnabledRef.current = snapEnabled;
   const guidesVisibleRef = useRef(guidesVisible);
   guidesVisibleRef.current = guidesVisible;
+  const gridVisibleRef = useRef(gridVisible);
+  gridVisibleRef.current = gridVisible;
+  const rulerMarkXRef = useRef<HTMLDivElement>(null);
+  const rulerMarkYRef = useRef<HTMLDivElement>(null);
   const snapMarkRef = useRef<SKPoint | null>(null);
   // Współrzędne, do których kursor został przyciągnięty (przy naciśnięciu przycisku i przy ostatnim ruchu myszy):
   // `rnd` nie zaokrągla ich do pikseli, żeby obiekt stał dokładnie tam, gdzie wskazuje znacznik przyciągania.
@@ -4147,6 +4185,45 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
           oCtx.scale(zoom, zoom);
           oCtx.translate(-engine.width / 2, -engine.height / 2);
 
+          // Siatka między pikselami: nieruchoma, bardzo delikatna (ciemna kreska + jasna przerywana jak maszerujące mrówki)
+          const cfgNow = settings.get();
+          const gridMin = cfgNow.gridMinZoom;
+          if (gridVisibleRef.current && zoom >= gridMin) {
+            const fade = Math.min(1, (zoom - gridMin) / gridMin + 0.35) * GRID_STRENGTH[cfgNow.gridStrength];
+            const gx0 = Math.max(0, Math.floor(-oLeft / zoom));
+            const gx1 = Math.min(engine.width, Math.ceil((cWidth - oLeft) / zoom));
+            const gy0 = Math.max(0, Math.floor(-oTop / zoom));
+            const gy1 = Math.min(engine.height, Math.ceil((cHeight - oTop) / zoom));
+            if (gx1 >= gx0 && gy1 >= gy0) {
+              const dx0 = Math.max(0, Math.round(oLeft * oDpr));
+              const dx1 = Math.min(pxW, Math.round((oLeft + engine.width * zoom) * oDpr));
+              const dy0 = Math.max(0, Math.round(oTop * oDpr));
+              const dy1 = Math.min(pxH, Math.round((oTop + engine.height * zoom) * oDpr));
+              oCtx.save();
+              oCtx.setTransform(1, 0, 0, 1, 0, 0);
+              oCtx.lineWidth = 1;
+              const path = new Path2D();
+              for (let gx = gx0; gx <= gx1; gx++) {
+                const sx = Math.round((oLeft + gx * zoom) * oDpr) + 0.5;
+                if (sx < 0 || sx > pxW) continue;
+                path.moveTo(sx, dy0);
+                path.lineTo(sx, dy1);
+              }
+              for (let gy = gy0; gy <= gy1; gy++) {
+                const sy = Math.round((oTop + gy * zoom) * oDpr) + 0.5;
+                if (sy < 0 || sy > pxH) continue;
+                path.moveTo(dx0, sy);
+                path.lineTo(dx1, sy);
+              }
+              oCtx.strokeStyle = `rgba(0, 0, 0, ${Math.min(0.9, 0.2 * fade).toFixed(3)})`;
+              oCtx.stroke(path);
+              oCtx.setLineDash([4 * oDpr, 4 * oDpr]);
+              oCtx.strokeStyle = `rgba(255, 255, 255, ${Math.min(0.9, 0.3 * fade).toFixed(3)})`;
+              oCtx.stroke(path);
+              oCtx.restore();
+            }
+          }
+
           // Prowadnice obrazu (na całą szerokość / wysokość widoku)
           if (engine.guides.length > 0 && guidesVisibleRef.current) {
             // linie prowadnic rysowane w pikselach urządzenia: dokładnie 1 piksel, środek piksela
@@ -4184,7 +4261,8 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
           // Maszerujące mrówki dla zaznaczenia
           if (engine.selectionManager.hasActiveSelection) {
             const time = performance.now();
-            const dashOffset = (time / 60) % 8;
+            const antsCfg = settings.get();
+            const dashOffset = antsCfg.antsAnimated ? ((time * ANTS_SPEED[antsCfg.antsSpeed]) / 60) % 8 : 0;
 
             oCtx.save();
             // pół piksela urządzenia: krawędzie pikseli dokumentu przy całkowitym zoomie wypadają na pełnych pikselach ekranu
@@ -5468,7 +5546,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   ]);
 
   // ZOOM I PAN
-  const handleWheel = (e: React.WheelEvent) => {
+  const handleWheel = (e: WheelEvent) => {
     e.preventDefault();
     // Alt + kółko w narzędziach pędzlowych: rozmiar (z Shift: twardość) zamiast zoomu
     if (e.altKey && isBrushAdjustTool(activeTool) && !adjustRef.current) {
@@ -5488,7 +5566,14 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     const docX = (mouseX - panOffset.x) / zoom;
     const docY = (mouseY - panOffset.y) / zoom;
 
-    const zoomFactor = e.deltaY < 0 ? 1.15 : 0.85;
+    const cfgW = settings.get();
+    // Tryb „przewijanie”: kółko przesuwa obraz (Shift: poziomo), a zoom daje Ctrl
+    if (cfgW.wheelMode === 'scroll' && !e.ctrlKey && !e.metaKey) {
+      onUpdatePan({ x: panOffset.x - (e.shiftKey ? e.deltaY || e.deltaX : e.deltaX), y: panOffset.y - (e.shiftKey ? 0 : e.deltaY) });
+      return;
+    }
+    const wz = cfgW.wheelZoomStep / 100;
+    const zoomFactor = e.deltaY < 0 ? 1 + wz : 1 / (1 + wz);
     const newZoom = Math.max(0.05, Math.min(25.0, Number((zoom * zoomFactor).toFixed(3))));
 
     const newPanX = mouseX - docX * newZoom;
@@ -5497,6 +5582,77 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     onUpdateZoom(newZoom);
     onUpdatePan({ x: newPanX, y: newPanY });
   };
+
+  // Uśrednianie pikseli przy oddaleniu: poniżej 50% zamiast skalować duże płótno przez przeglądarkę (aliasing) pokazujemy
+  // kopię pomniejszoną o 2^n (kolejne połowienia = średnia 2×2), odświeżaną po chwili bezruchu. Skala CSS wynosi wtedy 0,5–1.
+  const mipRef = useRef<HTMLCanvasElement>(null);
+  const zoomLiveRef = useRef(zoom);
+  zoomLiveRef.current = zoom;
+  useEffect(() => {
+    let raf = 0;
+    const st = { ver: -1, level: 0, w: 0, h: 0, lastVer: -1, changedAt: 0 };
+    const tmp = [document.createElement('canvas'), document.createElement('canvas')];
+    const hide = (m: HTMLCanvasElement) => {
+      if (m.style.visibility !== 'hidden') m.style.visibility = 'hidden';
+    };
+    const tick = () => {
+      raf = requestAnimationFrame(tick);
+      const mip = mipRef.current;
+      const base = canvasRef.current;
+      if (!mip || !base) return;
+      const z = zoomLiveRef.current;
+      const level = settings.get().downscaleSmooth && z < 0.5 ? Math.min(6, Math.floor(Math.log2(1 / z))) : 0;
+      const ver = engine.displayVersion;
+      const now = performance.now();
+      if (ver !== st.lastVer) {
+        st.lastVer = ver;
+        st.changedAt = now;
+      }
+      if (level < 1 || base.style.visibility === 'hidden') return hide(mip);
+      const fresh = st.ver === ver && st.level === level && st.w === base.width && st.h === base.height;
+      if (!fresh) {
+        if (now - st.changedAt < 150) return hide(mip);
+        let src: HTMLCanvasElement = base;
+        let w = base.width;
+        let h = base.height;
+        for (let i = 1; i <= level; i++) {
+          const nw = Math.max(1, Math.ceil(w / 2));
+          const nh = Math.max(1, Math.ceil(h / 2));
+          const dst = tmp[i % 2];
+          dst.width = nw;
+          dst.height = nh;
+          const c = dst.getContext('2d')!;
+          c.imageSmoothingEnabled = true;
+          c.imageSmoothingQuality = 'high';
+          c.drawImage(src, 0, 0, w, h, 0, 0, nw, nh);
+          src = dst;
+          w = nw;
+          h = nh;
+        }
+        mip.width = w;
+        mip.height = h;
+        mip.getContext('2d')!.drawImage(src, 0, 0);
+        st.ver = ver;
+        st.level = level;
+        st.w = base.width;
+        st.h = base.height;
+      }
+      if (mip.style.visibility === 'hidden') mip.style.visibility = '';
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [engine]);
+
+  // Kółko jako natywny, NIE-pasywny listener (React rejestruje onWheel jako pasywny, więc preventDefault by nie działał)
+  const wheelRef = useRef(handleWheel);
+  wheelRef.current = handleWheel;
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const fn = (e: WheelEvent) => wheelRef.current(e);
+    el.addEventListener('wheel', fn, { passive: false });
+    return () => el.removeEventListener('wheel', fn);
+  }, []);
 
   const getModifiedSelectionSettings = (e: React.PointerEvent) => {
     const isSelectionTool =
@@ -5822,7 +5978,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
       snapMarkRef.current = null;
       return pt;
     }
-    const tol = 8 / Math.max(zoom, 0.05);
+    const tol = settings.get().snapRadius / Math.max(zoom, 0.05);
     const skipId = engine.vec.editingInfo?.id ?? null;
     let best: { x: number; y: number; d: number } | null = null;
     // Tworzenie i przesuwanie prowadnicy: punkt musi być blisko kursora (w obu osiach), a prowadnica przejmuje tylko jego jedną współrzędną
@@ -6609,6 +6765,14 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         x: e.clientX - rect.left,
         y: e.clientY - rect.top,
       };
+      if (rulerMarkXRef.current) {
+        rulerMarkXRef.current.style.display = 'block';
+        rulerMarkXRef.current.style.left = `${e.clientX - rect.left}px`;
+      }
+      if (rulerMarkYRef.current) {
+        rulerMarkYRef.current.style.display = 'block';
+        rulerMarkYRef.current.style.top = `${e.clientY - rect.top}px`;
+      }
     }
 
     const pt = snapDocPoint(getDocPoint(e));
@@ -7619,6 +7783,28 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
     }
   };
 
+  /** Kliknięcie lub przesunięcie po linijce wstawia prowadnicę (górna: pionową, lewa: poziomą) i pozwala ją od razu ustawić. */
+  const startGuideFromRuler = (axis: 'h' | 'v', e: React.PointerEvent) => {
+    if (e.button !== 0 || !containerRef.current) return;
+    e.preventDefault();
+    if (!guidesVisibleRef.current) {
+      onShowToast?.('Prowadnice są ukryte (przełącznik „Prowadnice” na pasku statusu)');
+      return;
+    }
+    const box = containerRef.current;
+    const rect = box.getBoundingClientRect();
+    const docX = (e.clientX - rect.left - rect.width / 2 - panOffset.x) / zoom + engine.width / 2;
+    const docY = (e.clientY - rect.top - rect.height / 2 - panOffset.y) / zoom + engine.height / 2;
+    const id = engine.addGuide(axis, Math.round(axis === 'v' ? docX : docY));
+    guideSelRef.current = id;
+    guideDragRef.current = id;
+    try {
+      box.setPointerCapture(e.pointerId);
+    } catch {}
+    setGuidesRev((r) => r + 1);
+    onVectorSelectionChange?.();
+  };
+
   const cWidth = containerSize.width || containerRef.current?.clientWidth || 0;
   const cHeight = containerSize.height || containerRef.current?.clientHeight || 0;
   const screenCenterX = cWidth / 2 + panOffset.x;
@@ -7630,7 +7816,48 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   const screenLeft = Math.round((screenCenterX - screenWidth / 2) * devDpr) / devDpr;
   const screenTop = Math.round((screenCenterY - screenHeight / 2) * devDpr) / devDpr;
 
+  const rulerGuidesV = guidesVisible ? engine.guides.filter((g) => g.axis === 'v').map((g) => g.pos) : [];
+  const rulerGuidesH = guidesVisible ? engine.guides.filter((g) => g.axis === 'h').map((g) => g.pos) : [];
+  const selGuide = engine.guides.find((g) => g.id === guideSelRef.current) ?? null;
+
   return (
+    <div className="flex flex-col flex-1 min-w-0 h-full" data-testid="viewport-root">
+      {rulersVisible && (
+        <div className="flex shrink-0 bg-[color:var(--h-2a2a2a,#2a2a2a)]" style={{ height: RULER_SIZE }}>
+          <div className="shrink-0 border-b border-r border-[color:var(--h-111111,#111111)]" style={{ width: RULER_SIZE, height: RULER_SIZE }} />
+          <RulerBar
+            testId="ruler-top"
+            axis="x"
+            length={cWidth}
+            origin={screenCenterX - screenWidth / 2}
+            zoom={zoom}
+            docSize={engine.width}
+            unit={rulerUnit}
+            dpi={engine.dpi}
+            guides={rulerGuidesV}
+            selectedGuide={selGuide && selGuide.axis === 'v' ? selGuide.pos : null}
+            markRef={rulerMarkXRef}
+            onPointerDown={(e) => startGuideFromRuler('v', e)}
+          />
+        </div>
+      )}
+      <div className="flex flex-1 min-h-0 min-w-0">
+        {rulersVisible && (
+          <RulerBar
+            testId="ruler-left"
+            axis="y"
+            length={cHeight}
+            origin={screenCenterY - screenHeight / 2}
+            zoom={zoom}
+            docSize={engine.height}
+            unit={rulerUnit}
+            dpi={engine.dpi}
+            guides={rulerGuidesH}
+            selectedGuide={selGuide && selGuide.axis === 'h' ? selGuide.pos : null}
+            markRef={rulerMarkYRef}
+            onPointerDown={(e) => startGuideFromRuler('h', e)}
+          />
+        )}
     <div
       ref={containerRef}
       onContextMenu={(e) => e.preventDefault()}
@@ -7638,7 +7865,6 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         // Podczas edycji tekstu klik na płótnie nie może zabrać fokusu ukrytemu polu wejściowemu
         if (activeTextSession) e.preventDefault();
       }}
-      onWheel={handleWheel}
       onDoubleClick={(e) => {
         if (activeToolProp !== 'vector-select' || !onOpenSmartObject) return;
         const layer = engine.getActiveLayer();
@@ -7664,12 +7890,14 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
           setCursorInside(false);
         }
         updateStatusBarPos(null);
+        if (rulerMarkXRef.current && !guideDragRef.current) rulerMarkXRef.current.style.display = 'none';
+        if (rulerMarkYRef.current && !guideDragRef.current) rulerMarkYRef.current.style.display = 'none';
         setTransformHoverHandle(null);
         setHoverVectorHandle(null);
         cursorPosRef.current = null;
       }}
-      className="relative flex-1 h-full overflow-hidden select-none bg-[#6f6f6f] touch-none"
-      style={{ cursor: cursorStyleRef.current }}
+      className="relative flex-1 min-w-0 h-full overflow-hidden select-none bg-[color:var(--h-6f6f6f,#6f6f6f)] touch-none"
+      style={{ cursor: cursorStyleRef.current, backgroundColor: WORKSPACE_COLOR[cfgUi.workspace] }}
     >
       {/* Struktura płótna: szachownica, rysunek i ramka 1 px */}
       <div
@@ -7679,15 +7907,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
           top: `${screenTop}px`,
           width: `${screenWidth}px`,
           height: `${screenHeight}px`,
-          backgroundImage: `
-            linear-gradient(45deg, #e4e4e4 25%, transparent 25%),
-            linear-gradient(-45deg, #e4e4e4 25%, transparent 25%),
-            linear-gradient(45deg, transparent 75%, #e4e4e4 75%),
-            linear-gradient(-45deg, transparent 75%, #e4e4e4 75%)
-          `,
-          backgroundSize: '24px 24px',
-          backgroundPosition: `${-screenLeft}px ${-screenTop}px, ${-screenLeft}px ${-screenTop + 12}px, ${-screenLeft + 12}px ${-screenTop - 12}px, ${-screenLeft - 12}px ${-screenTop}px`,
-          backgroundColor: '#ffffff',
+          ...transparencyStyle(cfgUi, screenLeft, screenTop),
           boxShadow: '0 0 0 1px #222222, 0 12px 36px -4px rgba(0, 0, 0, 0.45)',
           zIndex: 2,
         }}
@@ -7700,8 +7920,14 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
           style={{
             width: '100%',
             height: '100%',
-            imageRendering: zoom >= 2.0 ? 'pixelated' : 'auto',
+            imageRendering: cfgUi.pixelatedZoom > 0 && zoom >= cfgUi.pixelatedZoom ? 'pixelated' : 'auto',
           }}
+        />
+        <canvas
+          ref={mipRef}
+          data-testid="mip-canvas"
+          className="absolute inset-0 block w-full h-full pointer-events-none"
+          style={{ width: '100%', height: '100%', visibility: 'hidden' }}
         />
       </div>
 
@@ -7741,7 +7967,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
         const cur = penNodeMode(nd);
         return (
           <div
-            className="absolute z-40 w-48 bg-[#1e1e1e] border border-[#454545] rounded shadow-2xl py-1 text-xs text-[#ddd]"
+            className="absolute z-40 w-48 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-454545,#454545)] rounded shadow-2xl py-1 text-xs text-[color:var(--h-dddddd,#dddddd)]"
             style={{ left, top }}
             onPointerDown={(e) => e.stopPropagation()}
             onPointerUp={(e) => e.stopPropagation()}
@@ -7757,7 +7983,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
                   title={m.hint}
                   onClick={() => penChooseMode(m.id)}
                   className={`w-full flex items-center gap-2 px-2 py-1 text-left ${
-                    cur === m.id ? 'bg-[#094771] text-white' : 'hover:bg-[#2a2d2e]'
+                    cur === m.id ? 'bg-[color:var(--h-094771,#094771)] text-white' : 'hover:bg-[color:var(--h-2a2d2e,#2a2d2e)]'
                   } ${ok ? 'cursor-pointer' : 'opacity-35 cursor-default'}`}
                 >
                   <PenModeIcon mode={m.id} />
@@ -7765,13 +7991,13 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
                 </button>
               );
             })}
-            <div className="my-1 border-t border-[#333]" />
+            <div className="my-1 border-t border-[color:var(--h-333333,#333333)]" />
             {sess.closed && sess.nodes.length >= 3 && (
               <button
                 type="button"
                 title="Otwiera krzywą w tym węźle: staje się on początkiem, a poprzedni węzeł końcem"
                 onClick={() => penOpenAt(penMenu.index)}
-                className="w-full flex items-center gap-2 px-2 py-1 text-left cursor-pointer hover:bg-[#2a2d2e]"
+                className="w-full flex items-center gap-2 px-2 py-1 text-left cursor-pointer hover:bg-[color:var(--h-2a2d2e,#2a2d2e)]"
               >
                 <span className="w-4 text-center shrink-0">✂</span>
                 <span>Otwórz krzywą tutaj</span>
@@ -7783,7 +8009,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
               title="Usuń węzeł (Delete)"
               onClick={() => penDeleteNode(penMenu.index)}
               className={`w-full flex items-center gap-2 px-2 py-1 text-left ${
-                sess.nodes.length > 2 ? 'cursor-pointer hover:bg-[#2a2d2e] text-[#f0a0a0]' : 'opacity-35 cursor-default'
+                sess.nodes.length > 2 ? 'cursor-pointer hover:bg-[color:var(--h-2a2d2e,#2a2d2e)] text-[#f0a0a0]' : 'opacity-35 cursor-default'
               }`}
             >
               <svg width="16" height="16" viewBox="0 0 16 16" fill="none" className="shrink-0">
@@ -7831,6 +8057,8 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
           zIndex: 1,
         }}
       />
+    </div>
+      </div>
     </div>
   );
 };

@@ -35,7 +35,7 @@ const MODES: { id: ChannelCombine; label: string }[] = [
 /** Miniatura jednego kanału: płótno rastra rysowane przez rodzica, w polu o stałym rozmiarze. */
 const Thumb: React.FC<{ canvasRef: (el: HTMLCanvasElement | null) => void; w: number; h: number; checker?: boolean }> = ({ canvasRef, w, h, checker }) => (
   <div
-    className="shrink-0 flex items-center justify-center border border-[#3a3a3a] bg-black overflow-hidden"
+    className="shrink-0 flex items-center justify-center border border-[color:var(--h-3a3a3a,#3a3a3a)] bg-black overflow-hidden"
     style={{
       width: BOX_W + 2,
       height: BOX_H + 2,
@@ -233,7 +233,7 @@ export const ChannelsPanel: React.FC<ChannelsPanelProps> = ({ engine, onChanged 
   const compSelected = ch.isDefaultEdit() && ch.selectedAlpha === null;
 
   const rowBase = 'flex items-center gap-1.5 px-1 py-0.5 rounded border cursor-pointer';
-  const rowCls = (sel: boolean) => `${rowBase} ${sel ? 'bg-[#10549c] border-[#2980b9] text-white' : 'bg-[#1e1e1e] hover:bg-[#282828] border-transparent text-[#ccc]'}`;
+  const rowCls = (sel: boolean) => `${rowBase} ${sel ? 'bg-[color:var(--h-10549c,#10549c)] border-[color:var(--h-2980b9,#2980b9)] text-white' : 'bg-[color:var(--h-1e1e1e,#1e1e1e)] hover:bg-[color:var(--h-282828,#282828)] border-transparent text-[color:var(--h-cccccc,#cccccc)]'}`;
   const editing = !!engine.channelEdit;
   const eyeBtn = (on: boolean, onClick: () => void, testId: string, title: string, disabled = false) => (
     <button
@@ -244,7 +244,7 @@ export const ChannelsPanel: React.FC<ChannelsPanelProps> = ({ engine, onChanged 
         e.stopPropagation();
         if (!disabled) onClick();
       }}
-      className={`w-5 h-5 flex items-center justify-center shrink-0 text-[#bbb] ${disabled ? 'opacity-40 cursor-default' : 'hover:text-white cursor-pointer'}`}
+      className={`w-5 h-5 flex items-center justify-center shrink-0 text-[color:var(--h-bbbbbb,#bbbbbb)] ${disabled ? 'opacity-40 cursor-default' : 'hover:text-[color:var(--t-white,#fff)] cursor-pointer'}`}
     >
       {on ? <Eye size={13} /> : <EyeOff size={13} className="opacity-50" />}
     </button>
@@ -253,11 +253,11 @@ export const ChannelsPanel: React.FC<ChannelsPanelProps> = ({ engine, onChanged 
   const restricted = !ch.isDefaultEdit();
   const editNames = COLOR_CHANNELS.filter((k) => ch.selected[k]).map((k) => SHORT[k]);
 
-  const tbBtn = 'w-6 h-5.5 flex items-center justify-center bg-[#282828] border border-[#3e3e3e] rounded transition-colors text-[#ccc] hover:bg-[#383838] hover:text-white cursor-pointer disabled:opacity-35 disabled:cursor-default disabled:hover:bg-[#282828] disabled:hover:text-[#ccc]';
+  const tbBtn = 'w-6 h-5.5 flex items-center justify-center bg-[color:var(--h-282828,#282828)] border border-[color:var(--h-3e3e3e,#3e3e3e)] rounded transition-colors text-[color:var(--h-cccccc,#cccccc)] hover:bg-[color:var(--h-383838,#383838)] hover:text-[color:var(--t-white,#fff)] cursor-pointer disabled:opacity-35 disabled:cursor-default disabled:hover:bg-[color:var(--h-282828,#282828)] disabled:hover:text-[color:var(--h-cccccc,#cccccc)]';
 
   return (
     <div className="flex flex-col flex-1 min-h-0 gap-1.5" data-testid="channels-panel">
-      <div className="flex-1 overflow-y-auto border border-[#2a2a2a] rounded bg-[#141414] p-1 space-y-0.5 min-h-[120px] w-full">
+      <div className="flex-1 overflow-y-auto border border-[color:var(--h-2a2a2a,#2a2a2a)] rounded bg-[color:var(--h-141414,#141414)] p-1 space-y-0.5 min-h-[120px] w-full">
         {/* kompozyt RGB */}
         <div data-testid="channels-row-composite" className={rowCls(compSelected)} onClick={clickComposite}>
           {eyeBtn(allVisible, () => { ch.toggleCompositeEye(); changed(); }, 'channels-eye-composite', 'Pokaż / ukryj wszystkie kanały koloru', editing)}
@@ -271,7 +271,7 @@ export const ChannelsPanel: React.FC<ChannelsPanelProps> = ({ engine, onChanged 
             <span className="text-[11px] truncate flex-1">{LABEL[k]}</span>
           </div>
         ))}
-        {ch.alpha.length > 0 && <div className="h-px bg-[#2a2a2a] my-1" />}
+        {ch.alpha.length > 0 && <div className="h-px bg-[color:var(--h-2a2a2a,#2a2a2a)] my-1" />}
         {ch.alpha.map((c) => (
           <div
             key={c.id}
@@ -293,7 +293,7 @@ export const ChannelsPanel: React.FC<ChannelsPanelProps> = ({ engine, onChanged 
                   if (e.key === 'Escape') setRenaming(null);
                 }}
                 onClick={(e) => e.stopPropagation()}
-                className="flex-1 min-w-0 h-5 bg-[#222] border border-[#007acc] rounded px-1 text-[11px] text-white focus:outline-none"
+                className="flex-1 min-w-0 h-5 bg-[color:var(--h-222222,#222222)] border border-[color:var(--h-007acc,#007acc)] rounded px-1 text-[11px] text-[color:var(--t-white,#fff)] focus:outline-none"
               />
             ) : (
               <span
@@ -311,7 +311,7 @@ export const ChannelsPanel: React.FC<ChannelsPanelProps> = ({ engine, onChanged 
         ))}
       </div>
 
-      <div className="text-[10px] leading-snug text-[#8a8a8a] min-h-[26px]" data-testid="channels-hint">
+      <div className="text-[10px] leading-snug text-[color:var(--h-8a8a8a,#8a8a8a)] min-h-[26px]" data-testid="channels-hint">
         {selAlpha
           ? 'Edycja kanału: pędzel, gumka, wiadro i gradient malują w kanale (biel = zaznaczone, czerń = niezaznaczone). Wybierz RGB, by wrócić do warstw.'
           : restricted
@@ -325,7 +325,7 @@ export const ChannelsPanel: React.FC<ChannelsPanelProps> = ({ engine, onChanged 
           value={mode}
           onChange={(e) => setMode(e.target.value as ChannelCombine)}
           title="Sposób łączenia przy zapisie do zaznaczonego kanału i przy wczytywaniu zaznaczenia"
-          className="h-5.5 flex-1 min-w-0 bg-[#222] border border-[#444] rounded px-1 text-[10.5px] text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+          className="h-5.5 flex-1 min-w-0 bg-[color:var(--h-222222,#222222)] border border-[color:var(--h-444444,#444444)] rounded px-1 text-[10.5px] text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[color:var(--h-007acc,#007acc)] cursor-pointer"
         >
           {MODES.map((m) => (
             <option key={m.id} value={m.id}>
@@ -350,7 +350,7 @@ export const ChannelsPanel: React.FC<ChannelsPanelProps> = ({ engine, onChanged 
         </button>
       </div>
 
-      <label className="flex items-center gap-1.5 text-[10.5px] text-[#aaa] cursor-pointer select-none shrink-0">
+      <label className="flex items-center gap-1.5 text-[10.5px] text-[color:var(--h-aaaaaa,#aaaaaa)] cursor-pointer select-none shrink-0">
         <input
           type="checkbox"
           data-testid="channels-gray"
@@ -360,7 +360,7 @@ export const ChannelsPanel: React.FC<ChannelsPanelProps> = ({ engine, onChanged 
             ch.touch();
             changed();
           }}
-          className="accent-[#007acc]"
+          className="accent-[color:var(--h-007acc,#007acc)]"
         />
         Pojedynczy kanał w szarości
       </label>

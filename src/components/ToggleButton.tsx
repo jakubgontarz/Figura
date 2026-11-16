@@ -32,12 +32,12 @@ export const ToggleButton: React.FC<{
       onClick={() => onChange(radio ? true : !active)}
       className={`h-5 px-2 flex items-center gap-1 rounded border text-[11px] whitespace-nowrap cursor-pointer flex-shrink-0 transition-colors ${
         active
-          ? 'bg-[#094771] border-[#007acc] text-white'
-          : 'bg-[#282828] border-[#3e3e3e] text-[#ccc] hover:bg-[#383838] hover:text-white'
+          ? 'bg-[color:var(--h-094771,#094771)] border-[color:var(--h-007acc,#007acc)] text-white'
+          : 'bg-[color:var(--h-282828,#282828)] border-[color:var(--h-3e3e3e,#3e3e3e)] text-[color:var(--h-cccccc,#cccccc)] hover:bg-[color:var(--h-383838,#383838)] hover:text-[color:var(--t-white,#fff)]'
       }`}
     >
       {children}
     </button>
   );
-  return divider ? <div className="flex-shrink-0 border-l border-[#444] pl-2.5">{btn}</div> : btn;
+  return divider ? <div className="flex-shrink-0 border-l border-[color:var(--h-444444,#444444)] pl-2.5">{btn}</div> : btn;
 };

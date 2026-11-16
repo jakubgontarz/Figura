@@ -37,8 +37,8 @@ interface TextOptionsProps {
 }
 
 const inputCls =
-  'h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc]';
-const labelCls = 'text-[11px] whitespace-nowrap text-[#aaa]';
+  'h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-444444,#444444)] rounded px-1.5 text-xs text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[color:var(--h-007acc,#007acc)]';
+const labelCls = 'text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]';
 
 const ToggleBtn: React.FC<{
   active: boolean;
@@ -54,8 +54,8 @@ const ToggleBtn: React.FC<{
     onClick={onClick}
     className={`w-5 h-5 flex items-center justify-center rounded border cursor-pointer flex-shrink-0 ${
       active
-        ? 'bg-[#094771] border-[#007acc] text-white'
-        : 'bg-[#1e1e1e] border-[#444] text-[#ccc] hover:bg-[#333]'
+        ? 'bg-[color:var(--h-094771,#094771)] border-[color:var(--h-007acc,#007acc)] text-white'
+        : 'bg-[color:var(--h-1e1e1e,#1e1e1e)] border-[color:var(--h-444444,#444444)] text-[color:var(--h-cccccc,#cccccc)] hover:bg-[color:var(--h-333333,#333333)]'
     }`}
   >
     {children}

@@ -205,7 +205,7 @@ export const NavigatorPanel: React.FC<NavigatorPanelProps> = ({ engine, zoom, pa
         <div
           ref={boxRef}
           data-testid="navigator-box"
-          className="relative overflow-hidden border border-[#333] cursor-crosshair touch-none"
+          className="relative overflow-hidden border border-[color:var(--h-333333,#333333)] cursor-crosshair touch-none"
           style={{
             width: boxW,
             height: boxH,
@@ -238,7 +238,7 @@ export const NavigatorPanel: React.FC<NavigatorPanelProps> = ({ engine, zoom, pa
           type="button"
           onClick={() => setZoomKeepCenter(zoom / 1.25)}
           title="Pomniejsz"
-          className="p-1 text-[#888] hover:text-white hover:bg-[#333] rounded cursor-pointer"
+          className="p-1 text-[color:var(--h-888888,#888888)] hover:text-[color:var(--t-white,#fff)] hover:bg-[color:var(--h-333333,#333333)] rounded cursor-pointer"
         >
           <Minus size={12} />
         </button>
@@ -262,21 +262,21 @@ export const NavigatorPanel: React.FC<NavigatorPanelProps> = ({ engine, zoom, pa
           type="button"
           onClick={() => setZoomKeepCenter(zoom * 1.25)}
           title="Powiększ"
-          className="p-1 text-[#888] hover:text-white hover:bg-[#333] rounded cursor-pointer"
+          className="p-1 text-[color:var(--h-888888,#888888)] hover:text-[color:var(--t-white,#fff)] hover:bg-[color:var(--h-333333,#333333)] rounded cursor-pointer"
         >
           <Plus size={12} />
         </button>
       </div>
 
       <div className="flex items-center justify-between">
-        <span className="text-[10.5px] font-mono text-[#bbb] tabular-nums" data-testid="navigator-zoom">
+        <span className="text-[10.5px] font-mono text-[color:var(--h-bbbbbb,#bbbbbb)] tabular-nums" data-testid="navigator-zoom">
           {Math.round(zoom * 100)}%
         </span>
         <div className="flex items-center gap-1">
           <button
             type="button"
             onClick={() => { onChangeZoom(1); onChangePan({ x: 0, y: 0 }); }}
-            className="h-5 px-1.5 bg-[#2a2a2a] hover:bg-[#3a3a3a] text-[#aaa] hover:text-white border border-[#444] rounded text-[9.5px] cursor-pointer"
+            className="h-5 px-1.5 bg-[color:var(--h-2a2a2a,#2a2a2a)] hover:bg-[color:var(--h-3a3a3a,#3a3a3a)] text-[color:var(--h-aaaaaa,#aaaaaa)] hover:text-[color:var(--t-white,#fff)] border border-[color:var(--h-444444,#444444)] rounded text-[9.5px] cursor-pointer"
             title="Powiększenie 100%"
           >
             100%
@@ -284,14 +284,14 @@ export const NavigatorPanel: React.FC<NavigatorPanelProps> = ({ engine, zoom, pa
           <button
             type="button"
             onClick={fit}
-            className="h-5 px-1.5 bg-[#2a2a2a] hover:bg-[#3a3a3a] text-[#aaa] hover:text-white border border-[#444] rounded text-[9.5px] cursor-pointer flex items-center gap-1"
+            className="h-5 px-1.5 bg-[color:var(--h-2a2a2a,#2a2a2a)] hover:bg-[color:var(--h-3a3a3a,#3a3a3a)] text-[color:var(--h-aaaaaa,#aaaaaa)] hover:text-[color:var(--t-white,#fff)] border border-[color:var(--h-444444,#444444)] rounded text-[9.5px] cursor-pointer flex items-center gap-1"
             title="Dopasuj cały obraz do okna"
           >
             <Maximize2 size={9} /> Dopasuj
           </button>
         </div>
       </div>
-      <div className="text-[9.5px] text-[#777] leading-snug">
+      <div className="text-[9.5px] text-[color:var(--h-777777,#777777)] leading-snug">
         Podgląd orientacyjny: bez korekcji i efektów warstw. Przeciągnij czerwoną ramkę, aby przesunąć widok; kółko myszy zmienia powiększenie.
       </div>
     </div>

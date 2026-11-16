@@ -177,15 +177,15 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
   const isShapeTool = activeTool === 'shapes';
 
   return (
-    <div className="h-8 bg-[#2b2b2b] select-none flex items-center px-3 text-xs text-[#dddddd] border-b border-[#1c1c1c] gap-3.5 overflow-x-auto scrollbar-none flex-nowrap">
-      <span className="font-semibold text-[#aaaaaa] flex-shrink-0">Opcje:</span>
+    <div className="h-8 bg-[color:var(--h-2b2b2b,#2b2b2b)] select-none flex items-center px-3 text-xs text-[color:var(--h-dddddd,#dddddd)] border-b border-[color:var(--h-1c1c1c,#1c1c1c)] gap-3.5 overflow-x-auto scrollbar-none flex-nowrap">
+      <span className="font-semibold text-[color:var(--h-aaaaaa,#aaaaaa)] flex-shrink-0">Opcje:</span>
 
       {/* Opcje linii i krzywej beziera */}
       {isLineOrCurve ? (
         <div className="flex items-center gap-3 flex-1 flex-shrink-0">
           {/* Grubość linii */}
           <div className="flex items-center gap-1.5 flex-shrink-0">
-            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Grubość:</label>
+            <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Grubość:</label>
             <LengthField
               valuePx={lineAndCurveSettings.strokeWidth}
               minPx={activeTool === 'bezier' ? 0 : 1}
@@ -193,7 +193,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
               trackMaxPx={100}
               integerPx={!fractionalUnits}
               onCommitPx={(v) => onChangeLineAndCurveSettings({ strokeWidth: v })}
-              className="w-14 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white focus:outline-none focus:border-[#007acc] font-mono"
+              className="w-14 h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-444444,#444444)] rounded px-1 text-center text-xs text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[color:var(--h-007acc,#007acc)] font-mono"
             />
             <UnitLabel />
           </div>
@@ -201,11 +201,11 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
           {activeTool === 'bezier' && (
             <>
               <div className="flex items-center gap-1.5 flex-shrink-0">
-                <label className="text-[11px] whitespace-nowrap text-[#aaa]">Narożnik:</label>
+                <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Narożnik:</label>
                 <select
                   value={lineAndCurveSettings.cornerJoin}
                   onChange={(e) => onChangeLineAndCurveSettings({ cornerJoin: e.target.value as StrokeCornerJoin })}
-                  className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+                  className="h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-444444,#444444)] rounded px-1.5 text-xs text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[color:var(--h-007acc,#007acc)] cursor-pointer"
                 >
                   <option value="miter">Ostry</option>
                   <option value="round">Zaokrąglony</option>
@@ -219,18 +219,18 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
                 title={penInfo?.closed ? 'Otwórz krzywą (usuwa odcinek zamykający). Otwarcie w wybranym węźle: kliknij węzeł.' : 'Zamknij krzywą (łączy ostatni węzeł z pierwszym; można ją wypełnić)'}
                 className={`h-5 px-2 rounded border text-[11px] whitespace-nowrap flex-shrink-0 ${
                   penInfo?.active && (penInfo?.count ?? 0) >= 3
-                    ? 'bg-[#1e1e1e] border-[#444] text-white hover:bg-[#333] cursor-pointer'
-                    : 'bg-[#1e1e1e] border-[#333] text-[#666] cursor-default'
-                } ${penInfo?.closed ? '!bg-[#094771] !border-[#007acc]' : ''}`}
+                    ? 'bg-[color:var(--h-1e1e1e,#1e1e1e)] border-[color:var(--h-444444,#444444)] text-[color:var(--t-white,#fff)] hover:bg-[color:var(--h-333333,#333333)] cursor-pointer'
+                    : 'bg-[color:var(--h-1e1e1e,#1e1e1e)] border-[color:var(--h-333333,#333333)] text-[color:var(--h-666666,#666666)] cursor-default'
+                } ${penInfo?.closed ? '!bg-[color:var(--h-094771,#094771)] !border-[color:var(--h-007acc,#007acc)]' : ''}`}
               >
                 {penInfo?.closed ? 'Otwórz krzywą' : 'Zamknij krzywą'}
               </button>
               <div className="flex items-center gap-1.5 flex-shrink-0">
-                <label className="text-[11px] whitespace-nowrap text-[#aaa]" title="Dotyczy zamkniętej krzywej">Wypełnienie:</label>
+                <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]" title="Dotyczy zamkniętej krzywej">Wypełnienie:</label>
                 <select
                   value={lineAndCurveSettings.fillMode}
                   onChange={(e) => onChangeLineAndCurveSettings({ fillMode: e.target.value as PathFillMode })}
-                  className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+                  className="h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-444444,#444444)] rounded px-1.5 text-xs text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[color:var(--h-007acc,#007acc)] cursor-pointer"
                 >
                   <option value="none">Brak</option>
                   <option value="primary">Główny</option>
@@ -238,11 +238,11 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
                 </select>
               </div>
               <div className="flex items-center gap-1.5 flex-shrink-0">
-                <label className="text-[11px] whitespace-nowrap text-[#aaa]" title="Dotyczy zamkniętej krzywej">Wyrównanie:</label>
+                <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]" title="Dotyczy zamkniętej krzywej">Wyrównanie:</label>
                 <select
                   value={lineAndCurveSettings.strokeAlignment}
                   onChange={(e) => onChangeLineAndCurveSettings({ strokeAlignment: e.target.value as StrokeAlignment })}
-                  className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+                  className="h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-444444,#444444)] rounded px-1.5 text-xs text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[color:var(--h-007acc,#007acc)] cursor-pointer"
                 >
                   <option value="center">Do środka</option>
                   <option value="inside">Do wewnątrz</option>
@@ -254,13 +254,13 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
 
           {/* Kreskowanie */}
           <div className="flex items-center gap-1.5 flex-shrink-0">
-            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Kreskowanie:</label>
+            <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Kreskowanie:</label>
             <select
               value={lineAndCurveSettings.dashStyle}
               onChange={(e) =>
                 onChangeLineAndCurveSettings({ dashStyle: e.target.value as StrokeDashStyle })
               }
-              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+              className="h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-444444,#444444)] rounded px-1.5 text-xs text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[color:var(--h-007acc,#007acc)] cursor-pointer"
             >
               <option value="solid">Ciągła</option>
               <option value="dashed">Kreskowana</option>
@@ -272,13 +272,13 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
 
           {/* Znacznik początku */}
           <div className="flex items-center gap-1.5 flex-shrink-0">
-            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Początek:</label>
+            <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Początek:</label>
             <select
               value={lineAndCurveSettings.startMarker}
               onChange={(e) =>
                 onChangeLineAndCurveSettings({ startMarker: e.target.value as MarkerType })
               }
-              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+              className="h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-444444,#444444)] rounded px-1.5 text-xs text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[color:var(--h-007acc,#007acc)] cursor-pointer"
             >
               <option value="none">Ostry</option>
               <option value="cap-round">Zaokrąglony</option>
@@ -292,13 +292,13 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
 
           {/* Znacznik końca */}
           <div className="flex items-center gap-1.5 flex-shrink-0">
-            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Koniec:</label>
+            <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Koniec:</label>
             <select
               value={lineAndCurveSettings.endMarker}
               onChange={(e) =>
                 onChangeLineAndCurveSettings({ endMarker: e.target.value as MarkerType })
               }
-              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+              className="h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-444444,#444444)] rounded px-1.5 text-xs text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[color:var(--h-007acc,#007acc)] cursor-pointer"
             >
               <option value="none">Ostry</option>
               <option value="cap-round">Zaokrąglony</option>
@@ -313,13 +313,13 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
           {/* Rozmiar znacznika */}
           {(isArrowMarker(lineAndCurveSettings.startMarker) || isArrowMarker(lineAndCurveSettings.endMarker)) && (
             <div className="flex items-center gap-1.5 flex-shrink-0">
-              <label className="text-[11px] whitespace-nowrap text-[#aaa]">Grot:</label>
+              <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Grot:</label>
               <select
                 value={lineAndCurveSettings.markerSize}
                 onChange={(e) =>
                   onChangeLineAndCurveSettings({ markerSize: parseFloat(e.target.value) })
                 }
-                className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer font-mono"
+                className="h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-444444,#444444)] rounded px-1.5 text-xs text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[color:var(--h-007acc,#007acc)] cursor-pointer font-mono"
               >
                 <option value={0.7}>Mały (0.7x)</option>
                 <option value={1.0}>Średni (1.0x)</option>
@@ -336,11 +336,11 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
 
           {/* Tryb mieszania */}
           <div className="flex items-center gap-1.5 flex-shrink-0">
-            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Mieszanie:</label>
+            <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Mieszanie:</label>
             <select
               value={lineAndCurveSettings.blendMode}
               onChange={(e) => onChangeLineAndCurveSettings({ blendMode: e.target.value as SKBlendMode })}
-              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+              className="h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-444444,#444444)] rounded px-1.5 text-xs text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[color:var(--h-007acc,#007acc)] cursor-pointer"
             >
               {BLEND_MODES.map((mode) => (
                 <option key={mode.id} value={mode.id}>
@@ -354,7 +354,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
         /* Prowadnice: kierunek nowej prowadnicy */
         <div className="flex items-center gap-3 flex-1 flex-shrink-0">
           <div className="flex items-center gap-1.5">
-            <span className="text-[11px] text-[#aaa]">Kierunek:</span>
+            <span className="text-[11px] text-[color:var(--h-aaaaaa,#aaaaaa)]">Kierunek:</span>
             <div className="flex items-center gap-1.5">
               {([['v', 'Pionowa'], ['h', 'Pozioma']] as const).map(([a, label]) => (
                 <ToggleButton key={a} radio testId={`guide-axis-${a}`} active={guideAxis === a} onChange={() => onChangeGuideAxis?.(a)}>
@@ -367,17 +367,17 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
             type="button"
             disabled={guideCount === 0}
             onClick={() => onClearGuides?.()}
-            className="h-5 px-2 text-[11px] bg-[#2a2a2a] border border-[#444] rounded text-[#ccc] hover:text-white cursor-pointer disabled:opacity-40 disabled:cursor-default"
+            className="h-5 px-2 text-[11px] bg-[color:var(--h-2a2a2a,#2a2a2a)] border border-[color:var(--h-444444,#444444)] rounded text-[color:var(--h-cccccc,#cccccc)] hover:text-[color:var(--t-white,#fff)] cursor-pointer disabled:opacity-40 disabled:cursor-default"
           >
             Usuń wszystkie ({guideCount})
           </button>
-          <span className="text-[11px] text-[#9a9a9a]">Kliknij, aby wstawić. Przeciągnij prowadnicę, aby ją przesunąć; wyciągnięcie poza obraz lub Delete usuwa. Współrzędne: panel Właściwości.</span>
+          <span className="text-[11px] text-[color:var(--h-9a9a9a,#9a9a9a)]">Kliknij, aby wstawić. Przeciągnij prowadnicę, aby ją przesunąć; wyciągnięcie poza obraz lub Delete usuwa. Współrzędne: panel Właściwości.</span>
         </div>
       ) : activeTool === 'smart-object' ? (
         /* Obiekt inteligentny: rozmiar płótna obiektu (zawsze w pikselach) i tryb mieszania */
         <div className="flex items-center gap-3 flex-1 flex-shrink-0">
-          <div className="flex items-center gap-1.5 bg-[#1e1e1e] px-1.5 py-0.5 rounded border border-[#3e3e3e]">
-            <label className="text-[11px] whitespace-nowrap text-[#aaa]" title="Rozmiar płótna obiektu inteligentnego">Płótno obiektu:</label>
+          <div className="flex items-center gap-1.5 bg-[color:var(--h-1e1e1e,#1e1e1e)] px-1.5 py-0.5 rounded border border-[color:var(--h-3e3e3e,#3e3e3e)]">
+            <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]" title="Rozmiar płótna obiektu inteligentnego">Płótno obiektu:</label>
             <LengthField
               forcePx
               valuePx={smartSettings.width}
@@ -385,10 +385,10 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
               maxPx={16000}
               integerPx
               onCommitPx={(v) => onChangeSmartSettings?.({ width: v })}
-              className="w-16 h-5 bg-[#252525] border border-[#555] rounded px-1 text-center text-xs text-white font-mono focus:outline-none focus:border-[#00bcd4]"
+              className="w-16 h-5 bg-[color:var(--h-252525,#252525)] border border-[color:var(--h-555555,#555555)] rounded px-1 text-center text-xs text-[color:var(--t-white,#fff)] font-mono focus:outline-none focus:border-[#00bcd4]"
             />
-            <span className="text-[11px] text-[#aaa]">px</span>
-            <label className="text-[11px] whitespace-nowrap text-[#aaa] ml-1">×</label>
+            <span className="text-[11px] text-[color:var(--h-aaaaaa,#aaaaaa)]">px</span>
+            <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)] ml-1">×</label>
             <LengthField
               forcePx
               valuePx={smartSettings.height}
@@ -396,16 +396,16 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
               maxPx={16000}
               integerPx
               onCommitPx={(v) => onChangeSmartSettings?.({ height: v })}
-              className="w-16 h-5 bg-[#252525] border border-[#555] rounded px-1 text-center text-xs text-white font-mono focus:outline-none focus:border-[#00bcd4]"
+              className="w-16 h-5 bg-[color:var(--h-252525,#252525)] border border-[color:var(--h-555555,#555555)] rounded px-1 text-center text-xs text-[color:var(--t-white,#fff)] font-mono focus:outline-none focus:border-[#00bcd4]"
             />
-            <span className="text-[11px] text-[#aaa]">px</span>
+            <span className="text-[11px] text-[color:var(--h-aaaaaa,#aaaaaa)]">px</span>
           </div>
           <div className="flex items-center gap-1.5">
-            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Tryb mieszania:</label>
+            <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Tryb mieszania:</label>
             <select
               value={smartSettings.blendMode}
               onChange={(e) => onChangeSmartSettings?.({ blendMode: e.target.value as SKBlendMode })}
-              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+              className="h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-444444,#444444)] rounded px-1.5 text-xs text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[color:var(--h-007acc,#007acc)] cursor-pointer"
             >
               {BLEND_MODES.map((mode) => (
                 <option key={mode.id} value={mode.id}>
@@ -418,7 +418,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
             type="button"
             onClick={() => onInsertDiskImage?.()}
             title="Wstawia obraz z pliku na dysku. Dokument zapamiętuje tylko położenie pliku, współrzędne, rozmiar, kąt i tryb mieszania, bez bitmapy."
-            className="h-5 px-2 text-[11px] bg-[#2a2a2a] border border-[#444] rounded text-[#ccc] hover:text-white cursor-pointer whitespace-nowrap flex-shrink-0"
+            className="h-5 px-2 text-[11px] bg-[color:var(--h-2a2a2a,#2a2a2a)] border border-[color:var(--h-444444,#444444)] rounded text-[color:var(--h-cccccc,#cccccc)] hover:text-[color:var(--t-white,#fff)] cursor-pointer whitespace-nowrap flex-shrink-0"
           >
             Obraz z dysku…
           </button>
@@ -426,24 +426,24 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
             type="button"
             onClick={() => onRefreshDiskImages?.()}
             title="Wczytuje ponownie z dysku wszystkie obrazy z dysku w tym dokumencie (po zmianie plików w czasie pracy)."
-            className="h-5 px-2 text-[11px] bg-[#2a2a2a] border border-[#444] rounded text-[#ccc] hover:text-white cursor-pointer whitespace-nowrap flex-shrink-0"
+            className="h-5 px-2 text-[11px] bg-[color:var(--h-2a2a2a,#2a2a2a)] border border-[color:var(--h-444444,#444444)] rounded text-[color:var(--h-cccccc,#cccccc)] hover:text-[color:var(--t-white,#fff)] cursor-pointer whitespace-nowrap flex-shrink-0"
           >
             Odśwież
           </button>
-          <span className="text-[11px] text-[#9a9a9a]">Kliknij lub przeciągnij (Shift – zachowaj proporcje płótna), aby wstawić. Dwuklik na obiekcie otwiera jego dokument w zakładce.</span>
+          <span className="text-[11px] text-[color:var(--h-9a9a9a,#9a9a9a)]">Kliknij lub przeciągnij (Shift – zachowaj proporcje płótna), aby wstawić. Dwuklik na obiekcie otwiera jego dokument w zakładce.</span>
         </div>
       ) : isShapeTool ? (
         /* Opcje figur geometrycznych */
         <div className="flex items-center gap-3 flex-1 flex-shrink-0">
           {/* Wybór kształtu */}
           <div className="flex items-center gap-1.5 flex-shrink-0">
-            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Kształt:</label>
+            <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Kształt:</label>
             <select
               value={vectorShapeSettings.shapeKind}
               onChange={(e) =>
                 onChangeVectorShapeSettings({ shapeKind: e.target.value as ShapeKind })
               }
-              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer font-medium"
+              className="h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-444444,#444444)] rounded px-1.5 text-xs text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[color:var(--h-007acc,#007acc)] cursor-pointer font-medium"
             >
               <option value="rect">Prostokąt</option>
               <option value="round-rect">Zaokrąglony prostokąt</option>
@@ -459,13 +459,13 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
 
           {/* Sposób wypełnienia */}
           <div className="flex items-center gap-1.5 flex-shrink-0">
-            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Wypełnienie:</label>
+            <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Wypełnienie:</label>
             <select
               value={vectorShapeSettings.fillMode}
               onChange={(e) =>
                 onChangeVectorShapeSettings({ fillMode: e.target.value as ShapeFillMode })
               }
-              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer font-medium"
+              className="h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-444444,#444444)] rounded px-1.5 text-xs text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[color:var(--h-007acc,#007acc)] cursor-pointer font-medium"
             >
               <option value="none">tylko obrys</option>
               <option value="primary">kolor główny</option>
@@ -475,7 +475,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
 
           {/* Grubość obrysu */}
           <div className="flex items-center gap-1.5 flex-shrink-0">
-            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Obrys:</label>
+            <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Obrys:</label>
             <LengthField
               valuePx={vectorShapeSettings.strokeWidth}
               minPx={0}
@@ -483,20 +483,20 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
               trackMaxPx={100}
               integerPx={!fractionalUnits}
               onCommitPx={(v) => onChangeVectorShapeSettings({ strokeWidth: v })}
-              className="w-14 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white focus:outline-none focus:border-[#007acc] font-mono"
+              className="w-14 h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-444444,#444444)] rounded px-1 text-center text-xs text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[color:var(--h-007acc,#007acc)] font-mono"
             />
             <UnitLabel />
           </div>
 
           {/* Narożnik */}
           <div className="flex items-center gap-1.5 flex-shrink-0">
-            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Narożnik:</label>
+            <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Narożnik:</label>
             <select
               value={vectorShapeSettings.strokeCornerJoin}
               onChange={(e) =>
                 onChangeVectorShapeSettings({ strokeCornerJoin: e.target.value as StrokeCornerJoin })
               }
-              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+              className="h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-444444,#444444)] rounded px-1.5 text-xs text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[color:var(--h-007acc,#007acc)] cursor-pointer"
             >
               <option value="miter">Prosty / Ostry</option>
               <option value="round">Zaokrąglony</option>
@@ -506,13 +506,13 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
 
           {/* Wyrównanie obrysu */}
           <div className="flex items-center gap-1.5 flex-shrink-0">
-            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Wyrównanie:</label>
+            <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Wyrównanie:</label>
             <select
               value={vectorShapeSettings.strokeAlignment}
               onChange={(e) =>
                 onChangeVectorShapeSettings({ strokeAlignment: e.target.value as StrokeAlignment })
               }
-              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+              className="h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-444444,#444444)] rounded px-1.5 text-xs text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[color:var(--h-007acc,#007acc)] cursor-pointer"
             >
               <option value="center">Do środka</option>
               <option value="inside">Do wewnątrz</option>
@@ -529,11 +529,11 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
 
           {/* Tryb mieszania */}
           <div className="flex items-center gap-1.5 flex-shrink-0">
-            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Mieszanie:</label>
+            <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Mieszanie:</label>
             <select
               value={lineAndCurveSettings.blendMode}
               onChange={(e) => onChangeLineAndCurveSettings({ blendMode: e.target.value as SKBlendMode })}
-              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+              className="h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-444444,#444444)] rounded px-1.5 text-xs text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[color:var(--h-007acc,#007acc)] cursor-pointer"
             >
               {BLEND_MODES.map((mode) => (
                 <option key={mode.id} value={mode.id}>
@@ -547,7 +547,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
         /* Prowadnice: kierunek nowej prowadnicy */
         <div className="flex items-center gap-3 flex-1 flex-shrink-0">
           <div className="flex items-center gap-1.5">
-            <span className="text-[11px] text-[#aaa]">Kierunek:</span>
+            <span className="text-[11px] text-[color:var(--h-aaaaaa,#aaaaaa)]">Kierunek:</span>
             <div className="flex items-center gap-1.5">
               {([['v', 'Pionowa'], ['h', 'Pozioma']] as const).map(([a, label]) => (
                 <ToggleButton key={a} radio testId={`guide-axis-${a}`} active={guideAxis === a} onChange={() => onChangeGuideAxis?.(a)}>
@@ -560,17 +560,17 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
             type="button"
             disabled={guideCount === 0}
             onClick={() => onClearGuides?.()}
-            className="h-5 px-2 text-[11px] bg-[#2a2a2a] border border-[#444] rounded text-[#ccc] hover:text-white cursor-pointer disabled:opacity-40 disabled:cursor-default"
+            className="h-5 px-2 text-[11px] bg-[color:var(--h-2a2a2a,#2a2a2a)] border border-[color:var(--h-444444,#444444)] rounded text-[color:var(--h-cccccc,#cccccc)] hover:text-[color:var(--t-white,#fff)] cursor-pointer disabled:opacity-40 disabled:cursor-default"
           >
             Usuń wszystkie ({guideCount})
           </button>
-          <span className="text-[11px] text-[#9a9a9a]">Kliknij, aby wstawić. Przeciągnij prowadnicę, aby ją przesunąć; wyciągnięcie poza obraz lub Delete usuwa. Współrzędne: panel Właściwości.</span>
+          <span className="text-[11px] text-[color:var(--h-9a9a9a,#9a9a9a)]">Kliknij, aby wstawić. Przeciągnij prowadnicę, aby ją przesunąć; wyciągnięcie poza obraz lub Delete usuwa. Współrzędne: panel Właściwości.</span>
         </div>
       ) : activeTool === 'smart-object' ? (
         /* Obiekt inteligentny: rozmiar płótna obiektu (zawsze w pikselach) i tryb mieszania */
         <div className="flex items-center gap-3 flex-1 flex-shrink-0">
-          <div className="flex items-center gap-1.5 bg-[#1e1e1e] px-1.5 py-0.5 rounded border border-[#3e3e3e]">
-            <label className="text-[11px] whitespace-nowrap text-[#aaa]" title="Rozmiar płótna obiektu inteligentnego">Płótno obiektu:</label>
+          <div className="flex items-center gap-1.5 bg-[color:var(--h-1e1e1e,#1e1e1e)] px-1.5 py-0.5 rounded border border-[color:var(--h-3e3e3e,#3e3e3e)]">
+            <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]" title="Rozmiar płótna obiektu inteligentnego">Płótno obiektu:</label>
             <LengthField
               forcePx
               valuePx={smartSettings.width}
@@ -578,10 +578,10 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
               maxPx={16000}
               integerPx
               onCommitPx={(v) => onChangeSmartSettings?.({ width: v })}
-              className="w-16 h-5 bg-[#252525] border border-[#555] rounded px-1 text-center text-xs text-white font-mono focus:outline-none focus:border-[#00bcd4]"
+              className="w-16 h-5 bg-[color:var(--h-252525,#252525)] border border-[color:var(--h-555555,#555555)] rounded px-1 text-center text-xs text-[color:var(--t-white,#fff)] font-mono focus:outline-none focus:border-[#00bcd4]"
             />
-            <span className="text-[11px] text-[#aaa]">px</span>
-            <label className="text-[11px] whitespace-nowrap text-[#aaa] ml-1">×</label>
+            <span className="text-[11px] text-[color:var(--h-aaaaaa,#aaaaaa)]">px</span>
+            <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)] ml-1">×</label>
             <LengthField
               forcePx
               valuePx={smartSettings.height}
@@ -589,16 +589,16 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
               maxPx={16000}
               integerPx
               onCommitPx={(v) => onChangeSmartSettings?.({ height: v })}
-              className="w-16 h-5 bg-[#252525] border border-[#555] rounded px-1 text-center text-xs text-white font-mono focus:outline-none focus:border-[#00bcd4]"
+              className="w-16 h-5 bg-[color:var(--h-252525,#252525)] border border-[color:var(--h-555555,#555555)] rounded px-1 text-center text-xs text-[color:var(--t-white,#fff)] font-mono focus:outline-none focus:border-[#00bcd4]"
             />
-            <span className="text-[11px] text-[#aaa]">px</span>
+            <span className="text-[11px] text-[color:var(--h-aaaaaa,#aaaaaa)]">px</span>
           </div>
           <div className="flex items-center gap-1.5">
-            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Tryb mieszania:</label>
+            <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Tryb mieszania:</label>
             <select
               value={smartSettings.blendMode}
               onChange={(e) => onChangeSmartSettings?.({ blendMode: e.target.value as SKBlendMode })}
-              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+              className="h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-444444,#444444)] rounded px-1.5 text-xs text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[color:var(--h-007acc,#007acc)] cursor-pointer"
             >
               {BLEND_MODES.map((mode) => (
                 <option key={mode.id} value={mode.id}>
@@ -611,7 +611,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
             type="button"
             onClick={() => onInsertDiskImage?.()}
             title="Wstawia obraz z pliku na dysku. Dokument zapamiętuje tylko położenie pliku, współrzędne, rozmiar, kąt i tryb mieszania, bez bitmapy."
-            className="h-5 px-2 text-[11px] bg-[#2a2a2a] border border-[#444] rounded text-[#ccc] hover:text-white cursor-pointer whitespace-nowrap flex-shrink-0"
+            className="h-5 px-2 text-[11px] bg-[color:var(--h-2a2a2a,#2a2a2a)] border border-[color:var(--h-444444,#444444)] rounded text-[color:var(--h-cccccc,#cccccc)] hover:text-[color:var(--t-white,#fff)] cursor-pointer whitespace-nowrap flex-shrink-0"
           >
             Obraz z dysku…
           </button>
@@ -619,24 +619,24 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
             type="button"
             onClick={() => onRefreshDiskImages?.()}
             title="Wczytuje ponownie z dysku wszystkie obrazy z dysku w tym dokumencie (po zmianie plików w czasie pracy)."
-            className="h-5 px-2 text-[11px] bg-[#2a2a2a] border border-[#444] rounded text-[#ccc] hover:text-white cursor-pointer whitespace-nowrap flex-shrink-0"
+            className="h-5 px-2 text-[11px] bg-[color:var(--h-2a2a2a,#2a2a2a)] border border-[color:var(--h-444444,#444444)] rounded text-[color:var(--h-cccccc,#cccccc)] hover:text-[color:var(--t-white,#fff)] cursor-pointer whitespace-nowrap flex-shrink-0"
           >
             Odśwież
           </button>
-          <span className="text-[11px] text-[#9a9a9a]">Kliknij lub przeciągnij (Shift – zachowaj proporcje płótna), aby wstawić. Dwuklik na obiekcie otwiera jego dokument w zakładce.</span>
+          <span className="text-[11px] text-[color:var(--h-9a9a9a,#9a9a9a)]">Kliknij lub przeciągnij (Shift – zachowaj proporcje płótna), aby wstawić. Dwuklik na obiekcie otwiera jego dokument w zakładce.</span>
         </div>
       ) : isShapeTool ? (
         /* Opcje figur geometrycznych */
         <div className="flex items-center gap-3 flex-1 flex-shrink-0">
           {/* Wybór kształtu */}
           <div className="flex items-center gap-1.5 flex-shrink-0">
-            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Kształt:</label>
+            <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Kształt:</label>
             <select
               value={vectorShapeSettings.shapeKind}
               onChange={(e) =>
                 onChangeVectorShapeSettings({ shapeKind: e.target.value as ShapeKind })
               }
-              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer font-medium"
+              className="h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-444444,#444444)] rounded px-1.5 text-xs text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[color:var(--h-007acc,#007acc)] cursor-pointer font-medium"
             >
               <option value="rect">Prostokąt</option>
               <option value="round-rect">Zaokrąglony prostokąt</option>
@@ -652,13 +652,13 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
 
           {/* Sposób wypełnienia */}
           <div className="flex items-center gap-1.5 flex-shrink-0">
-            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Wypełnienie:</label>
+            <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Wypełnienie:</label>
             <select
               value={vectorShapeSettings.fillMode}
               onChange={(e) =>
                 onChangeVectorShapeSettings({ fillMode: e.target.value as ShapeFillMode })
               }
-              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer font-medium"
+              className="h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-444444,#444444)] rounded px-1.5 text-xs text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[color:var(--h-007acc,#007acc)] cursor-pointer font-medium"
             >
               <option value="none">tylko obrys</option>
               <option value="primary">kolor główny</option>
@@ -668,7 +668,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
 
           {/* Grubość obrysu */}
           <div className="flex items-center gap-1.5 flex-shrink-0">
-            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Obrys:</label>
+            <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Obrys:</label>
             <LengthField
               valuePx={vectorShapeSettings.strokeWidth}
               minPx={0}
@@ -676,20 +676,20 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
               trackMaxPx={100}
               integerPx={!fractionalUnits}
               onCommitPx={(v) => onChangeVectorShapeSettings({ strokeWidth: v })}
-              className="w-14 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white focus:outline-none focus:border-[#007acc] font-mono"
+              className="w-14 h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-444444,#444444)] rounded px-1 text-center text-xs text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[color:var(--h-007acc,#007acc)] font-mono"
             />
             <UnitLabel />
           </div>
 
           {/* Narożnik */}
           <div className="flex items-center gap-1.5 flex-shrink-0">
-            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Narożnik:</label>
+            <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Narożnik:</label>
             <select
               value={vectorShapeSettings.strokeCornerJoin}
               onChange={(e) =>
                 onChangeVectorShapeSettings({ strokeCornerJoin: e.target.value as StrokeCornerJoin })
               }
-              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+              className="h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-444444,#444444)] rounded px-1.5 text-xs text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[color:var(--h-007acc,#007acc)] cursor-pointer"
             >
               <option value="miter">Prosty / Ostry</option>
               <option value="round">Zaokrąglony</option>
@@ -699,13 +699,13 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
 
           {/* Wyrównanie obrysu */}
           <div className="flex items-center gap-1.5 flex-shrink-0">
-            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Wyrównanie:</label>
+            <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Wyrównanie:</label>
             <select
               value={vectorShapeSettings.strokeAlignment}
               onChange={(e) =>
                 onChangeVectorShapeSettings({ strokeAlignment: e.target.value as StrokeAlignment })
               }
-              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+              className="h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-444444,#444444)] rounded px-1.5 text-xs text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[color:var(--h-007acc,#007acc)] cursor-pointer"
             >
               <option value="center">Do środka</option>
               <option value="inside">Do wewnątrz</option>
@@ -716,14 +716,14 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
           {/* Opcje specyficzne dla kształtu */}
           {vectorShapeSettings.shapeKind === 'round-rect' && (
             <div className="flex items-center gap-1 flex-shrink-0">
-              <label className="text-[11px] whitespace-nowrap text-[#aaa]">Promień:</label>
+              <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Promień:</label>
               <LengthField
                 valuePx={vectorShapeSettings.cornerRadius}
                 minPx={0}
                 maxPx={2000}
                 integerPx={!fractionalUnits}
                 onCommitPx={(v) => onChangeVectorShapeSettings({ cornerRadius: v })}
-                className="w-14 h-5 bg-[#1e1e1e] border border-[#444] rounded px-1 text-center text-xs text-white font-mono"
+                className="w-14 h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-444444,#444444)] rounded px-1 text-center text-xs text-[color:var(--t-white,#fff)] font-mono"
               />
               <UnitLabel />
             </div>
@@ -732,7 +732,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
           {vectorShapeSettings.shapeKind === 'star' && (
             <>
               <div className="flex items-center gap-1 flex-shrink-0">
-                <label className="text-[11px] whitespace-nowrap text-[#aaa]">Ramiona:</label>
+                <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Ramiona:</label>
                 <ScrubField
                   value={vectorShapeSettings.starPoints}
                   min={3}
@@ -742,7 +742,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
                 />
               </div>
               <div className="flex items-center gap-1 flex-shrink-0">
-                <label className="text-[11px] whitespace-nowrap text-[#aaa]">Ostrość:</label>
+                <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Ostrość:</label>
                 <ScrubField
                   value={Math.round((1 - vectorShapeSettings.starInnerRatio) * 100)}
                   min={10}
@@ -757,7 +757,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
 
           {vectorShapeSettings.shapeKind === 'polygon' && (
             <div className="flex items-center gap-1 flex-shrink-0">
-              <label className="text-[11px] whitespace-nowrap text-[#aaa]">Boki:</label>
+              <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Boki:</label>
               <ScrubField
                 value={vectorShapeSettings.polygonSides}
                 min={3}
@@ -771,7 +771,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
           {vectorShapeSettings.shapeKind === 'arrow' && (
             <>
               <div className="flex items-center gap-1 flex-shrink-0">
-                <label className="text-[11px] whitespace-nowrap text-[#aaa]">Grot:</label>
+                <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Grot:</label>
                 <ScrubField
                   value={Math.round(vectorShapeSettings.arrowHeadWidth * 100)}
                   min={15}
@@ -782,7 +782,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
                 />
               </div>
               <div className="flex items-center gap-1 flex-shrink-0">
-                <label className="text-[11px] whitespace-nowrap text-[#aaa]">Trzon:</label>
+                <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Trzon:</label>
                 <ScrubField
                   value={Math.round(vectorShapeSettings.arrowShaftThickness * 100)}
                   min={10}
@@ -802,11 +802,11 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
 
           {/* Tryb mieszania */}
           <div className="flex items-center gap-1.5 flex-shrink-0">
-            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Mieszanie:</label>
+            <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Mieszanie:</label>
             <select
               value={vectorShapeSettings.blendMode}
               onChange={(e) => onChangeVectorShapeSettings({ blendMode: e.target.value as SKBlendMode })}
-              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+              className="h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-444444,#444444)] rounded px-1.5 text-xs text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[color:var(--h-007acc,#007acc)] cursor-pointer"
             >
               {BLEND_MODES.map((mode) => (
                 <option key={mode.id} value={mode.id}>
@@ -830,13 +830,13 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
         <div className="flex items-center gap-3.5 flex-1 flex-shrink-0">
           {/* Próbkowanie: Warstwa / Obraz */}
           <div className="flex items-center gap-1.5">
-            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Próbkowanie:</label>
+            <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Próbkowanie:</label>
             <select
               value={pipetteSettings.sampleSource}
               onChange={(e) =>
                 onChangePipetteSettings({ sampleSource: e.target.value as 'image' | 'layer' })
               }
-              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#00bcd4] cursor-pointer font-medium"
+              className="h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-444444,#444444)] rounded px-1.5 text-xs text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[#00bcd4] cursor-pointer font-medium"
             >
               <option value="image">Obraz</option>
               <option value="layer">Warstwa</option>
@@ -845,7 +845,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
 
           {/* Średnica obszaru zbierania */}
           <div className="flex items-center gap-1.5">
-            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Średnica obszaru:</label>
+            <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Średnica obszaru:</label>
             <select
               value={
                 [1, 3, 5, 11, 31, 51].includes(pipetteSettings.sampleDiameter)
@@ -857,7 +857,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
                   onChangePipetteSettings({ sampleDiameter: parseInt(e.target.value) });
                 }
               }}
-              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#00bcd4] cursor-pointer"
+              className="h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-444444,#444444)] rounded px-1.5 text-xs text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[#00bcd4] cursor-pointer"
             >
               <option value={1}>1 px</option>
               <option value={3}>3 px</option>
@@ -876,7 +876,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
                 width={92}
                 onChange={(v) => onChangePipetteSettings({ sampleDiameter: v })}
               />
-              <span className="text-[10px] text-[#888]">px</span>
+              <span className="text-[10px] text-[color:var(--h-888888,#888888)]">px</span>
             </div>
           </div>
 
@@ -889,7 +889,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
         <div className="flex items-center gap-3 flex-1 flex-shrink-0">
           {activeTool === 'transform-content' && (
             <div className="flex items-center gap-1.5">
-              <label className="text-[11px] whitespace-nowrap text-[#aaa]">Próbkowanie:</label>
+              <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Próbkowanie:</label>
               <select
                 value={selectionSettings.interpolation || 'bilinear'}
                 onChange={(e) =>
@@ -897,7 +897,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
                     interpolation: e.target.value as 'nearest-neighbor' | 'bilinear' | 'bicubic',
                   })
                 }
-                className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer font-medium"
+                className="h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-444444,#444444)] rounded px-1.5 text-xs text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[color:var(--h-007acc,#007acc)] cursor-pointer font-medium"
               >
                 <option value="nearest-neighbor">Najbliższe sąsiedztwo</option>
                 <option value="bilinear">Dwuliniowe</option>
@@ -906,13 +906,13 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
             </div>
           )}
 
-          <div className="flex items-center gap-1 border-l border-[#444] pl-2">
+          <div className="flex items-center gap-1 border-l border-[color:var(--h-444444,#444444)] pl-2">
             <button
               type="button"
               onClick={onFlipHorizontal}
               disabled={flipDisabled}
               title={flipDisabled ? 'Niedostępne w trybie perspektywy' : "Odbij poziomo (Lustro w poziomie)"}
-              className={`flex items-center gap-1 px-2 h-5 bg-[#1e1e1e] rounded border border-[#444] text-[11px] ${flipDisabled ? 'opacity-40 cursor-not-allowed text-[#888]' : 'hover:bg-[#333] text-[#ddd] hover:text-white cursor-pointer'}`}
+              className={`flex items-center gap-1 px-2 h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] rounded border border-[color:var(--h-444444,#444444)] text-[11px] ${flipDisabled ? 'opacity-40 cursor-not-allowed text-[color:var(--h-888888,#888888)]' : 'hover:bg-[color:var(--h-333333,#333333)] text-[color:var(--h-dddddd,#dddddd)] hover:text-[color:var(--t-white,#fff)] cursor-pointer'}`}
             >
               <FlipHorizontal size={13} />
               <span>Odbij w poziomie</span>
@@ -922,7 +922,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
               onClick={onFlipVertical}
               disabled={flipDisabled}
               title={flipDisabled ? 'Niedostępne w trybie perspektywy' : "Odbij pionowo (Lustro w pionie)"}
-              className={`flex items-center gap-1 px-2 h-5 bg-[#1e1e1e] rounded border border-[#444] text-[11px] ${flipDisabled ? 'opacity-40 cursor-not-allowed text-[#888]' : 'hover:bg-[#333] text-[#ddd] hover:text-white cursor-pointer'}`}
+              className={`flex items-center gap-1 px-2 h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] rounded border border-[color:var(--h-444444,#444444)] text-[11px] ${flipDisabled ? 'opacity-40 cursor-not-allowed text-[color:var(--h-888888,#888888)]' : 'hover:bg-[color:var(--h-333333,#333333)] text-[color:var(--h-dddddd,#dddddd)] hover:text-[color:var(--t-white,#fff)] cursor-pointer'}`}
             >
               <FlipVertical size={13} />
               <span>Odbij w pionie</span>
@@ -933,13 +933,13 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
         /* Pasek opcji zaznaczania */
         <div className="flex items-center gap-3 flex-1 flex-shrink-0">
           <div className="flex items-center gap-1.5">
-            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Tryb:</label>
+            <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Tryb:</label>
             <select
               value={selectionSettings.mode}
               onChange={(e) =>
                 onChangeSelectionSettings({ mode: e.target.value as SelectionSettings['mode'] })
               }
-              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+              className="h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-444444,#444444)] rounded px-1.5 text-xs text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[color:var(--h-007acc,#007acc)] cursor-pointer"
             >
               <option value="replace">Zastąp zaznaczenie</option>
               <option value="add">Dodaj do zaznaczenia (Ctrl)</option>
@@ -952,7 +952,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
           {activeTool === 'select-lasso' && (
             <div className="flex items-center gap-1.5">
               <label
-                className="text-[11px] whitespace-nowrap text-[#aaa]"
+                className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]"
                 title="Odręczne: jedno pociągnięcie. Punkt po punkcie: klik = odcinek prosty, przeciągnięcie = linia odręczna od ostatniego punktu. Enter lub klik w pierwszy punkt zatwierdza, Backspace cofa punkt, Esc anuluje."
               >
                 Lasso:
@@ -960,7 +960,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
               <select
                 value={selectionSettings.lassoMode ?? 'freehand'}
                 onChange={(e) => onChangeSelectionSettings({ lassoMode: e.target.value as SelectionSettings['lassoMode'] })}
-                className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+                className="h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-444444,#444444)] rounded px-1.5 text-xs text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[color:var(--h-007acc,#007acc)] cursor-pointer"
               >
                 <option value="freehand">Odręczne</option>
                 <option value="polygon">Punkt po punkcie</option>
@@ -972,7 +972,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
           {(activeTool === 'select-rect' || activeTool === 'select-ellipse') && (
             <>
               <div className="flex items-center gap-1.5">
-                <label className="text-[11px] whitespace-nowrap text-[#aaa]">Rozmiar:</label>
+                <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Rozmiar:</label>
                 <select
                   value={selectionSettings.constraint || 'normal'}
                   onChange={(e) =>
@@ -980,7 +980,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
                       constraint: e.target.value as SelectionSettings['constraint'],
                     })
                   }
-                  className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer font-medium"
+                  className="h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-444444,#444444)] rounded px-1.5 text-xs text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[color:var(--h-007acc,#007acc)] cursor-pointer font-medium"
                 >
                   <option value="normal">Dowolny rozmiar</option>
                   <option value="fixed-ratio">Ustalone proporcje</option>
@@ -989,8 +989,8 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
               </div>
 
               {selectionSettings.constraint === 'fixed-ratio' && (
-                <div className="flex items-center gap-1.5 bg-[#1e1e1e] px-1.5 py-0.5 rounded border border-[#3e3e3e]">
-                  <label className="text-[11px] whitespace-nowrap text-[#aaa]">Proporcja:</label>
+                <div className="flex items-center gap-1.5 bg-[color:var(--h-1e1e1e,#1e1e1e)] px-1.5 py-0.5 rounded border border-[color:var(--h-3e3e3e,#3e3e3e)]">
+                  <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Proporcja:</label>
                   <ScrubField
                     value={selectionSettings.ratioW}
                     min={0.1}
@@ -1002,7 +1002,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
                     title="Szerokość proporcji"
                     onChange={(v) => onChangeSelectionSettings({ ratioW: v })}
                   />
-                  <span className="text-xs text-[#888] font-bold">:</span>
+                  <span className="text-xs text-[color:var(--h-888888,#888888)] font-bold">:</span>
                   <ScrubField
                     value={selectionSettings.ratioH}
                     min={0.1}
@@ -1018,8 +1018,8 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
               )}
 
               {selectionSettings.constraint === 'fixed-size' && (
-                <div className="flex items-center gap-1.5 bg-[#1e1e1e] px-1.5 py-0.5 rounded border border-[#3e3e3e]">
-                  <label className="text-[11px] whitespace-nowrap text-[#aaa]">Szer.:</label>
+                <div className="flex items-center gap-1.5 bg-[color:var(--h-1e1e1e,#1e1e1e)] px-1.5 py-0.5 rounded border border-[color:var(--h-3e3e3e,#3e3e3e)]">
+                  <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Szer.:</label>
                   <ScrubField
                     value={selectionSettings.fixedW}
                     min={1}
@@ -1028,9 +1028,9 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
                     width={92}
                     onChange={(v) => onChangeSelectionSettings({ fixedW: v })}
                   />
-                  <span className="text-[10px] text-[#888]">px</span>
+                  <span className="text-[10px] text-[color:var(--h-888888,#888888)]">px</span>
 
-                  <label className="text-[11px] whitespace-nowrap text-[#aaa] ml-1">Wys.:</label>
+                  <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)] ml-1">Wys.:</label>
                   <ScrubField
                     value={selectionSettings.fixedH}
                     min={1}
@@ -1039,14 +1039,14 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
                     width={92}
                     onChange={(v) => onChangeSelectionSettings({ fixedH: v })}
                   />
-                  <span className="text-[10px] text-[#888]">px</span>
+                  <span className="text-[10px] text-[color:var(--h-888888,#888888)]">px</span>
                 </div>
               )}
             </>
           )}
 
           <div className="flex items-center gap-1.5">
-            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Wtapianie:</label>
+            <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Wtapianie:</label>
             <ScrubField
               value={selectionSettings.feather}
               min={0}
@@ -1054,13 +1054,13 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
               width={64}
               onChange={(v) => onChangeSelectionSettings({ feather: v })}
             />
-            <span className="text-[10px] text-[#888]">px</span>
+            <span className="text-[10px] text-[color:var(--h-888888,#888888)]">px</span>
           </div>
 
           {activeTool === 'magic-wand' && (
             <>
               <div className="flex items-center gap-1.5">
-                <label className="text-[11px] whitespace-nowrap text-[#aaa]">Tolerancja:</label>
+                <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Tolerancja:</label>
                 <ScrubField
                   value={selectionSettings.tolerance}
                   min={0}
@@ -1072,7 +1072,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
               </div>
 
               <div className="flex items-center gap-1.5">
-                <label className="text-[11px] whitespace-nowrap text-[#aaa]">Zakres:</label>
+                <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Zakres:</label>
                 <select
                   value={selectionSettings.wandMode}
                   onChange={(e) =>
@@ -1080,7 +1080,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
                       wandMode: e.target.value as SelectionSettings['wandMode'],
                     })
                   }
-                  className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white"
+                  className="h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-444444,#444444)] rounded px-1.5 text-xs text-[color:var(--t-white,#fff)]"
                 >
                   <option value="contiguous">Obszar ciągły</option>
                   <option value="global">Cały obraz</option>
@@ -1089,7 +1089,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
 
               {/* Próbkowanie dla Magicznej różdżki (Obraz / Warstwa) */}
               <div className="flex items-center gap-1.5">
-                <label className="text-[11px] whitespace-nowrap text-[#aaa]">Próbkowanie:</label>
+                <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Próbkowanie:</label>
                 <select
                   value={selectionSettings.sampleSource || 'image'}
                   onChange={(e) =>
@@ -1097,7 +1097,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
                       sampleSource: e.target.value as 'image' | 'layer',
                     })
                   }
-                  className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+                  className="h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-444444,#444444)] rounded px-1.5 text-xs text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[color:var(--h-007acc,#007acc)] cursor-pointer"
                 >
                   <option value="image">Obraz</option>
                   <option value="layer">Warstwa</option>
@@ -1110,13 +1110,13 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
         /* Pasek opcji gradientu */
         <div className="flex items-center gap-3 flex-1 flex-shrink-0">
           <div className="flex items-center gap-1.5">
-            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Kształt:</label>
+            <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Kształt:</label>
             <select
               value={gradientSettings?.type || 'linear'}
               onChange={(e) =>
                 onChangeGradientSettings?.({ type: e.target.value as GradientSettings['type'] })
               }
-              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#00bcd4] cursor-pointer"
+              className="h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-444444,#444444)] rounded px-1.5 text-xs text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[#00bcd4] cursor-pointer"
             >
               <option value="linear">Liniowy</option>
               <option value="radial">Kolisty</option>
@@ -1130,13 +1130,13 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
 
           {/* Powtarzanie */}
           <div className="flex items-center gap-1.5">
-            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Powtarzanie:</label>
+            <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Powtarzanie:</label>
             <select
               value={gradientSettings?.repeat || 'none'}
               onChange={(e) =>
                 onChangeGradientSettings?.({ repeat: e.target.value as any })
               }
-              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#00bcd4] cursor-pointer"
+              className="h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-444444,#444444)] rounded px-1.5 text-xs text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[#00bcd4] cursor-pointer"
             >
               <option value="none">Nie powtarzaj</option>
               <option value="repeat">Powtarzaj</option>
@@ -1145,13 +1145,13 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
 
           {/* Mieszanie */}
           <div className="flex items-center gap-1.5">
-            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Mieszanie:</label>
+            <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Mieszanie:</label>
             <select
               value={gradientSettings?.blendMode || 'SrcOver'}
               onChange={(e) =>
                 onChangeGradientSettings?.({ blendMode: e.target.value as SKBlendMode })
               }
-              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#00bcd4] cursor-pointer"
+              className="h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-444444,#444444)] rounded px-1.5 text-xs text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[#00bcd4] cursor-pointer"
             >
               {BLEND_MODES.map((mode) => (
                 <option key={mode.id} value={mode.id}>
@@ -1175,7 +1175,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
         <div className="flex items-center gap-3 flex-1 flex-shrink-0">
           {/* Tolerancja */}
           <div className="flex items-center gap-1.5">
-            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Tolerancja:</label>
+            <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Tolerancja:</label>
             <ScrubField
               value={selectionSettings.tolerance}
               min={0}
@@ -1188,7 +1188,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
 
           {/* Zakres / Ciągłość */}
           <div className="flex items-center gap-1.5">
-            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Zakres:</label>
+            <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Zakres:</label>
             <select
               value={selectionSettings.wandMode || 'contiguous'}
               onChange={(e) =>
@@ -1196,7 +1196,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
                   wandMode: e.target.value as SelectionSettings['wandMode'],
                 })
               }
-              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#ff9800] cursor-pointer"
+              className="h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-444444,#444444)] rounded px-1.5 text-xs text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[#ff9800] cursor-pointer"
             >
               <option value="contiguous">Obszar ciągły</option>
               <option value="global">Cały obraz</option>
@@ -1205,7 +1205,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
 
           {/* Próbkowanie */}
           <div className="flex items-center gap-1.5">
-            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Próbkowanie:</label>
+            <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Próbkowanie:</label>
             <select
               value={selectionSettings.sampleSource || 'image'}
               onChange={(e) =>
@@ -1213,7 +1213,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
                   sampleSource: e.target.value as SelectionSettings['sampleSource'],
                 })
               }
-              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#ff9800] cursor-pointer font-medium"
+              className="h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-444444,#444444)] rounded px-1.5 text-xs text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[#ff9800] cursor-pointer font-medium"
             >
               <option value="image">Obraz</option>
               <option value="layer">Warstwa</option>
@@ -1227,11 +1227,11 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
 
           {/* Tryb mieszania */}
           <div className="flex items-center gap-1.5">
-            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Mieszanie:</label>
+            <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Mieszanie:</label>
             <select
               value={brushSettings.blendMode}
               onChange={(e) => onChangeSettings({ blendMode: e.target.value as SKBlendMode })}
-              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#ff9800] cursor-pointer"
+              className="h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-444444,#444444)] rounded px-1.5 text-xs text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[#ff9800] cursor-pointer"
             >
               {BLEND_MODES.map((mode) => (
                 <option key={mode.id} value={mode.id}>
@@ -1246,7 +1246,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
         <div className="flex items-center gap-3 flex-1 flex-shrink-0">
           {/* Rodzaj korekcji */}
           <div className="flex items-center gap-1.5">
-            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Działanie:</label>
+            <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Działanie:</label>
             <select
               value={correctionBrushSettings.brushType}
               onChange={(e) =>
@@ -1254,7 +1254,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
                   brushType: e.target.value as CorrectionBrushType,
                 })
               }
-              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer font-medium"
+              className="h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-444444,#444444)] rounded px-1.5 text-xs text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[color:var(--h-007acc,#007acc)] cursor-pointer font-medium"
             >
               <option value="dodge-burn">Rozjaśnij / Ściemnij</option>
               <option value="blur-sharpen">Rozmyj / Wyostrz</option>
@@ -1298,7 +1298,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
               width={92}
               onChange={(v) => onChangeCorrectionBrushSettings?.({ spacing: v })}
             />
-            <span className="text-[10px] text-[#888]">%</span>
+            <span className="text-[10px] text-[color:var(--h-888888,#888888)]">%</span>
 
           </div>
 
@@ -1308,8 +1308,8 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
           </ToggleButton>
 
           {/* Intensywność (zależna od kanału Alfa) */}
-          <div className="flex items-center gap-1.5 border-l border-[#444] pl-2.5">
-            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Intensywność:</label>
+          <div className="flex items-center gap-1.5 border-l border-[color:var(--h-444444,#444444)] pl-2.5">
+            <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Intensywność:</label>
             <ScrubField
               value={Math.round(((primaryColor?.a ?? 255) / 255) * 100)}
               min={1}
@@ -1326,7 +1326,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
         <div className="flex items-center gap-3 flex-1 flex-shrink-0">
           {/* Tryb: Pojedynczy / Kolor dodatkowy */}
           <div className="flex items-center gap-1.5">
-            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Tryb:</label>
+            <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Tryb:</label>
             <select
               value={colorReplaceSettings.mode}
               onChange={(e) =>
@@ -1334,7 +1334,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
                   mode: e.target.value as ColorReplaceMode,
                 })
               }
-              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#10b981] cursor-pointer font-medium"
+              className="h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-444444,#444444)] rounded px-1.5 text-xs text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[#10b981] cursor-pointer font-medium"
             >
               <option value="single">Pojedynczy (próbkowany)</option>
               <option value="secondary">Kolor dodatkowy</option>
@@ -1342,8 +1342,8 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
           </div>
 
           {/* Tolerancja */}
-          <div className="flex items-center gap-1.5 border-l border-[#444] pl-2.5">
-            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Tolerancja:</label>
+          <div className="flex items-center gap-1.5 border-l border-[color:var(--h-444444,#444444)] pl-2.5">
+            <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Tolerancja:</label>
             <ScrubField
               value={colorReplaceSettings.tolerance}
               min={0}
@@ -1351,12 +1351,12 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
               width={92}
               onChange={(v) => onChangeColorReplaceSettings?.({ tolerance: v })}
             />
-            <span className="text-[10px] text-[#888] font-mono w-6">{colorReplaceSettings.tolerance}%</span>
+            <span className="text-[10px] text-[color:var(--h-888888,#888888)] font-mono w-6">{colorReplaceSettings.tolerance}%</span>
 
           </div>
 
           {/* Rozmiar */}
-          <div className="flex items-center gap-1.5 border-l border-[#444] pl-2.5">
+          <div className="flex items-center gap-1.5 border-l border-[color:var(--h-444444,#444444)] pl-2.5">
             <label className="text-[11px] whitespace-nowrap">Rozmiar:</label>
             <ScrubField
               value={colorReplaceSettings.size}
@@ -1391,7 +1391,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
               width={92}
               onChange={(v) => onChangeColorReplaceSettings?.({ spacing: v })}
             />
-            <span className="text-[10px] text-[#888]">%</span>
+            <span className="text-[10px] text-[color:var(--h-888888,#888888)]">%</span>
 
           </div>
         </div>
@@ -1413,7 +1413,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
           </div>
 
           {/* Twardość */}
-          <div className="flex items-center gap-1.5 border-l border-[#444] pl-2.5">
+          <div className="flex items-center gap-1.5 border-l border-[color:var(--h-444444,#444444)] pl-2.5">
             <label className="text-[11px] whitespace-nowrap">Twardość:</label>
             <ScrubField value={stampSettings.hardness} min={0} max={100} suffix="%" width={80} onChange={(v) => onChangeStampSettings?.({ hardness: v })} />
           </div>
@@ -1424,7 +1424,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
           </ToggleButton>
 
           {/* Odstęp */}
-          <div className="flex items-center gap-1.5 border-l border-[#444] pl-2.5">
+          <div className="flex items-center gap-1.5 border-l border-[color:var(--h-444444,#444444)] pl-2.5">
             <label className="text-[11px] whitespace-nowrap">Odstęp:</label>
             <ScrubField
               value={stampSettings.spacing}
@@ -1434,17 +1434,17 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
               width={92}
               onChange={(v) => onChangeStampSettings?.({ spacing: v })}
             />
-            <span className="text-[10px] text-[#888]">%</span>
+            <span className="text-[10px] text-[color:var(--h-888888,#888888)]">%</span>
 
           </div>
 
           {/* Tryb mieszania */}
-          <div className="flex items-center gap-1.5 border-l border-[#444] pl-2.5">
+          <div className="flex items-center gap-1.5 border-l border-[color:var(--h-444444,#444444)] pl-2.5">
             <label className="text-[11px] whitespace-nowrap">Mieszanie:</label>
             <select
               value={stampSettings.blendMode}
               onChange={(e) => onChangeStampSettings?.({ blendMode: e.target.value as SKBlendMode })}
-              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+              className="h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-444444,#444444)] rounded px-1.5 text-xs text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[color:var(--h-007acc,#007acc)] cursor-pointer"
             >
               {BLEND_MODES.map((mode) => (
                 <option key={mode.id} value={mode.id}>
@@ -1455,12 +1455,12 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
           </div>
 
           {/* Próbkowanie (obraz / warstwa) */}
-          <div className="flex items-center gap-1.5 border-l border-[#444] pl-2.5">
+          <div className="flex items-center gap-1.5 border-l border-[color:var(--h-444444,#444444)] pl-2.5">
             <label className="text-[11px] whitespace-nowrap">Próbkowanie:</label>
             <select
               value={stampSettings.sampleSource}
               onChange={(e) => onChangeStampSettings?.({ sampleSource: e.target.value as StampSampleSource })}
-              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+              className="h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-444444,#444444)] rounded px-1.5 text-xs text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[color:var(--h-007acc,#007acc)] cursor-pointer"
             >
               <option value="image">Obraz</option>
               <option value="layer">Warstwa</option>
@@ -1468,12 +1468,12 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
           </div>
 
           {/* Punkt bazowy (nieruchomy / wybrany / względny) */}
-          <div className="flex items-center gap-1.5 border-l border-[#444] pl-2.5">
+          <div className="flex items-center gap-1.5 border-l border-[color:var(--h-444444,#444444)] pl-2.5">
             <label className="text-[11px] whitespace-nowrap">Punkt bazowy:</label>
             <select
               value={stampSettings.sourceMode}
               onChange={(e) => onChangeStampSettings?.({ sourceMode: e.target.value as StampSourceMode })}
-              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+              className="h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-444444,#444444)] rounded px-1.5 text-xs text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[color:var(--h-007acc,#007acc)] cursor-pointer"
             >
               <option value="relative">Względny</option>
               <option value="selected">Wybrany</option>
@@ -1482,8 +1482,8 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
           </div>
 
           {/* Krycie (z kanału alfa koloru) */}
-          <div className="flex items-center gap-1.5 border-l border-[#444] pl-2.5">
-            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Krycie:</label>
+          <div className="flex items-center gap-1.5 border-l border-[color:var(--h-444444,#444444)] pl-2.5">
+            <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Krycie:</label>
             <ScrubField
               value={Math.round(((primaryColor?.a ?? 255) / 255) * 100)}
               min={1}
@@ -1500,7 +1500,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
         <div className="flex items-center gap-3 flex-1 flex-shrink-0">
           {/* Rodzaj działania */}
           <div className="flex items-center gap-1.5">
-            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Działanie:</label>
+            <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Działanie:</label>
             <select
               value={deformSettings.actionType}
               onChange={(e) =>
@@ -1508,7 +1508,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
                   actionType: e.target.value as DeformActionType,
                 })
               }
-              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer font-medium"
+              className="h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-444444,#444444)] rounded px-1.5 text-xs text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[color:var(--h-007acc,#007acc)] cursor-pointer font-medium"
             >
               <option value="expand-shrink">Zwiększ / Zmniejsz</option>
               <option value="smudge">Przesuń</option>
@@ -1552,7 +1552,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
               width={92}
               onChange={(v) => onChangeDeformSettings?.({ spacing: v })}
             />
-            <span className="text-[10px] text-[#888]">%</span>
+            <span className="text-[10px] text-[color:var(--h-888888,#888888)]">%</span>
 
           </div>
 
@@ -1562,8 +1562,8 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
           </ToggleButton>
 
           {/* Intensywność (zależna od kanału Alfa) */}
-          <div className="flex items-center gap-1.5 border-l border-[#444] pl-2.5">
-            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Intensywność:</label>
+          <div className="flex items-center gap-1.5 border-l border-[color:var(--h-444444,#444444)] pl-2.5">
+            <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Intensywność:</label>
             <ScrubField
               value={Math.round(((primaryColor?.a ?? 255) / 255) * 100)}
               min={1}
@@ -1582,13 +1582,13 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
         /* Manipulacja: tryb zaznaczania obiektów jak w zaznaczaniu prostokątnym */
         <div className="flex items-center gap-3 flex-1 flex-shrink-0">
           <div className="flex items-center gap-1.5">
-            <label className="text-[11px] whitespace-nowrap text-[#aaa]">Tryb:</label>
+            <label className="text-[11px] whitespace-nowrap text-[color:var(--h-aaaaaa,#aaaaaa)]">Tryb:</label>
             <select
               value={selectionSettings.mode}
               onChange={(e) =>
                 onChangeSelectionSettings({ mode: e.target.value as SelectionSettings['mode'] })
               }
-              className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+              className="h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-444444,#444444)] rounded px-1.5 text-xs text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[color:var(--h-007acc,#007acc)] cursor-pointer"
             >
               <option value="replace">Zastąp zaznaczenie</option>
               <option value="add">Dodaj do zaznaczenia (Ctrl)</option>
@@ -1637,7 +1637,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
               width={92}
               onChange={(v) => onChangeSettings({ spacing: v })}
             />
-            <span className="text-[10px] text-[#888]">%</span>
+            <span className="text-[10px] text-[color:var(--h-888888,#888888)]">%</span>
 
           </div>
 
@@ -1648,7 +1648,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = ({
               <select
                 value={brushSettings.blendMode}
                 onChange={(e) => onChangeSettings({ blendMode: e.target.value as SKBlendMode })}
-                className="h-5 bg-[#1e1e1e] border border-[#444] rounded px-1.5 text-xs text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+                className="h-5 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-444444,#444444)] rounded px-1.5 text-xs text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[color:var(--h-007acc,#007acc)] cursor-pointer"
               >
                 {BLEND_MODES.map((mode) => (
                   <option key={mode.id} value={mode.id}>

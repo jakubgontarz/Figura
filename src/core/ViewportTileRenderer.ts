@@ -8,6 +8,7 @@ import { SKBlendMode, SKRectI, getCanvasCompositeOperation } from './types.ts';
 import { markWindowedContext } from './VectorRenderer.ts';
 import { grayToAlpha, finishPassThrough } from './Layer.ts';
 import type { FxContext } from './Filters.ts';
+import { settings } from './Settings.ts';
 import { GpuComposer, type GpuPreviewSource, type GpuWindow } from './GpuCompose.ts';
 
 /**
@@ -50,7 +51,6 @@ const TIE_EPS = 0.002;
  * render (wyostrzenie) startuje dopiero, gdy widok przestanie się zmieniać na tyle ms. Zoomowanie nie "regeneruje" więc
  * kafelków na oczach użytkownika.
  */
-const REFINE_DELAY_MS = 100;
 
 /**
  * Jeśli szacowany koszt odświeżenia całego bloku jest nie większy niż tyle (ms), idzie on jako JEDNO zadanie
@@ -73,7 +73,6 @@ const MAX_JOB_RASTER_PX = 2 * 1024 * 1024;
  * Powyżej CACHE_MAX_PX pikseli (4 bajty każdy) pamięć nie jest budowana i podgląd jest renderowany po każdej zmianie widoku.
  */
 const CACHE_GROUP = 4;
-const CACHE_MAX_PX = 32 * 1000 * 1000;
 /** Czas (ms) bez nowej prośby, po którym zaczyna się budowa pamięci podręcznej. */
 const CACHE_MARGIN = 32;
 const CACHE_START_DELAY_MS = 60;
@@ -98,12 +97,8 @@ const LAYER_GROUP_MIN_BLOCK_PX = 150 * 1000;
  */
 const INTERACTION_GAP_MS = 150;
 /** false = podgląd zawsze w pełnej rozdzielczości (bez rozmycia podczas przeciągania, ale wolniejsze klatki przy dużych figurach). */
-const LOD_ENABLED = true;
 /** Niska rozdzielczość tylko, gdy pełny render bloku miałby trwać dłużej niż tyle ms (kilka klatek); poniżej zawsze ostro. */
-const LOD_MIN_EST_MS = 45;
 /** Najniższa rozdzielczość: połowa (ćwiartka była zbyt widocznie rozmyta). */
-const LOD_LEVEL = 0.5;
-const REFINE_EXACT_DELAY_MS = 70;
 /** Sprite przesuwanego podglądu: górny limit rozmiaru (piksele ekranu). */
 const SPRITE_MAX_PX = 16 * 1000 * 1000;
 
@@ -798,7 +793,7 @@ export class ViewportTileRenderer {
       fullRestore = true;
       viewChanged = false;
     }
-    this.deferUntil = viewChanged ? performance.now() + REFINE_DELAY_MS : 0;
+    this.deferUntil = viewChanged ? performance.now() + settings.render().refineDelayMs : 0;
     const whole: Rect = { x0: 0, y0: 0, x1: v.width, y1: v.height };
     const prevBlk = this.prevBlk;
     this.prevBlk = null;
@@ -881,10 +876,10 @@ export class ViewportTileRenderer {
     }
     // Niska rozdzielczość: tylko podczas interakcji, dla podglądów z kluczem (wszystko poza tekstem) i bez zmiany widoku.
     // Histereza (prevLod): raz wybrana niska rozdzielczość trzyma się do wyraźnego spadku szacowanego kosztu.
-    if (LOD_ENABLED && !exact && interacting && fullKey !== null && !viewChanged) {
+    if (settings.render().lod && !exact && interacting && fullKey !== null && !viewChanged) {
       const estFull = (this.msPerKpx * blockPx) / 1000;
-      const thr = prevLod < 1 ? LOD_MIN_EST_MS * 0.7 : LOD_MIN_EST_MS;
-      if (estFull > thr) this.lod = LOD_LEVEL;
+      const thr = prevLod < 1 ? settings.render().lodMinMs * 0.7 : settings.render().lodMinMs;
+      if (estFull > thr) this.lod = settings.render().lodLevel;
     }
     // Nowe bufory warstw buduje się tylko poza przeciąganiem (budowa kawałka to jednorazowy skok kosztu); istniejące działają zawsze
     this.bigBlock = this.sliceAllowed && blockPx >= LAYER_GROUP_MIN_BLOCK_PX;
@@ -1447,7 +1442,7 @@ export class ViewportTileRenderer {
       this.refineTimer = 0;
       const r = this.lastReq;
       if (r && this.view) this.request({ view: r.view, preview: r.preview, focus: r.focus, exact: true });
-    }, REFINE_EXACT_DELAY_MS);
+    }, settings.render().refineExactDelayMs);
   }
 
   private dropDocSprite(): void {
@@ -1608,7 +1603,7 @@ export class ViewportTileRenderer {
     const ux1 = Math.floor((eff.x1 - 1) / T);
     const uy1 = Math.floor((eff.y1 - 1) / T);
     const px = (Math.min(eng.width, (ux1 + 1) * T) - ux0 * T) * (Math.min(eng.height, (uy1 + 1) * T) - uy0 * T);
-    if (px <= 0 || px > CACHE_MAX_PX) return false;
+    if (px <= 0 || px > (settings.get().previewCacheMB * 1_000_000) / 4) return false;
 
     const chunks: CacheChunk[] = [];
     for (let gy = uy0; gy <= uy1; gy += CACHE_GROUP) {

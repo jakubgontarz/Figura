@@ -42,7 +42,7 @@ const BIG = 1e6;
 
 const Row: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
   <div className="flex items-center gap-1.5">
-    <span className="w-[34px] text-[10.5px] text-[#aaa] shrink-0">{label}</span>
+    <span className="w-[34px] text-[10.5px] text-[color:var(--h-aaaaaa,#aaaaaa)] shrink-0">{label}</span>
     {children}
   </div>
 );
@@ -64,7 +64,7 @@ const rot = (x: number, y: number, a: number) => ({ x: x * Math.cos(a) - y * Mat
 
 const SliderRow: React.FC<{ label: string; title: string; value: number; min: number; max: number; onChange: (v: number) => void }> = ({ label, title, value, min, max, onChange }) => (
   <div className="flex items-center gap-1.5">
-    <span className="w-[44px] text-[10.5px] text-[#aaa] shrink-0">{label}</span>
+    <span className="w-[44px] text-[10.5px] text-[color:var(--h-aaaaaa,#aaaaaa)] shrink-0">{label}</span>
     <ScrubField value={Math.round(value * 100)} min={min} max={max} suffix="%" width={92} title={title} onChange={(v) => onChange(v / 100)} />
   </div>
 );
@@ -125,9 +125,9 @@ const BoxEditor: React.FC<{ label: string; box: { cx: number; cy: number; w: num
     const deg = (angle * 180) / Math.PI;
     return (
       <div className="flex flex-col gap-2.5 text-xs" data-testid="props-box">
-        <div className="text-[11px] text-[#ccc] font-semibold">{label}</div>
+        <div className="text-[11px] text-[color:var(--h-cccccc,#cccccc)] font-semibold">{label}</div>
         <div className="flex gap-3 items-start">
-          <div title="Punkt odniesienia ramki" className="grid grid-cols-3 gap-[3px] p-1 bg-[#252525] border border-[#444] rounded">
+          <div title="Punkt odniesienia ramki" className="grid grid-cols-3 gap-[3px] p-1 bg-[color:var(--h-252525,#252525)] border border-[color:var(--h-444444,#444444)] rounded">
             {[-1, 0, 1].map((ay) =>
               [-1, 0, 1].map((ax) => (
                 <button
@@ -135,7 +135,7 @@ const BoxEditor: React.FC<{ label: string; box: { cx: number; cy: number; w: num
                   type="button"
                   data-anchor={`${ax},${ay}`}
                   onClick={() => setAnchor({ ax, ay })}
-                  className={`w-3.5 h-3.5 border cursor-pointer ${anchor.ax === ax && anchor.ay === ay ? 'bg-[#007acc] border-[#4db2ff]' : 'bg-[#1a1a1a] border-[#555] hover:bg-[#333]'}`}
+                  className={`w-3.5 h-3.5 border cursor-pointer ${anchor.ax === ax && anchor.ay === ay ? 'bg-[color:var(--h-007acc,#007acc)] border-[#4db2ff]' : 'bg-[color:var(--h-1a1a1a,#1a1a1a)] border-[color:var(--h-555555,#555555)] hover:bg-[color:var(--h-333333,#333333)]'}`}
                 />
               ))
             )}
@@ -158,7 +158,7 @@ const BoxEditor: React.FC<{ label: string; box: { cx: number; cy: number; w: num
             onClick={() => setLock((l) => !l)}
             title={lock ? 'Proporcje zablokowane' : 'Zablokuj proporcje'}
             data-testid="props-lock"
-            className={`h-7 w-7 flex items-center justify-center rounded border cursor-pointer ${lock ? 'bg-[#094771] border-[#007acc] text-white' : 'bg-[#252525] border-[#444] text-[#aaa] hover:text-white'}`}
+            className={`h-7 w-7 flex items-center justify-center rounded border cursor-pointer ${lock ? 'bg-[color:var(--h-094771,#094771)] border-[color:var(--h-007acc,#007acc)] text-white' : 'bg-[color:var(--h-252525,#252525)] border-[color:var(--h-444444,#444444)] text-[color:var(--h-aaaaaa,#aaaaaa)] hover:text-[color:var(--t-white,#fff)]'}`}
           >
             {lock ? <Link2 size={14} /> : <Link2Off size={14} />}
           </button>
@@ -177,7 +177,7 @@ const BoxEditor: React.FC<{ label: string; box: { cx: number; cy: number; w: num
             testId="props-angle"
             onChange={(v) => apply(w, h, (v * Math.PI) / 180, P)}
           />
-          <span className="text-[10px] text-[#888]">°</span>
+          <span className="text-[10px] text-[color:var(--h-888888,#888888)]">°</span>
         </Row>
         {box.shape && <ShapeExtrasEditor shape={box.shape} api={api} />}
       </div>
@@ -201,7 +201,7 @@ const PathEditor: React.FC<{ desc: Extract<PropsDescriptor, { kind: 'path' }>; a
     if (v >= 0) api.selectNode(v);
   };
   const n = t >= 0 ? desc.nodes[t] : null;
-  const btn = 'h-5 px-1.5 flex items-center bg-[#2a2a2a] border border-[#444] rounded text-[#ccc] cursor-pointer disabled:opacity-40';
+  const btn = 'h-5 px-1.5 flex items-center bg-[color:var(--h-2a2a2a,#2a2a2a)] border border-[color:var(--h-444444,#444444)] rounded text-[color:var(--h-cccccc,#cccccc)] cursor-pointer disabled:opacity-40';
   return (
     <div className="flex flex-col gap-2.5 text-xs" data-testid="props-path">
       <div className="flex items-center gap-1">
@@ -211,7 +211,7 @@ const PathEditor: React.FC<{ desc: Extract<PropsDescriptor, { kind: 'path' }>; a
           onChange={(e) => go(parseInt(e.target.value, 10))}
           data-testid="path-select"
           title="Kształt krzywej lub jej punkt"
-          className="h-5 flex-1 min-w-0 bg-[#222] border border-[#444] rounded px-1 text-[11px] text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+          className="h-5 flex-1 min-w-0 bg-[color:var(--h-222222,#222222)] border border-[color:var(--h-444444,#444444)] rounded px-1 text-[11px] text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[color:var(--h-007acc,#007acc)] cursor-pointer"
         >
           {desc.box && <option value={-1}>Kształt</option>}
           {desc.nodes.map((_, i) => (
@@ -224,18 +224,18 @@ const PathEditor: React.FC<{ desc: Extract<PropsDescriptor, { kind: 'path' }>; a
       {n && (
         <>
           <div>
-            <div className="text-[10.5px] text-[#888] mb-1">Punkt węzła</div>
+            <div className="text-[10.5px] text-[color:var(--h-888888,#888888)] mb-1">Punkt węzła</div>
             <XY x={n.x} y={n.y} onChange={(x, y) => api.setNodePoint(t, 'anchor', x, y)} />
           </div>
           {n.hin && (
             <div>
-              <div className="text-[10.5px] text-[#888] mb-1">Uchwyt przed punktem</div>
+              <div className="text-[10.5px] text-[color:var(--h-888888,#888888)] mb-1">Uchwyt przed punktem</div>
               <XY x={n.hin.x} y={n.hin.y} onChange={(x, y) => api.setNodePoint(t, 'hin', x, y)} />
             </div>
           )}
           {n.hout && (
             <div>
-              <div className="text-[10.5px] text-[#888] mb-1">Uchwyt po punkcie</div>
+              <div className="text-[10.5px] text-[color:var(--h-888888,#888888)] mb-1">Uchwyt po punkcie</div>
               <XY x={n.hout.x} y={n.hout.y} onChange={(x, y) => api.setNodePoint(t, 'hout', x, y)} />
             </div>
           )}
@@ -251,21 +251,21 @@ const GuideEditor: React.FC<{ desc: Extract<PropsDescriptor, { kind: 'guide' }>;
   const name = (g: { axis: 'h' | 'v' }, i: number) => `${g.axis === 'v' ? 'Pionowa' : 'Pozioma'} ${i + 1}`;
   return (
     <div className="flex flex-col gap-2.5 text-xs" data-testid="props-guide">
-      <div className="text-[11px] text-[#ccc] font-semibold">Prowadnice obrazu</div>
+      <div className="text-[11px] text-[color:var(--h-cccccc,#cccccc)] font-semibold">Prowadnice obrazu</div>
       <div className="flex items-center gap-1">
-        <button type="button" data-testid="guide-prev" title="Poprzednia prowadnica" disabled={idx <= 0} onClick={() => api.selectGuide(desc.guides[idx - 1].id)} className="h-5 px-1.5 flex items-center bg-[#2a2a2a] border border-[#444] rounded text-[#ccc] cursor-pointer disabled:opacity-40"><ChevronLeft size={14} /></button>
+        <button type="button" data-testid="guide-prev" title="Poprzednia prowadnica" disabled={idx <= 0} onClick={() => api.selectGuide(desc.guides[idx - 1].id)} className="h-5 px-1.5 flex items-center bg-[color:var(--h-2a2a2a,#2a2a2a)] border border-[color:var(--h-444444,#444444)] rounded text-[color:var(--h-cccccc,#cccccc)] cursor-pointer disabled:opacity-40"><ChevronLeft size={14} /></button>
       <select
         data-testid="guide-select"
         value={sel?.id ?? ''}
         onChange={(e) => api.selectGuide(e.target.value)}
-        className="h-5 flex-1 min-w-0 bg-[#222] border border-[#444] rounded px-1 text-[11px] text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+        className="h-5 flex-1 min-w-0 bg-[color:var(--h-222222,#222222)] border border-[color:var(--h-444444,#444444)] rounded px-1 text-[11px] text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[color:var(--h-007acc,#007acc)] cursor-pointer"
       >
         {!sel && <option value="">(wybierz prowadnicę)</option>}
         {desc.guides.map((g, i) => (
           <option key={g.id} value={g.id}>{name(g, i)}</option>
         ))}
       </select>
-        <button type="button" data-testid="guide-next" title="Następna prowadnica" disabled={idx >= desc.guides.length - 1} onClick={() => api.selectGuide(desc.guides[idx + 1].id)} className="h-5 px-1.5 flex items-center bg-[#2a2a2a] border border-[#444] rounded text-[#ccc] cursor-pointer disabled:opacity-40"><ChevronRight size={14} /></button>
+        <button type="button" data-testid="guide-next" title="Następna prowadnica" disabled={idx >= desc.guides.length - 1} onClick={() => api.selectGuide(desc.guides[idx + 1].id)} className="h-5 px-1.5 flex items-center bg-[color:var(--h-2a2a2a,#2a2a2a)] border border-[color:var(--h-444444,#444444)] rounded text-[color:var(--h-cccccc,#cccccc)] cursor-pointer disabled:opacity-40"><ChevronRight size={14} /></button>
       </div>
       {sel && (
         <>
@@ -277,7 +277,7 @@ const GuideEditor: React.FC<{ desc: Extract<PropsDescriptor, { kind: 'guide' }>;
             type="button"
             data-testid="guide-delete"
             onClick={() => api.removeGuide(sel.id)}
-            className="h-5 px-2 self-start text-[11px] bg-[#2a2a2a] border border-[#444] rounded text-[#ccc] hover:text-white cursor-pointer"
+            className="h-5 px-2 self-start text-[11px] bg-[color:var(--h-2a2a2a,#2a2a2a)] border border-[color:var(--h-444444,#444444)] rounded text-[color:var(--h-cccccc,#cccccc)] hover:text-[color:var(--t-white,#fff)] cursor-pointer"
           >
             Usuń prowadnicę
           </button>
@@ -289,7 +289,7 @@ const GuideEditor: React.FC<{ desc: Extract<PropsDescriptor, { kind: 'guide' }>;
 
 export const PropertiesPanel: React.FC<{ desc: PropsDescriptor; api: PropsApi | null }> = ({ desc, api }) => {
   if (!desc || !api) {
-    return <div className="text-[11px] text-[#888] px-1 py-3">Zaznacz pojedynczy obiekt wektorowy narzędziem Manipulacja, aby edytować jego właściwości.</div>;
+    return <div className="text-[11px] text-[color:var(--h-888888,#888888)] px-1 py-3">Zaznacz pojedynczy obiekt wektorowy narzędziem Manipulacja, aby edytować jego właściwości.</div>;
   }
 
   if (desc.kind === 'guide') return <GuideEditor desc={desc} api={api} />;
@@ -301,13 +301,13 @@ export const PropertiesPanel: React.FC<{ desc: PropsDescriptor; api: PropsApi | 
   if (desc.kind === 'line') {
     return (
       <div className="flex flex-col gap-3 text-xs" data-testid="props-line">
-        <div className="text-[11px] text-[#ccc] font-semibold">Linia prosta</div>
+        <div className="text-[11px] text-[color:var(--h-cccccc,#cccccc)] font-semibold">Linia prosta</div>
         <div>
-          <div className="text-[10.5px] text-[#888] mb-1">Początek</div>
+          <div className="text-[10.5px] text-[color:var(--h-888888,#888888)] mb-1">Początek</div>
           <XY x={desc.p0.x} y={desc.p0.y} onChange={(x, y) => api.setLinePoint(0, x, y)} />
         </div>
         <div>
-          <div className="text-[10.5px] text-[#888] mb-1">Koniec</div>
+          <div className="text-[10.5px] text-[color:var(--h-888888,#888888)] mb-1">Koniec</div>
           <XY x={desc.p1.x} y={desc.p1.y} onChange={(x, y) => api.setLinePoint(1, x, y)} />
         </div>
       </div>

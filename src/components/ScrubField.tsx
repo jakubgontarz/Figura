@@ -304,19 +304,20 @@ export const ScrubField: React.FC<ScrubFieldProps> = ({
       style={{ width, ...(trackStyle ? { background: trackStyle, backgroundClip: 'padding-box', backgroundRepeat: 'no-repeat' } : null) }}
       className={
         className ??
-        `relative ${tall ? 'h-[30px] text-sm' : 'h-5'} shrink-0 rounded border overflow-hidden touch-none select-none ${trackStyle ? '' : 'bg-[#1e1e1e]'} ${
-          disabled ? 'opacity-40 border-[#3a3a3a]' : editing ? 'border-[#007acc]' : `border-[#444] hover:border-[#666] ${openEnded ? 'cursor-ew-resize' : 'cursor-default'}`
+        `relative ${tall ? 'h-[30px] text-sm' : 'h-5'} shrink-0 rounded border overflow-hidden touch-none select-none ${trackStyle ? '' : 'bg-[color:var(--h-1e1e1e,#1e1e1e)]'} ${
+          disabled ? 'opacity-40 border-[color:var(--h-3a3a3a,#3a3a3a)]' : editing ? 'border-[color:var(--h-007acc,#007acc)]' : `border-[color:var(--h-444444,#444444)] hover:border-[color:var(--h-666666,#666666)] ${openEnded ? 'cursor-ew-resize' : 'cursor-default'}`
         }`
       }
     >
       {/* Tor suwaka pod polem */}
-      {!openEnded && !trackStyle && <div className="absolute inset-y-0 left-0 bg-[#007acc]/40 pointer-events-none" style={{ width: `${fill * 100}%` }} />}
+      {!openEnded && !trackStyle && <div className="absolute inset-y-0 left-0 bg-[color:var(--h-007acc,#007acc)]/40 pointer-events-none" style={{ width: `${fill * 100}%` }} />}
       {!openEnded && trackStyle && (
         <div className="absolute inset-y-0 w-1 -translate-x-1/2 border border-black bg-white pointer-events-none" style={{ left: `${fill * 100}%` }} />
       )}
       <input
         ref={inputRef}
         data-testid={testId}
+        data-scrub-editing={editing ? '1' : undefined}
         type="text"
         inputMode="decimal"
         readOnly={!editing}
@@ -351,8 +352,8 @@ export const ScrubField: React.FC<ScrubFieldProps> = ({
           }
         }}
         style={{ width: openEnded ? '100%' : `${len + 1.5}ch`, maxWidth: '100%' }}
-        className={`absolute left-1/2 top-0 h-full -translate-x-1/2 px-0 text-center ${tall ? 'text-sm' : 'text-xs'} font-mono text-white focus:outline-none ${
-          editing ? 'bg-[#121212] cursor-text' : trackStyle ? 'bg-black/55 cursor-ew-resize pointer-events-auto' : 'bg-transparent cursor-ew-resize pointer-events-auto'
+        className={`absolute left-1/2 top-0 h-full -translate-x-1/2 px-0 text-center ${tall ? 'text-sm' : 'text-xs'} font-mono text-[color:var(--t-white,#fff)] focus:outline-none ${
+          editing ? 'bg-[color:var(--h-121212,#121212)] cursor-text' : trackStyle ? 'bg-black/55 cursor-ew-resize pointer-events-auto' : 'bg-transparent cursor-ew-resize pointer-events-auto'
         }`}
       />
     </div>

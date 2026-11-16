@@ -3,8 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { dialogOwnsKey } from '../core/dialogStack.ts';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { X } from 'lucide-react';
+import { DialogWindow } from './DialogWindow.tsx';
 import { ScrubField } from './ScrubField.tsx';
 import { CorrectionPresetsBar } from './CorrectionPresetsBar.tsx';
 import { hasPresetParams } from '../core/CorrectionPresets.ts';
@@ -61,7 +62,7 @@ export const SliderRow: React.FC<{
 }> = ({ label, value, min, max, step, decimals = 0, unit, defaultValue, trackStyle, onChange }) => (
   <div className="mb-2">
     <label
-      className="block mb-0.5 text-[10.5px] text-[#bbb] cursor-default"
+      className="block mb-0.5 text-[10.5px] text-[color:var(--h-bbbbbb,#bbbbbb)] cursor-default"
       title={defaultValue !== undefined ? 'Kliknij dwukrotnie, aby przywrócić wartość domyślną' : undefined}
       onDoubleClick={() => defaultValue !== undefined && onChange(defaultValue)}
     >
@@ -83,8 +84,8 @@ export const SliderRow: React.FC<{
 );
 
 export const CheckRow: React.FC<{ label: string; checked: boolean; onChange: (v: boolean) => void }> = ({ label, checked, onChange }) => (
-  <label className="flex items-center gap-1.5 mb-1.5 text-[10.5px] text-[#ccc] cursor-pointer select-none">
-    <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} className="accent-[#007acc]" />
+  <label className="flex items-center gap-1.5 mb-1.5 text-[10.5px] text-[color:var(--h-cccccc,#cccccc)] cursor-pointer select-none">
+    <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} className="accent-[color:var(--h-007acc,#007acc)]" />
     {label}
   </label>
 );
@@ -101,7 +102,7 @@ const Tabs: React.FC<{
         type="button"
         onClick={() => onChange(t.id)}
         className={`flex-1 h-5 text-[10.5px] rounded border cursor-pointer ${
-          value === t.id ? 'bg-[#10549c] border-[#2980b9] text-white' : 'bg-[#282828] border-[#3e3e3e] text-[#ccc] hover:bg-[#333]'
+          value === t.id ? 'bg-[color:var(--h-10549c,#10549c)] border-[color:var(--h-2980b9,#2980b9)] text-white' : 'bg-[color:var(--h-282828,#282828)] border-[color:var(--h-3e3e3e,#3e3e3e)] text-[color:var(--h-cccccc,#cccccc)] hover:bg-[color:var(--h-333333,#333333)]'
         }`}
         style={t.color && value !== t.id ? { color: t.color } : undefined}
       >
@@ -137,7 +138,7 @@ const HistogramView: React.FC<{ histogram: Histogram | null; channel: ChannelId;
     return d + ` L255 ${height} Z`;
   }, [histogram, channel, height]);
   return (
-    <svg viewBox={`0 0 256 ${height}`} className="w-full block bg-[#101010] border border-[#333] rounded" style={{ height }} preserveAspectRatio="none">
+    <svg viewBox={`0 0 256 ${height}`} className="w-full block bg-[color:var(--h-101010,#101010)] border border-[color:var(--h-333333,#333333)] rounded" style={{ height }} preserveAspectRatio="none">
       <path d={path} fill={CHANNEL_COLOR[channel]} opacity={0.55} />
       {children}
     </svg>
@@ -203,14 +204,14 @@ const LevelsEditor: React.FC<{
           <line x1={ch.inBlack} x2={ch.inBlack} y1={0} y2={56} stroke="#ddd" strokeWidth={1} vectorEffect="non-scaling-stroke" />
           <line x1={ch.inWhite} x2={ch.inWhite} y1={0} y2={56} stroke="#ddd" strokeWidth={1} vectorEffect="non-scaling-stroke" />
         </HistogramView>
-        <div className="h-2.5 rounded-sm mt-0.5 border border-[#333]" style={{ background: 'linear-gradient(to right, #000, #fff)' }} />
+        <div className="h-2.5 rounded-sm mt-0.5 border border-[color:var(--h-333333,#333333)]" style={{ background: 'linear-gradient(to right, #000, #fff)' }} />
       </div>
       <div className="flex justify-end mb-1.5">
         <button
           type="button"
           onClick={autoLevels}
           disabled={!histogram}
-          className="h-5 px-2 text-[10.5px] rounded border bg-[#282828] border-[#3e3e3e] text-[#ccc] hover:bg-[#383838] disabled:opacity-40 cursor-pointer"
+          className="h-5 px-2 text-[10.5px] rounded border bg-[color:var(--h-282828,#282828)] border-[color:var(--h-3e3e3e,#3e3e3e)] text-[color:var(--h-cccccc,#cccccc)] hover:bg-[color:var(--h-383838,#383838)] disabled:opacity-40 cursor-pointer"
           title="Ustaw czerń i biel wejściową według rozkładu tonów (odcina po 0,5% skrajnych pikseli)"
         >
           Auto
@@ -341,7 +342,7 @@ const CurvesEditor: React.FC<{
       <svg
         ref={svgRef}
         viewBox={`0 0 ${SIZE} ${SIZE}`}
-        className="w-full block bg-[#101010] border border-[#333] rounded touch-none select-none"
+        className="w-full block bg-[color:var(--h-101010,#101010)] border border-[color:var(--h-333333,#333333)] rounded touch-none select-none"
         style={{ aspectRatio: '1 / 1', cursor: 'crosshair' }}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
@@ -387,10 +388,10 @@ const CurvesEditor: React.FC<{
           />
         ))}
       </svg>
-      <div className="flex justify-between items-center mt-1 mb-1 text-[10px] text-[#888] h-4">
+      <div className="flex justify-between items-center mt-1 mb-1 text-[10px] text-[color:var(--h-888888,#888888)] h-4">
         <span>Klik: dodaj punkt · dwuklik / PPM: usuń</span>
         {sel && (
-          <span className="font-mono text-[#ccc]">
+          <span className="font-mono text-[color:var(--h-cccccc,#cccccc)]">
             {Math.round(sel.x)} → {Math.round(sel.y)}
           </span>
         )}
@@ -399,7 +400,7 @@ const CurvesEditor: React.FC<{
         <button
           type="button"
           onClick={() => setPoints(defaultParams('curves').channels[channel])}
-          className="h-5 px-2 text-[10.5px] rounded border bg-[#282828] border-[#3e3e3e] text-[#ccc] hover:bg-[#383838] cursor-pointer"
+          className="h-5 px-2 text-[10.5px] rounded border bg-[color:var(--h-282828,#282828)] border-[color:var(--h-3e3e3e,#3e3e3e)] text-[color:var(--h-cccccc,#cccccc)] hover:bg-[color:var(--h-383838,#383838)] cursor-pointer"
         >
           Resetuj kanał
         </button>
@@ -494,11 +495,11 @@ const GenericControls: React.FC<{
       }
       return (
         <div key={c.key} className="mb-2">
-          <label className="block text-[10.5px] text-[#bbb] mb-0.5">{c.label}</label>
+          <label className="block text-[10.5px] text-[color:var(--h-bbbbbb,#bbbbbb)] mb-0.5">{c.label}</label>
           <select
             value={params[c.key]}
             onChange={(e) => onChange({ ...params, [c.key]: e.target.value })}
-            className="w-full h-6 bg-[#222] border border-[#444] rounded px-1.5 text-[10.5px] text-white focus:outline-none focus:border-[#007acc] cursor-pointer"
+            className="w-full h-6 bg-[color:var(--h-222222,#222222)] border border-[color:var(--h-444444,#444444)] rounded px-1.5 text-[10.5px] text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[color:var(--h-007acc,#007acc)] cursor-pointer"
           >
             {c.options.map((o) => (
               <option key={o.value} value={o.value}>
@@ -533,11 +534,6 @@ export const CorrectionDialog: React.FC<CorrectionDialogProps> = ({
   const def = getCorrectionDef(correction.type);
   const [params, setParams] = useState<CorrectionParamsMap[typeof correction.type]>(() => cloneParams(correction.params));
   const [preview, setPreview] = useState(true);
-  const [pos, setPos] = useState(() => ({
-    x: Math.max(16, (typeof window !== 'undefined' ? window.innerWidth : 1200) - 224 - 312 - 24),
-    y: 120,
-  }));
-  const dragRef = useRef<{ dx: number; dy: number } | null>(null);
 
   const update = (next: any) => {
     setParams(next);
@@ -549,6 +545,7 @@ export const CorrectionDialog: React.FC<CorrectionDialogProps> = ({
   latest.current = { onOk, onCancel };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (!dialogOwnsKey(e, 'correction-dialog')) return;
       if (e.key === 'Escape') {
         // Esc w polu nazwy presetu anuluje tylko nazwę (obsługuje je samo pole)
         if (e.target instanceof HTMLElement && e.target.dataset.presetName !== undefined) return;
@@ -564,49 +561,21 @@ export const CorrectionDialog: React.FC<CorrectionDialogProps> = ({
     return () => window.removeEventListener('keydown', onKey, true);
   }, []);
 
-  const onTitleDown = (e: React.PointerEvent) => {
-    if ((e.target as HTMLElement).closest('button')) return;
-    dragRef.current = { dx: e.clientX - pos.x, dy: e.clientY - pos.y };
-    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-  };
-  const onTitleMove = (e: React.PointerEvent) => {
-    const d = dragRef.current;
-    if (!d) return;
-    setPos({
-      x: Math.max(0, Math.min(window.innerWidth - 80, e.clientX - d.dx)),
-      y: Math.max(0, Math.min(window.innerHeight - 40, e.clientY - d.dy)),
-    });
-  };
-  const onTitleUp = () => {
-    dragRef.current = null;
-  };
-
   const defaults = defaultParams(correction.type) as unknown as Record<string, any>;
 
   return (
-    <div
-      role="dialog"
-      aria-label={def.name}
-      className="fixed z-[60] w-[312px] bg-[#1e1e1e] border border-[#3a3a3a] rounded-md shadow-2xl text-xs select-none flex flex-col"
-      style={{ left: pos.x, top: pos.y, maxHeight: 'calc(100vh - 24px)' }}
-      onKeyDown={(e) => e.stopPropagation()}
-    >
-      <div
-        className="flex items-center justify-between px-2.5 h-7 bg-[#2a2a2b] border-b border-[#3a3a3a] rounded-t-md cursor-move shrink-0"
-        onPointerDown={onTitleDown}
-        onPointerMove={onTitleMove}
-        onPointerUp={onTitleUp}
-        onPointerCancel={onTitleUp}
-      >
-        <span className="text-[11px] font-semibold text-white truncate">
+    <DialogWindow
+      width={312}
+      onClose={onCancel}
+      testId="correction-dialog"
+      initialPos={() => ({ x: Math.max(16, (typeof window !== 'undefined' ? window.innerWidth : 1200) - 224 - 312 - 24), y: 120 })}
+      title={
+        <>
           {def.name}
-          {layerName ? <span className="font-normal text-[#999]"> · {layerName}</span> : null}
-        </span>
-        <button type="button" onClick={onCancel} title="Anuluj (Esc)" className="p-0.5 rounded text-[#bbb] hover:bg-[#4a2a2a] hover:text-white cursor-pointer">
-          <X size={13} />
-        </button>
-      </div>
-
+          {layerName ? <span className="font-normal text-[color:var(--h-999999,#999999)]"> · {layerName}</span> : null}
+        </>
+      }
+    >
       {hasPresetParams(correction.type) && <CorrectionPresetsBar type={correction.type} current={params} onApply={update} />}
 
       <div className="p-3 overflow-y-auto min-h-0">
@@ -621,8 +590,8 @@ export const CorrectionDialog: React.FC<CorrectionDialogProps> = ({
         )}
       </div>
 
-      <div className="flex items-center gap-1.5 px-3 py-2 border-t border-[#333] shrink-0">
-        <label className="flex items-center gap-1.5 text-[10.5px] text-[#ccc] cursor-pointer mr-auto">
+      <div className="flex items-center gap-1.5 px-3 py-2 border-t border-[color:var(--h-333333,#333333)] shrink-0">
+        <label className="flex items-center gap-1.5 text-[10.5px] text-[color:var(--h-cccccc,#cccccc)] cursor-pointer mr-auto">
           <input
             type="checkbox"
             checked={preview}
@@ -630,14 +599,14 @@ export const CorrectionDialog: React.FC<CorrectionDialogProps> = ({
               setPreview(e.target.checked);
               onPreviewToggle(e.target.checked);
             }}
-            className="accent-[#007acc]"
+            className="accent-[color:var(--h-007acc,#007acc)]"
           />
           Podgląd
         </label>
         <button
           type="button"
           onClick={() => update(defaultParams(correction.type))}
-          className="h-6 px-2.5 text-[11px] rounded border bg-[#282828] border-[#3e3e3e] text-[#ccc] hover:bg-[#383838] cursor-pointer"
+          className="h-6 px-2.5 text-[11px] rounded border bg-[color:var(--h-282828,#282828)] border-[color:var(--h-3e3e3e,#3e3e3e)] text-[color:var(--h-cccccc,#cccccc)] hover:bg-[color:var(--h-383838,#383838)] cursor-pointer"
           title="Przywróć ustawienia domyślne"
         >
           Resetuj
@@ -645,19 +614,19 @@ export const CorrectionDialog: React.FC<CorrectionDialogProps> = ({
         <button
           type="button"
           onClick={onCancel}
-          className="h-6 px-2.5 text-[11px] rounded border bg-[#282828] border-[#3e3e3e] text-[#ccc] hover:bg-[#383838] cursor-pointer"
+          className="h-6 px-2.5 text-[11px] rounded border bg-[color:var(--h-282828,#282828)] border-[color:var(--h-3e3e3e,#3e3e3e)] text-[color:var(--h-cccccc,#cccccc)] hover:bg-[color:var(--h-383838,#383838)] cursor-pointer"
         >
           Anuluj
         </button>
         <button
           type="button"
           onClick={onOk}
-          className="h-6 px-3 text-[11px] rounded border bg-[#10549c] border-[#2980b9] text-white hover:bg-[#1465b5] cursor-pointer"
+          className="h-6 px-3 text-[11px] rounded border bg-[color:var(--h-10549c,#10549c)] border-[color:var(--h-2980b9,#2980b9)] text-white hover:bg-[color:var(--h-1465b5,#1465b5)] cursor-pointer"
           title={isNew ? 'Dodaj korekcję do warstwy' : 'Zapisz zmiany'}
         >
           OK
         </button>
       </div>
-    </div>
+    </DialogWindow>
   );
 };

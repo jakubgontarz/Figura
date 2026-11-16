@@ -4,7 +4,7 @@
  */
 
 import React from 'react';
-import { ZoomIn, ZoomOut, RotateCcw, Magnet, Grid } from 'lucide-react';
+import { ZoomIn, ZoomOut, RotateCcw, Magnet, Hash, Ruler, Grid3x3 } from 'lucide-react';
 import { LENGTH_UNITS, LengthUnit, UNIT_LABEL, fmtUnit } from '../core/Units.ts';
 
 interface StatusBarProps {
@@ -22,6 +22,10 @@ interface StatusBarProps {
   onToggleSnap?: () => void;
   guidesVisible?: boolean;
   onToggleGuides?: () => void;
+  rulersVisible?: boolean;
+  onToggleRulers?: () => void;
+  gridVisible?: boolean;
+  onToggleGrid?: () => void;
 }
 
 export const StatusBar: React.FC<StatusBarProps> = ({
@@ -38,13 +42,17 @@ export const StatusBar: React.FC<StatusBarProps> = ({
   onToggleSnap,
   guidesVisible = true,
   onToggleGuides,
+  rulersVisible = false,
+  onToggleRulers,
+  gridVisible = false,
+  onToggleGrid,
 }) => {
 
   const seg = (active: boolean, locked: boolean) =>
-    `px-2 py-px text-[10.5px] ${active ? 'bg-[#333333] text-white font-semibold' : 'bg-transparent text-[#a0a0a0] hover:text-white hover:bg-[#333333]/50'} ${locked ? 'opacity-60 cursor-default' : 'cursor-pointer'}`;
+    `px-2 py-px text-[10.5px] ${active ? 'bg-[color:var(--h-333333,#333333)] text-[color:var(--t-white,#fff)] font-semibold' : 'bg-transparent text-[color:var(--h-a0a0a0,#a0a0a0)] hover:text-[color:var(--t-white,#fff)] hover:bg-[color:var(--h-333333,#333333)]/50'} ${locked ? 'opacity-60 cursor-default' : 'cursor-pointer'}`;
 
   return (
-    <div className="h-6 bg-[#1e1e1e] text-[#cccccc] border-t border-[#111111] select-none flex items-center gap-4 px-3 text-[11px] font-normal z-20 shadow-md">
+    <div className="h-6 bg-[color:var(--h-1e1e1e,#1e1e1e)] text-[color:var(--h-cccccc,#cccccc)] border-t border-[color:var(--h-111111,#111111)] select-none flex items-center gap-4 px-3 text-[11px] font-normal z-20 shadow-md">
       {/* Lewa sekcja: wymiary obrazu i zoom */}
       <span className="opacity-90 whitespace-nowrap">
         {`${fmtUnit(docWidth, unit, dpi)} × ${fmtUnit(docHeight, unit, dpi)} ${UNIT_LABEL[unit]}`}
@@ -53,13 +61,13 @@ export const StatusBar: React.FC<StatusBarProps> = ({
       {/* Kontrolki Zoomu */}
       <div className="flex items-center gap-1.5 opacity-90 hover:opacity-100 whitespace-nowrap">
         <span>Zoom: {Math.round(zoom * 100)}%</span>
-        <button type="button" onClick={() => onZoomChange(Math.max(0.05, Number((zoom - 0.25).toFixed(2))))} className="p-0.5 hover:bg-[#333333] rounded cursor-pointer" title="Pomniejsz">
+        <button type="button" onClick={() => onZoomChange(Math.max(0.05, Number((zoom - 0.25).toFixed(2))))} className="p-0.5 hover:bg-[color:var(--h-333333,#333333)] rounded cursor-pointer" title="Pomniejsz">
           <ZoomOut size={11} />
         </button>
-        <button type="button" onClick={() => onZoomChange(1.0)} className="p-0.5 hover:bg-[#333333] rounded cursor-pointer" title="Reset do 100%">
+        <button type="button" onClick={() => onZoomChange(1.0)} className="p-0.5 hover:bg-[color:var(--h-333333,#333333)] rounded cursor-pointer" title="Reset do 100%">
           <RotateCcw size={10} />
         </button>
-        <button type="button" onClick={() => onZoomChange(Math.min(25.0, Number((zoom + 0.25).toFixed(2))))} className="p-0.5 hover:bg-[#333333] rounded cursor-pointer" title="Powiększ">
+        <button type="button" onClick={() => onZoomChange(Math.min(25.0, Number((zoom + 0.25).toFixed(2))))} className="p-0.5 hover:bg-[color:var(--h-333333,#333333)] rounded cursor-pointer" title="Powiększ">
           <ZoomIn size={11} />
         </button>
       </div>
@@ -71,7 +79,7 @@ export const StatusBar: React.FC<StatusBarProps> = ({
 
       {/* Przełącznik jednostki wymiarów */}
       <div className="flex items-center gap-1.5 whitespace-nowrap">
-        <div className="flex rounded overflow-hidden border border-[#444444]" title="Jednostka wymiarów">
+        <div className="flex rounded overflow-hidden border border-[color:var(--h-444444,#444444)]" title="Jednostka wymiarów">
           {LENGTH_UNITS.map((u) => (
             <button key={u} type="button" data-testid={`status-unit-${u}`} disabled={unitsLocked} onClick={() => onUnitChange?.(u)} className={seg(unit === u, unitsLocked)}>
               {UNIT_LABEL[u]}
@@ -90,11 +98,41 @@ export const StatusBar: React.FC<StatusBarProps> = ({
           onClick={() => onToggleSnap?.()}
           className={`p-1 rounded border text-[10.5px] cursor-pointer transition-colors ${
             snapEnabled
-              ? 'bg-[#333333] text-white border-[#444444]'
-              : 'bg-transparent text-[#a0a0a0] border-[#444444] hover:bg-[#333333]/50 hover:text-white'
+              ? 'bg-[color:var(--h-333333,#333333)] text-[color:var(--t-white,#fff)] border-[color:var(--h-444444,#444444)]'
+              : 'bg-transparent text-[color:var(--h-a0a0a0,#a0a0a0)] border-[color:var(--h-444444,#444444)] hover:bg-[color:var(--h-333333,#333333)]/50 hover:text-[color:var(--t-white,#fff)]'
           }`}
         >
           <Magnet size={12} />
+        </button>
+
+        <button
+          type="button"
+          data-testid="status-rulers"
+          aria-pressed={rulersVisible}
+          title="Linijka"
+          onClick={() => onToggleRulers?.()}
+          className={`p-1 rounded border text-[10.5px] cursor-pointer transition-colors ${
+            rulersVisible
+              ? 'bg-[color:var(--h-333333,#333333)] text-[color:var(--t-white,#fff)] border-[color:var(--h-444444,#444444)]'
+              : 'bg-transparent text-[color:var(--h-a0a0a0,#a0a0a0)] border-[color:var(--h-444444,#444444)] hover:bg-[color:var(--h-333333,#333333)]/50 hover:text-[color:var(--t-white,#fff)]'
+          }`}
+        >
+          <Ruler size={12} />
+        </button>
+
+        <button
+          type="button"
+          data-testid="status-grid"
+          aria-pressed={gridVisible}
+          title="Siatka pikseli (przy dużym powiększeniu)"
+          onClick={() => onToggleGrid?.()}
+          className={`p-1 rounded border text-[10.5px] cursor-pointer transition-colors ${
+            gridVisible
+              ? 'bg-[color:var(--h-333333,#333333)] text-[color:var(--t-white,#fff)] border-[color:var(--h-444444,#444444)]'
+              : 'bg-transparent text-[color:var(--h-a0a0a0,#a0a0a0)] border-[color:var(--h-444444,#444444)] hover:bg-[color:var(--h-333333,#333333)]/50 hover:text-[color:var(--t-white,#fff)]'
+          }`}
+        >
+          <Grid3x3 size={12} />
         </button>
 
         <button
@@ -105,11 +143,11 @@ export const StatusBar: React.FC<StatusBarProps> = ({
           onClick={() => onToggleGuides?.()}
           className={`p-1 rounded border text-[10.5px] cursor-pointer transition-colors ${
             guidesVisible
-              ? 'bg-[#333333] text-white border-[#444444]'
-              : 'bg-transparent text-[#a0a0a0] border-[#444444] hover:bg-[#333333]/50 hover:text-white'
+              ? 'bg-[color:var(--h-333333,#333333)] text-[color:var(--t-white,#fff)] border-[color:var(--h-444444,#444444)]'
+              : 'bg-transparent text-[color:var(--h-a0a0a0,#a0a0a0)] border-[color:var(--h-444444,#444444)] hover:bg-[color:var(--h-333333,#333333)]/50 hover:text-[color:var(--t-white,#fff)]'
           }`}
         >
-          <Grid size={12} />
+          <Hash size={12} />
         </button>
       </div>
 

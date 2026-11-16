@@ -42,6 +42,18 @@ import { NavigatorPanel } from './components/NavigatorPanel.tsx';
 import { LayersPanel } from './components/LayersPanel.tsx';
 import { LayerPropsDialog } from './components/LayerPropsDialog.tsx';
 import { buildLayersMenu, LayersMenuState } from './components/layersMenu.ts';
+import { buildImageMenu } from './components/imageMenu.ts';
+import { buildEditMenu } from './components/editMenu.ts';
+import { PasteFitDialog } from './components/PasteFitDialog.tsx';
+import { buildViewMenu } from './components/viewMenu.ts';
+import { buildSelectionMenu } from './components/selectionMenu.ts';
+import { SelectionOffsetDialog } from './components/SelectionOffsetDialog.tsx';
+import { SettingsDialog } from './components/SettingsDialog.tsx';
+import { ImageResizeDialog } from './components/ImageResizeDialog.tsx';
+import { CanvasSizeDialog } from './components/CanvasSizeDialog.tsx';
+import { settings, type Settings } from './core/Settings.ts';
+import { toolForKey } from './core/ToolKeys.ts';
+import { useSettings } from './components/useSettings.ts';
 import { HistoryPanel } from './components/HistoryPanel.tsx';
 import { ChannelsPanel } from './components/ChannelsPanel.tsx';
 import { UnitsContext } from './components/Units.tsx';
@@ -89,15 +101,31 @@ const SMART_TAB_COLOR = '#e0a43a';
 /** Korzeń aplikacji: renderuje cały interfejs edytora i przechowuje jego stan. */
 export default function App() {
   const [tabs, setTabs] = useState<DocumentTab[]>(() => {
-    const doc1 = new GraphicEngine('obraz1.fig', 800, 600);
+    const st0 = settings.get();
+    const doc1 = new GraphicEngine('obraz1.fig', st0.newDocWidth, st0.newDocHeight);
+    doc1.dpi = st0.newDocDpi;
+    if (st0.newDocBackground === 'none') doc1.initDefaultLayers('none');
     return [{ id: 'tab_1', title: 'obraz1', engine: doc1 }];
   });
 
   const [activeTabId, setActiveTabId] = useState<string>('tab_1');
   /** Jednostka wymiarów i pól liczbowych (px / mm / cm / cal). Dokumenty obiektów inteligentnych są zawsze w pikselach. */
-  const [lengthUnit, setLengthUnit] = useState<LengthUnit>('px');
+  const cfg = useSettings();
+  /** Wartość ustawienia z funkcją aktualizującą jak w `useState` (zapamiętywane w ustawieniach programu). */
+  const settingState = <K extends 'rulers' | 'grid' | 'guides' | 'snap'>(key: K) => (v: boolean | ((p: boolean) => boolean)) =>
+    settings.set({ [key]: typeof v === 'function' ? v(settings.get()[key]) : v } as Partial<Settings>);
+  const lengthUnit: LengthUnit = cfg.lengthUnit;
+  const setLengthUnit = (u: LengthUnit) => settings.set({ lengthUnit: u });
   const tabsRef = useRef<DocumentTab[]>([]);
   tabsRef.current = tabs;
+  // Zmiana domyślnego próbkowania w ustawieniach przestawia też bieżący wybór na pasku opcji
+  useEffect(() => {
+    setSelectionSettings((prev) => ({ ...prev, interpolation: cfg.defaultInterpolation }));
+  }, [cfg.defaultInterpolation]);
+  // Zmiana limitów historii działa od razu: nadmiarowe kroki otwartych dokumentów są usuwane
+  useEffect(() => {
+    for (const t of tabsRef.current) t.engine.trimHistory();
+  }, [cfg.historyMB, cfg.historySteps]);
   const activeTabIdRef = useRef('tab_1');
   activeTabIdRef.current = activeTabId;
   /** Aktywna zakładka; po zamknięciu wszystkich zakładek jej nie ma (wtedy pokazywany jest pusty obszar roboczy). */
@@ -142,6 +170,9 @@ export default function App() {
   // ---- Powiadomienia ----
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   // Okno „Tryb mieszania…” / „Przezroczystość…” z menu Warstwy i wspólna opcja „tylko aktywna warstwa” przy dodawaniu efektów
+  const [imageDlg, setImageDlg] = useState<'resize' | 'canvas' | null>(null);
+  const [selOffsetDlg, setSelOffsetDlg] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [layerPropsDlg, setLayerPropsDlg] = useState<{ kind: 'blend' | 'opacity'; layer: Layer; blend: SKBlendMode; opacity: number } | null>(null);
   const [corrOnlyActive, setCorrOnlyActive] = useState(true);
 
@@ -351,7 +382,7 @@ export default function App() {
     tolerance: 15,
     wandMode: 'contiguous',
     sampleSource: 'image',
-    interpolation: 'bilinear',
+    interpolation: settings.get().defaultInterpolation,
     lassoMode: 'freehand',
   });
 
@@ -490,8 +521,15 @@ export default function App() {
   // ---- Narzędzia ----
   const [activeTool, setActiveToolRaw] = useState<ToolType>('brush');
   const [guideAxis, setGuideAxis] = useState<'h' | 'v'>('v');
-  const [snapEnabled, setSnapEnabled] = useState(false);
-  const [guidesVisible, setGuidesVisible] = useState(true);
+  const snapEnabled = cfg.snap;
+  const setSnapEnabled = settingState('snap');
+  const guidesVisible = cfg.guides;
+  const setGuidesVisible = settingState('guides');
+  /** Siatka pikseli (przy dużym powiększeniu) i linijki na krawędziach obszaru rysowania */
+  const gridVisible = cfg.grid;
+  const setGridVisible = settingState('grid');
+  const rulersVisible = cfg.rulers;
+  const setRulersVisible = settingState('rulers');
   const [rightTab, setRightTab] = useState<'color' | 'props' | 'nav'>('color');
   // Rozmiar obszaru płótna na ekranie (dla ramki widoku w Nawigatorze)
   const [viewSize, setViewSize] = useState<{ width: number; height: number }>({ width: 0, height: 0 });
@@ -578,6 +616,34 @@ export default function App() {
   const setViewOf = useCallback((id: string, zoomValue: number) => {
     setViews((prev) => ({ ...prev, [id]: { zoom: zoomValue, pan: ZERO_PAN } }));
   }, []);
+
+  const ZOOM_MIN = 0.05;
+  const ZOOM_MAX = 25;
+  /** Ustawia powiększenie tak, by prostokąt dokumentu (x, y, w, h) mieścił się w widoku, i wyśrodkowuje go. */
+  const fitRect = (x: number, y: number, w: number, h: number) => {
+    const vw = viewSize.width;
+    const vh = viewSize.height;
+    if (vw <= 0 || vh <= 0 || w <= 0 || h <= 0) return;
+    const margin = 24;
+    const z = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, Math.min((vw - margin * 2) / w, (vh - margin * 2) / h)));
+    const zr = Math.floor(z * 1000) / 1000;
+    setZoom(zr);
+    setPanOffset({ x: -(x + w / 2 - engine.width / 2) * zr, y: -(y + h / 2 - engine.height / 2) * zr });
+  };
+  const viewFitWindow = () => fitRect(0, 0, engine.width, engine.height);
+  const viewFitSelection = () => {
+    const b = engine.selectionManager.getSelectionBounds();
+    if (b) fitRect(b.left, b.top, b.width, b.height);
+  };
+  const viewZoomIn = () => setZoom((z) => Math.min(ZOOM_MAX, Number((z * (1 + settings.get().zoomStep / 100)).toFixed(3))));
+  const viewZoomOut = () => setZoom((z) => Math.max(ZOOM_MIN, Number((z / (1 + settings.get().zoomStep / 100)).toFixed(3))));
+  const viewActualSize = () => {
+    setZoom(1.0);
+    setPanOffset(ZERO_PAN);
+  };
+  /** Najnowsze działania widoku dla obsługi klawiatury (efekt klawiszy nie zależy od rozmiaru widoku). */
+  const viewActRef = useRef({ viewFitWindow, viewZoomIn, viewZoomOut, viewActualSize });
+  viewActRef.current = { viewFitWindow, viewZoomIn, viewZoomOut, viewActualSize };
 
   const [isNewDocModalOpen, setIsNewDocModalOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -787,6 +853,8 @@ export default function App() {
     leaveActiveTab();
     const newDoc = new GraphicEngine(title, width, height);
     newDoc.dpi = dpi;
+    const bgMode = settings.get().newDocBackground;
+    if (bgMode !== 'white') newDoc.initDefaultLayers(bgMode === 'none' ? 'none' : { r: secondaryColor.r, g: secondaryColor.g, b: secondaryColor.b });
     const newTab: DocumentTab = {
       id: `tab_${Date.now()}`,
       title: title.replace(/\.fig$/, ''),
@@ -917,6 +985,26 @@ export default function App() {
   }), []);
 
   /** Wkleja raster na warstwę wektorową jako obiekt inteligentny; gdy to niemożliwe, pokazuje powiadomienie. */
+  /** Pytanie „wkleić bez zmian czy rozszerzyć płótno” dla obrazu większego od płótna (obraz nigdy nie jest zmniejszany). */
+  const [pasteFitDlg, setPasteFitDlg] = useState<{ iw: number; ih: number; crops: boolean; resolve: (c: 'asis' | 'expand' | 'cancel') => void } | null>(null);
+  const askPasteFit = useCallback(
+    (iw: number, ih: number, crops: boolean): Promise<'asis' | 'expand' | 'cancel'> =>
+      iw <= engine.width && ih <= engine.height ? Promise.resolve('asis') : new Promise((resolve) => setPasteFitDlg({ iw, ih, crops, resolve })),
+    [engine]
+  );
+  /** Rozszerza płótno tak, by zmieścił się obraz `iw`×`ih` (dotychczasowa zawartość wyśrodkowana). */
+  const expandCanvasForPaste = useCallback(
+    (iw: number, ih: number): boolean => {
+      const r = engine.resizeCanvas(Math.max(engine.width, iw), Math.max(engine.height, ih), 0.5, 0.5);
+      if (!r.ok) {
+        showToast(r.reason);
+        return false;
+      }
+      return true;
+    },
+    [engine, showToast]
+  );
+
   const pasteAsSmart = useCallback((canvas: HTMLCanvasElement | null) => {
     if (!canvas || !engine.pasteCanvasAsSmart(canvas)) {
       showToast('Nie można wkleić obrazu jako obiektu inteligentnego (warstwa zablokowana lub pusty obraz)');
@@ -925,6 +1013,18 @@ export default function App() {
     setActiveToolRaw('vector-select');
     bumpEngineRevision();
   }, [engine, showToast, bumpEngineRevision]);
+
+  /** Obraz spoza programu na warstwie wektorowej: przy większym od płótna najpierw pytanie, potem obiekt inteligentny. */
+  const pasteExternalAsSmart = useCallback(
+    async (canvas: HTMLCanvasElement | null) => {
+      if (!canvas) return pasteAsSmart(null);
+      const choice = await askPasteFit(canvas.width, canvas.height, false);
+      if (choice === 'cancel') return;
+      if (choice === 'expand' && !expandCanvasForPaste(canvas.width, canvas.height)) return;
+      pasteAsSmart(canvas);
+    },
+    [askPasteFit, expandCanvasForPaste, pasteAsSmart]
+  );
 
   const handleConvertLayer = useCallback(() => {
     const r = engine.convertLayerKind(engine.activeLayerIndex);
@@ -979,31 +1079,41 @@ export default function App() {
     engine.copy();
   }, [engine, vectorSelection, showToast]);
 
+  /** „Kopiuj spłaszczone”: kopiuje widoczny, złożony obraz ze wszystkich warstw (w zaznaczeniu, jeśli jest). */
+  const handleCopyMerged = useCallback(() => {
+    lastCopyRef.current = 'raster';
+    engine.copyMerged();
+    showToast('Skopiowano spłaszczony obraz');
+  }, [engine, showToast]);
+
   /** Wkleja obraz spoza aplikacji jako nową zawartość wyśrodkowaną na płótnie dokumentu. */
   const pasteExternalBlob = useCallback((file: File | Blob) => {
     const img = new Image();
-    img.onload = () => {
+    img.onload = async () => {
+      const choice = await askPasteFit(img.width, img.height, true);
+      if (choice === 'cancel') return;
+      if (choice === 'expand' && !expandCanvasForPaste(img.width, img.height)) return;
       const cvs = document.createElement('canvas');
       cvs.width = engine.width;
       cvs.height = engine.height;
       const ctx = cvs.getContext('2d')!;
 
-      // Wyśrodkuj wklejany obraz na płótnie dokumentu
-      const dx = Math.max(0, Math.round((engine.width - img.width) / 2));
-      const dy = Math.max(0, Math.round((engine.height - img.height) / 2));
-      ctx.drawImage(img, dx, dy, Math.min(img.width, engine.width), Math.min(img.height, engine.height));
+      // Obraz w swoim rozmiarze (bez skalowania), wyśrodkowany na płótnie; ewentualny nadmiar poza płótnem jest odcięty
+      const dx = Math.round((engine.width - img.width) / 2);
+      const dy = Math.round((engine.height - img.height) / 2);
+      ctx.drawImage(img, dx, dy);
 
       engine.pasteCanvas(cvs);
       setActiveTool('transform-content');
       bumpEngineRevision();
     };
     img.src = URL.createObjectURL(file);
-  }, [engine, bumpEngineRevision, showToast]);
+  }, [engine, bumpEngineRevision, showToast, askPasteFit, expandCanvasForPaste]);
 
   /** Wkleja obraz: własny bufor aplikacji z dokładnymi pikselami i maską albo obraz zewnętrzny (na warstwie wektorowej jako obiekt inteligentny). */
   const pasteImageBlob = useCallback((file: File | Blob) => {
     if (engine.getActiveLayer()?.vectorTarget) {
-      void blobToCanvas(file).then(pasteAsSmart);
+      void blobToCanvas(file).then(pasteExternalAsSmart);
       return;
     }
     {
@@ -1022,7 +1132,7 @@ export default function App() {
       }
       pasteExternalBlob(file);
     });
-  }, [engine, bumpEngineRevision, showToast, pasteExternalBlob, blobToCanvas, pasteAsSmart]);
+  }, [engine, bumpEngineRevision, showToast, pasteExternalBlob, blobToCanvas, pasteExternalAsSmart]);
 
   /** Wkleja ze schowka systemowego lub wewnętrznego bufora aplikacji; na warstwie wektorowej wkleja obiekty albo raster jako obiekt inteligentny. */
   /**
@@ -1078,7 +1188,7 @@ export default function App() {
                 if (lastCopyRef.current === 'raster' && engine.clipboardCanvas && (await engine.isOwnClipboardBlob(blob))) {
                   pasteAsSmart(engine.clipboardCanvas);
                 } else {
-                  pasteAsSmart(await blobToCanvas(blob));
+                  void pasteExternalAsSmart(await blobToCanvas(blob));
                 }
                 return;
               }
@@ -1132,7 +1242,7 @@ export default function App() {
         bumpEngineRevision();
       }
     }
-  }, [engine, pasteImageBlob, bumpEngineRevision, pasteAsSmart, blobToCanvas, showToast]);
+  }, [engine, pasteImageBlob, bumpEngineRevision, pasteAsSmart, pasteExternalAsSmart, blobToCanvas, showToast]);
 
   useEffect(() => {
     const handleGlobalPaste = (e: ClipboardEvent) => {
@@ -1252,7 +1362,8 @@ export default function App() {
           return;
         } else if (e.key === 'c' || e.key === 'C') {
           e.preventDefault();
-          handleCopy();
+          if (e.shiftKey) handleCopyMerged();
+          else handleCopy();
           return;
         } else if (e.key === 'v' || e.key === 'V') {
           e.preventDefault();
@@ -1276,8 +1387,19 @@ export default function App() {
           return;
         } else if (e.key === '0') {
           e.preventDefault();
-          setZoom(1.0);
-          setPanOffset(ZERO_PAN);
+          viewActRef.current.viewActualSize();
+          return;
+        } else if (e.key === '9') {
+          e.preventDefault();
+          viewActRef.current.viewFitWindow();
+          return;
+        } else if (e.key === '=' || e.key === '+') {
+          e.preventDefault();
+          viewActRef.current.viewZoomIn();
+          return;
+        } else if (e.key === '-' || e.key === '_') {
+          e.preventDefault();
+          viewActRef.current.viewZoomOut();
           return;
         }
       }
@@ -1287,28 +1409,8 @@ export default function App() {
       }
 
       const key = e.key.toLowerCase();
-      if (key === 's') setActiveTool('select-rect');
-      else if (key === 'm') setActiveTool('select-ellipse');
-      else if (key === 'l') setActiveTool('select-lasso');
-      else if (key === 'w') setActiveTool('magic-wand');
-      else if (key === 't') setActiveTool('transform-selection');
-      else if (key === 'b') setActiveTool('brush');
-      else if (key === 'e') setActiveTool('eraser');
-      else if (key === 'j') setActiveTool('correction-brush');
-      else if (key === 'r') setActiveTool('color-replace');
-      else if (key === 'c') setActiveTool('stamp');
-      else if (key === 'd' && !(e.ctrlKey || e.metaKey)) setActiveTool('deform');
-      else if (key === 'k') setActiveTool('pipette');
-      else if (key === 'f') setActiveTool('bucket');
-      else if (key === 'g') setActiveTool('gradient');
-      else if (key === 'o') setActiveTool('shapes');
-      else if (key === 'u') setActiveTool('line');
-      else if (key === 'y') setActiveTool('text');
-      else if (key === 'h') setActiveTool('pan');
-      else if (key === 'z') setActiveTool('zoom');
-      else if (key === 'v' && engine.getActiveLayer()?.vectorTarget) setActiveTool('vector-select');
-      else if (key === 'n' && engine.getActiveLayer()?.vectorTarget) setActiveTool('pen');
-      else if (key === 'p') setActiveTool('bezier');
+      const keyTool = e.ctrlKey || e.metaKey ? null : toolForKey(key, !!engine.getActiveLayer()?.vectorTarget);
+      if (keyTool) setActiveTool(keyTool);
       else if (key === 'x') {
         setPrimaryColor(secondaryColor);
         setSecondaryColor(primaryColor);
@@ -1320,15 +1422,14 @@ export default function App() {
         else adjustBrushParams(activeTool, { size: (v) => stepSize(v, dir) });
       } else if (e.key === 'Delete' && !isLiveVectorSessionActiveRef.current && !engine.getActiveLayer()?.vectorTarget) {
         // Przy aktywnej sesji (np. krzywej) Delete należy do sesji (usuwa węzeł), a nie czyści warstwy
-        const mask = engine.selectionManager.hasActiveSelection ? engine.selectionManager.maskCanvas : null;
-        engine.getActiveLayer()?.clear(mask);
+        engine.fillOrClearActive(null);
         bumpEngineRevision();
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [engine, primaryColor, secondaryColor, activeTool, bumpEngineRevision, handleCut, handleCopy, handlePaste, adjustBrushParams]);
+  }, [engine, primaryColor, secondaryColor, activeTool, bumpEngineRevision, handleCut, handleCopy, handleCopyMerged, handlePaste, adjustBrushParams]);
 
   // ---- Operacje na warstwach: wspólne dla panelu warstw i menu „Warstwy” ----
   const flushPendingSessions = () => {
@@ -1447,6 +1548,64 @@ export default function App() {
     else if (r.clipped) showToast('Część zawartości po obrocie wyszła poza obraz');
     bumpEngineRevision();
   };
+  // ---- Menu „Obraz”: operacje na całym obrazie ----
+  const opImageTransform = (op: LayerTransformOp) => {
+    flushPendingSessions();
+    engine.transformImage(op);
+    bumpEngineRevision();
+  };
+  const opCropSelection = () => {
+    flushPendingSessions();
+    const r = engine.cropToSelection();
+    if (!r.ok) showToast(r.reason);
+    else showToast(`Przycięto do zaznaczenia: ${r.w} × ${r.h} px`);
+    bumpEngineRevision();
+  };
+  const opCropTransparency = () => {
+    flushPendingSessions();
+    const r = engine.cropToTransparency();
+    if (!r.ok) showToast(r.reason);
+    else showToast(`Przycięto przezroczyste brzegi: ${r.w} × ${r.h} px`);
+    bumpEngineRevision();
+  };
+  const opOpenImageDialog = (kind: 'resize' | 'canvas') => {
+    flushPendingSessions();
+    setImageDlg(kind);
+  };
+  const imageMenu = buildImageMenu(
+    activeTab ? { hasSelection: engine.selectionManager.hasActiveSelection } : null,
+    {
+      cropToSelection: opCropSelection,
+      cropToTransparency: opCropTransparency,
+      openResize: () => opOpenImageDialog('resize'),
+      openCanvasSize: () => opOpenImageDialog('canvas'),
+      transform: opImageTransform,
+      flatten: opFlattenAll,
+    }
+  );
+  const viewMenu = buildViewMenu(
+    activeTab
+      ? {
+          hasSelection: engine.selectionManager.hasActiveSelection,
+          unit: effectiveUnit,
+          unitsLocked: !!activeTab.smart,
+          gridVisible,
+          rulersVisible,
+          guidesVisible,
+        }
+      : null,
+    {
+      zoomIn: viewZoomIn,
+      zoomOut: viewZoomOut,
+      fitWindow: viewFitWindow,
+      fitSelection: viewFitSelection,
+      actualSize: viewActualSize,
+      setUnit: setLengthUnit,
+      toggleGrid: () => setGridVisible((v) => !v),
+      toggleRulers: () => setRulersVisible((v) => !v),
+      toggleGuides: () => setGuidesVisible((v) => !v),
+    }
+  );
   const openLayerProps = (kind: 'blend' | 'opacity') => {
     const l = engine.getActiveLayer();
     if (!l || l.isAdjustment) return;
@@ -1553,8 +1712,7 @@ export default function App() {
         showToast(why);
         return;
       }
-      const mask = engine.selectionManager.hasActiveSelection ? engine.selectionManager.maskCanvas : null;
-      engine.getActiveLayer()?.clear(mask);
+      engine.fillOrClearActive(null);
       bumpEngineRevision();
     },
     onFillLayer: () => {
@@ -1563,8 +1721,7 @@ export default function App() {
         showToast(why);
         return;
       }
-      const mask = engine.selectionManager.hasActiveSelection ? engine.selectionManager.maskCanvas : null;
-      engine.getActiveLayer()?.fill(primaryColor, mask);
+      engine.fillOrClearActive(primaryColor);
       bumpEngineRevision();
     },
     onCut: handleCut,
@@ -1585,64 +1742,121 @@ export default function App() {
     onTransformSelection: () => {
       setActiveTool('transform-selection');
     },
+    onOpenSettings: () => setSettingsOpen(true),
     onTransformContent: () => {
       setActiveTool('transform-content');
     },
-    onZoomIn: () => setZoom((z) => Math.min(25.0, Number((z * 1.25).toFixed(2)))),
-    onZoomOut: () => setZoom((z) => Math.max(0.05, Number((z / 1.25).toFixed(2)))),
-    onZoomReset: () => {
-      setZoom(1.0);
-      setPanOffset(ZERO_PAN);
-    },
-    onFlipHorizontal: () => {
-      const why = engine.pixelEditBlockReason();
-      if (why) {
-        showToast(why);
-        return;
-      }
-      engine.getActiveLayer()?.flipHorizontal();
-      bumpEngineRevision();
-    },
-    onFlipVertical: () => {
-      const why = engine.pixelEditBlockReason();
-      if (why) {
-        showToast(why);
-        return;
-      }
-      engine.getActiveLayer()?.flipVertical();
-      bumpEngineRevision();
-    },
   };
+
+  const selectionMenu = buildSelectionMenu(
+    activeTab
+      ? { hasSelection: engine.selectionManager.hasActiveSelection, channels: engine.channels.alpha.map((c) => ({ id: c.id, name: c.name })) }
+      : null,
+    {
+      selectAll: menuHandlers.onSelectAll,
+      deselect: menuHandlers.onDeselect,
+      invert: menuHandlers.onInvertSelection,
+      openOffset: () => {
+        flushPendingSessions();
+        setSelOffsetDlg(true);
+      },
+      saveSelection: () => {
+        flushPendingSessions();
+        const id = engine.saveSelectionToChannel('replace', null);
+        if (id) showToast(`Zapisano zaznaczenie jako „${engine.channels.find(id)?.name ?? 'kanał'}” (panel Kanały)`);
+        bumpEngineRevision();
+      },
+      loadSelection: (id) => {
+        flushPendingSessions();
+        engine.loadChannelAsSelection(id, 'replace');
+        bumpEngineRevision();
+      },
+    }
+  );
+
+  const fillSelectionWith = (color: SKColor) => {
+    const why = engine.pixelEditBlockReason();
+    if (why) {
+      showToast(why);
+      return;
+    }
+    engine.fillOrClearActive(color);
+    bumpEngineRevision();
+  };
+  const editMenu = buildEditMenu(
+    activeTab
+      ? { canUndo: engine.canUndo(), canRedo: engine.canRedo(), history: engine.historyEntries(), snap: snapEnabled }
+      : null,
+    {
+      undo: () => {
+        engine.undo();
+        bumpEngineRevision();
+      },
+      redo: () => {
+        engine.redo();
+        bumpEngineRevision();
+      },
+      goToHistory: (i) => {
+        engine.goToHistory(i);
+        bumpEngineRevision();
+      },
+      cut: handleCut,
+      copy: handleCopy,
+      copyMerged: handleCopyMerged,
+      paste: () => handlePaste(),
+      pasteNewRaster: () => {
+        opAddLayer();
+        handlePaste();
+      },
+      pasteNewVector: () => {
+        opAddVectorLayer();
+        handlePaste();
+      },
+      clear: () => {
+        const why = engine.pixelEditBlockReason();
+        if (why) {
+          showToast(why);
+          return;
+        }
+        engine.fillOrClearActive(null);
+        bumpEngineRevision();
+      },
+      fillPrimary: () => fillSelectionWith(primaryColor),
+      fillSecondary: () => fillSelectionWith(secondaryColor),
+      toggleSnap: () => setSnapEnabled((v) => !v),
+      openSettings: () => setSettingsOpen(true),
+    }
+  );
 
   if (!activeTab) {
     // Wszystkie zakładki zamknięte: tylko Nowy i Otwórz mają sens, reszta menu jest wyłączona
     const idleHandlers = Object.fromEntries(
-      Object.entries(menuHandlers).map(([k, v]) => [k, typeof v === 'function' && k !== 'onNew' && k !== 'onOpen' ? () => {} : v])
+      Object.entries(menuHandlers).map(([k, v]) => [k, typeof v === 'function' && k !== 'onNew' && k !== 'onOpen' && k !== 'onOpenSettings' ? () => {} : v])
     ) as unknown as MenuActionHandlers;
     idleHandlers.canUndo = false;
     idleHandlers.canRedo = false;
     return (
       <UnitsContext.Provider value={{ unit: lengthUnit, dpi: engine.dpi }}>
-        <div className="flex flex-col h-screen w-screen overflow-hidden bg-[#1e1e1e] text-[#dddddd] font-sans">
+        <div className="flex flex-col h-screen w-screen overflow-hidden bg-[color:var(--h-1e1e1e,#1e1e1e)] text-[color:var(--h-dddddd,#dddddd)] font-sans">
           <input ref={fileInputRef} type="file" accept=".fig,application/json,image/*" onChange={handleFileLoaded} className="hidden" />
           <TitleBar tabs={[]} activeTabId="" onSelectTab={handleSelectTab} onCloseTab={handleCloseTab} onNewTab={() => setIsNewDocModalOpen(true)} />
-          <MenuBar handlers={idleHandlers} layersMenu={layersMenu} />
-          <div className="flex-1 min-h-0 flex flex-col items-center justify-center gap-4 select-none bg-[#252526]">
-            <div className="text-[#888] text-sm">Brak otwartych dokumentów</div>
+          <MenuBar handlers={idleHandlers} editMenu={editMenu} layersMenu={layersMenu} imageMenu={imageMenu} viewMenu={viewMenu} selectionMenu={selectionMenu} />
+          <div className="flex-1 min-h-0 flex flex-col items-center justify-center gap-4 select-none bg-[color:var(--h-252526,#252526)]">
+            <div className="text-[color:var(--h-888888,#888888)] text-sm">Brak otwartych dokumentów</div>
             <div className="flex items-center gap-2">
               <button
                 type="button"
                 onClick={() => setIsNewDocModalOpen(true)}
-                className="h-8 px-4 flex items-center gap-2 bg-[#282828] border border-[#3e3e3e] rounded text-xs text-[#ccc] hover:bg-[#383838] hover:text-white cursor-pointer transition-colors"
+                className="h-8 px-4 flex items-center gap-2 bg-[color:var(--h-282828,#282828)] border border-[color:var(--h-3e3e3e,#3e3e3e)] rounded text-xs text-[color:var(--h-cccccc,#cccccc)] hover:bg-[color:var(--h-383838,#383838)] hover:text-[color:var(--t-white,#fff)] cursor-pointer transition-colors"
               >
-                <FilePlus size={14} /> Nowy dokument <span className="text-[#777]">Ctrl+N</span>
+                <FilePlus size={14} /> Nowy dokument <span className="text-[color:var(--h-777777,#777777)]">Ctrl+N</span>
               </button>
               <button
                 type="button"
                 onClick={handleOpenFilePicker}
-                className="h-8 px-4 flex items-center gap-2 bg-[#282828] border border-[#3e3e3e] rounded text-xs text-[#ccc] hover:bg-[#383838] hover:text-white cursor-pointer transition-colors"
+                className="h-8 px-4 flex items-center gap-2 bg-[color:var(--h-282828,#282828)] border border-[color:var(--h-3e3e3e,#3e3e3e)] rounded text-xs text-[color:var(--h-cccccc,#cccccc)] hover:bg-[color:var(--h-383838,#383838)] hover:text-[color:var(--t-white,#fff)] cursor-pointer transition-colors"
               >
-                <FolderOpen size={14} /> Otwórz <span className="text-[#777]">Ctrl+O</span>
+                <FolderOpen size={14} /> Otwórz <span className="text-[color:var(--h-777777,#777777)]">Ctrl+O</span>
               </button>
             </div>
           </div>
@@ -1651,8 +1865,9 @@ export default function App() {
             onClose={() => setIsNewDocModalOpen(false)}
             onCreate={handleCreateNewDocument}
             defaultTitle="obraz1.fig"
-            defaultUnit={lengthUnit === 'px' ? 'px' : 'mm'}
+            defaultUnit={lengthUnit}
           />
+          {settingsOpen && <SettingsDialog onClose={() => setSettingsOpen(false)} historyBytes={null} />}
         </div>
       </UnitsContext.Provider>
     );
@@ -1660,7 +1875,7 @@ export default function App() {
 
   return (
     <UnitsContext.Provider value={{ unit: effectiveUnit, dpi: engine.dpi }}>
-    <div className="flex flex-col h-screen w-screen overflow-hidden bg-[#1e1e1e] text-[#dddddd] font-sans">
+    <div className="flex flex-col h-screen w-screen overflow-hidden bg-[color:var(--h-1e1e1e,#1e1e1e)] text-[color:var(--h-dddddd,#dddddd)] font-sans">
       <input
         ref={fileInputRef}
         type="file"
@@ -1677,7 +1892,7 @@ export default function App() {
         onNewTab={() => setIsNewDocModalOpen(true)}
       />
 
-      <MenuBar handlers={menuHandlers} layersMenu={layersMenu} />
+      <MenuBar handlers={menuHandlers} editMenu={editMenu} layersMenu={layersMenu} imageMenu={imageMenu} viewMenu={viewMenu} selectionMenu={selectionMenu} />
 
       <ToolOptionsBar
         brushSettings={brushSettings}
@@ -1770,6 +1985,9 @@ export default function App() {
           guideAxis={guideAxis}
           snapEnabled={snapEnabled}
           guidesVisible={guidesVisible}
+          gridVisible={gridVisible}
+          rulersVisible={rulersVisible}
+          rulerUnit={effectiveUnit}
           onOpenSmartObject={handleOpenSmartObject}
           lineAndCurveSettings={lineAndCurveSettings}
           onChangeLineAndCurveSettings={handleUpdateLineAndCurveSettings}
@@ -1809,7 +2027,7 @@ export default function App() {
           onShowToast={showToast}
         />
 
-        <div className="w-[224px] bg-[#1e1e1e] border-l border-[#2c2c2d] p-2 flex flex-col gap-3 overflow-y-auto z-10 select-none flex-shrink-0">
+        <div className="w-[224px] bg-[color:var(--h-1e1e1e,#1e1e1e)] border-l border-[color:var(--h-2c2c2d,#2c2c2d)] p-2 flex flex-col gap-3 overflow-y-auto z-10 select-none flex-shrink-0">
           <ColorPanel
             primaryColor={primaryColor}
             secondaryColor={secondaryColor}
@@ -2045,6 +2263,72 @@ export default function App() {
         </div>
       </div>
 
+      {imageDlg === 'resize' && (
+        <ImageResizeDialog
+          width={engine.width}
+          height={engine.height}
+          dpi={engine.dpi}
+          defaultUnit={effectiveUnit}
+          onCancel={() => setImageDlg(null)}
+          onApply={(r) => {
+            const res = engine.resizeImage(r.width, r.height, r.method, r.dpi !== engine.dpi ? r.dpi : undefined);
+            setImageDlg(null);
+            if (!res.ok) showToast(res.reason);
+            else showToast(`Rozmiar obrazu: ${engine.width} × ${engine.height} px`);
+            bumpEngineRevision();
+          }}
+        />
+      )}
+      {imageDlg === 'canvas' && (
+        <CanvasSizeDialog
+          width={engine.width}
+          height={engine.height}
+          dpi={engine.dpi}
+          defaultUnit={effectiveUnit}
+          onCancel={() => setImageDlg(null)}
+          onApply={(r) => {
+            const res = engine.resizeCanvas(r.width, r.height, r.ax, r.ay);
+            setImageDlg(null);
+            if (!res.ok) showToast(res.reason);
+            else showToast(`Rozmiar płótna: ${engine.width} × ${engine.height} px`);
+            bumpEngineRevision();
+          }}
+        />
+      )}
+
+      {pasteFitDlg && (
+        <PasteFitDialog
+          imageW={pasteFitDlg.iw}
+          imageH={pasteFitDlg.ih}
+          canvasW={engine.width}
+          canvasH={engine.height}
+          crops={pasteFitDlg.crops}
+          onChoose={(c) => {
+            const r = pasteFitDlg.resolve;
+            setPasteFitDlg(null);
+            r(c);
+          }}
+        />
+      )}
+
+      {settingsOpen && <SettingsDialog onClose={() => setSettingsOpen(false)} historyBytes={activeTab ? engine.getHistoryBytes() : null} />}
+
+      {selOffsetDlg && (
+        <SelectionOffsetDialog
+          dpi={engine.dpi}
+          defaultUnit={effectiveUnit}
+          maxPx={Math.max(engine.width, engine.height)}
+          onCancel={() => setSelOffsetDlg(false)}
+          onApply={(r) => {
+            const res = engine.offsetSelection(r.delta, r.feather);
+            setSelOffsetDlg(false);
+            if (!res.ok) showToast(res.reason ?? 'Nie udało się zmienić zaznaczenia');
+            else if (!engine.selectionManager.hasActiveSelection) showToast('Zaznaczenie zniknęło po zmniejszeniu');
+            bumpEngineRevision();
+          }}
+        />
+      )}
+
       {layerPropsDlg && (() => {
         const dlg = layerPropsDlg;
         const idx = () => engine.layers.indexOf(dlg.layer);
@@ -2099,6 +2383,10 @@ export default function App() {
         onToggleSnap={() => setSnapEnabled((v) => !v)}
         guidesVisible={guidesVisible}
         onToggleGuides={() => setGuidesVisible((v) => !v)}
+        rulersVisible={rulersVisible}
+        onToggleRulers={() => setRulersVisible((v) => !v)}
+        gridVisible={gridVisible}
+        onToggleGrid={() => setGridVisible((v) => !v)}
       />
 
       {correctionDlg && correctionDlg.engine === engine && (
@@ -2141,7 +2429,7 @@ export default function App() {
         onClose={() => setIsNewDocModalOpen(false)}
         onCreate={handleCreateNewDocument}
         defaultTitle={`obraz${tabs.length + 1}.fig`}
-        defaultUnit={lengthUnit === 'px' ? 'px' : 'mm'}
+        defaultUnit={lengthUnit}
       />
     </div>
     </UnitsContext.Provider>

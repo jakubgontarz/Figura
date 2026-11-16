@@ -680,6 +680,12 @@ export class SelectionManager {
       this.rebuildFromActiveMultiPoly();
     } else if (snapshot.imgData) {
       this.maskPending = false;
+      // maska rastrowa: dawny opis wektorowy jest nieaktualny
+      this.ampPairs = [];
+      this.ampFlat = null;
+      this.lazyXform = null;
+      this.boundsCache = undefined;
+      this.visPath = null;
       if (snapshot.x !== undefined || snapshot.y !== undefined) {
         // Przycięty fragment: reszta maski ma być pusta
         this._maskCtx.clearRect(0, 0, this.width, this.height);
@@ -729,6 +735,31 @@ export class SelectionManager {
     ];
     const docMultiPoly: MultiPolygon = [[docRing]];
 
+    if (this.hasActiveSelection && this.geomPolyCount() === 0) {
+      // Maska czysto rastrowa (np. wczytana z kanału): odwracamy kryjące piksele, nie ma opisu wektorowego
+      const imgData = this.maskCtx.getImageData(0, 0, this.width, this.height);
+      const data = imgData.data;
+      let anySelected = false;
+      for (let i = 0; i < data.length; i += 4) {
+        const inv = 255 - data[i + 3];
+        data[i] = data[i + 1] = data[i + 2] = 255;
+        data[i + 3] = inv;
+        if (inv > 0) anySelected = true;
+      }
+      if (!anySelected) {
+        this.clear();
+        return;
+      }
+      this.ampPairs = [];
+      this.ampFlat = null;
+      this.lazyXform = null;
+      this.boundsCache = undefined;
+      this.visPath = null;
+      this.maskCtx.putImageData(imgData, 0, 0);
+      this.hasActiveSelection = true;
+      this.rebuildContoursFromMask();
+      return;
+    }
     if (!this.hasActiveSelection || this.activeMultiPoly.length === 0) {
       this.activeMultiPoly = docMultiPoly;
     } else {

@@ -25,6 +25,7 @@
  */
 
 import type { GraphicEngine } from './GraphicEngine.ts';
+import { settings } from './Settings.ts';
 import type { Layer } from './Layer.ts';
 import type { TileGrid } from './TileGrid.ts';
 import { SparseSurface, TilePool } from './GpuTilePool.ts';
@@ -49,7 +50,6 @@ import {
 /** Największe okno składania (piksele rastra razem z marginesem filtrów). */
 const MAX_WIN_PX = 24 * 1024 * 1024;
 /** Limit pamięci podręcznej wyników efektów (tekstury wielkości okna), w bajtach. Pamięć warstw reguluje pula kafelków. */
-const FX_CACHE_BUDGET = 420 * 1024 * 1024;
 /** Minimalne przesunięcie siatki próbkowania (jak TIE_EPS w ViewportTileRenderer: ten sam piksel wygrywa w obu ścieżkach). */
 const TIE_EPS = 0.002;
 export interface GpuView {
@@ -370,6 +370,7 @@ export class GpuComposer {
   public static available(): boolean {
     const f = (globalThis as { __figuraGpuCompose?: boolean }).__figuraGpuCompose;
     if (f === false) return false;
+    if (settings.get().gpu === 'off') return false;
     if (typeof location !== 'undefined' && /[?&]nogpucompose\b/.test(location.search)) return false;
     return !!kitGl();
   }
@@ -1078,7 +1079,7 @@ export class GpuComposer {
       if (corr) {
         const out = this.runChain(layer, cur, win);
         if (!out) return null;
-        if (fxKey && this.fxBytes + bytesOf(W, H, 4) <= FX_CACHE_BUDGET) {
+        if (fxKey && this.fxBytes + bytesOf(W, H, 4) <= settings.get().fxCacheMB * 1024 * 1024) {
           let e = this.fxCache.get(layer);
           if (!e || e.tex.w !== W || e.tex.h !== H) {
             if (e) {

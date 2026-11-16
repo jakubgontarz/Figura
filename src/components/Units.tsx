@@ -76,7 +76,7 @@ export const LengthField: React.FC<{
 /** Etykieta jednostki obok pola długości. */
 export const UnitLabel: React.FC<{ forcePx?: boolean }> = ({ forcePx }) => {
   const { unit } = useUnits();
-  return <span className="text-[10px] text-[#888]">{forcePx ? 'px' : UNIT_LABEL[unit]}</span>;
+  return <span className="text-[10px] text-[color:var(--h-888888,#888888)]">{forcePx ? 'px' : UNIT_LABEL[unit]}</span>;
 };
 
 export { fmtMm, pxToMm, pxToUnit };

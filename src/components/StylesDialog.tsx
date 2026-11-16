@@ -3,7 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { dialogOwnsKey } from '../core/dialogStack.ts';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { DialogWindow } from './DialogWindow.tsx';
 import { Eye, EyeOff, Trash2, X } from 'lucide-react';
 import {
   BUILTIN_PRESETS,
@@ -54,7 +56,7 @@ const SliderRow: React.FC<{
 }> = ({ label, value, min, max, step, decimals = 0, unit, defaultValue, onChange }) => (
   <div className="mb-1.5 flex items-center gap-1.5">
     <label
-      className="w-[108px] shrink-0 truncate text-[10.5px] text-[#bbb] cursor-default"
+      className="w-[108px] shrink-0 truncate text-[10.5px] text-[color:var(--h-bbbbbb,#bbbbbb)] cursor-default"
       title={defaultValue !== undefined ? `${label} (dwukrotne kliknięcie przywraca wartość domyślną)` : label}
       onDoubleClick={() => defaultValue !== undefined && onChange(defaultValue)}
     >
@@ -75,11 +77,11 @@ const SelectRow: React.FC<{
   inline?: boolean;
 }> = ({ label, value, options, onChange, inline }) => (
   <div className={inline ? 'mb-1.5 flex items-center gap-1.5' : 'mb-1.5 min-w-0'}>
-    <label className={inline ? 'w-[108px] shrink-0 text-[10.5px] text-[#bbb]' : 'block text-[10.5px] text-[#bbb] mb-0.5'}>{label}</label>
+    <label className={inline ? 'w-[108px] shrink-0 text-[10.5px] text-[color:var(--h-bbbbbb,#bbbbbb)]' : 'block text-[10.5px] text-[color:var(--h-bbbbbb,#bbbbbb)] mb-0.5'}>{label}</label>
     <select
       value={value}
       onChange={(e) => onChange(e.target.value)}
-      className={`${inline ? 'flex-1' : 'w-full'} min-w-0 h-6 bg-[#222] border border-[#444] rounded px-1.5 text-[10.5px] text-white focus:outline-none focus:border-[#007acc] cursor-pointer`}
+      className={`${inline ? 'flex-1' : 'w-full'} min-w-0 h-6 bg-[color:var(--h-222222,#222222)] border border-[color:var(--h-444444,#444444)] rounded px-1.5 text-[10.5px] text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[color:var(--h-007acc,#007acc)] cursor-pointer`}
     >
       {options.map((o) => (
         <option key={o.value} value={o.value}>
@@ -95,7 +97,7 @@ const ColorRow: React.FC<{ label: string; value: string; onChange: (v: string) =
   const [draft, setDraft] = useState<string | null>(null);
   return (
     <div className={stacked ? 'mb-1.5 min-w-0' : 'mb-1.5 flex items-center gap-1.5'}>
-      <label className={stacked ? 'block text-[10.5px] text-[#bbb] mb-0.5' : 'w-[108px] shrink-0 text-[10.5px] text-[#bbb]'}>{label}</label>
+      <label className={stacked ? 'block text-[10.5px] text-[color:var(--h-bbbbbb,#bbbbbb)] mb-0.5' : 'w-[108px] shrink-0 text-[10.5px] text-[color:var(--h-bbbbbb,#bbbbbb)]'}>{label}</label>
       <div className="flex items-center gap-1">
         <input
           type="text"
@@ -113,9 +115,9 @@ const ColorRow: React.FC<{ label: string; value: string; onChange: (v: string) =
               e.stopPropagation();
             }
           }}
-          className="w-[68px] h-6 bg-[#111] border border-[#3e3e3e] rounded px-1 text-[10.5px] text-white font-mono focus:outline-none focus:border-[#007acc]"
+          className="w-[68px] h-6 bg-[color:var(--h-111111,#111111)] border border-[color:var(--h-3e3e3e,#3e3e3e)] rounded px-1 text-[10.5px] text-[color:var(--t-white,#fff)] font-mono focus:outline-none focus:border-[color:var(--h-007acc,#007acc)]"
         />
-        <ColorSwatchButton value={value} onChange={onChange} className="w-8 h-6 p-0 border border-[#3e3e3e] rounded cursor-pointer shrink-0" />
+        <ColorSwatchButton value={value} onChange={onChange} className="w-8 h-6 p-0 border border-[color:var(--h-3e3e3e,#3e3e3e)] rounded cursor-pointer shrink-0" />
       </div>
     </div>
   );
@@ -129,7 +131,7 @@ const BlendRow: React.FC<{ label?: string; value: StyleBlend; onChange: (v: Styl
 const Pair: React.FC<{ children: React.ReactNode }> = ({ children }) => <div className="grid grid-cols-2 gap-2 items-start">{children}</div>;
 
 const SubTitle: React.FC<{ children: React.ReactNode }> = ({ children }) => (
-  <div className="text-[9.5px] uppercase tracking-wide text-[#777] mt-2 mb-1 border-t border-[#333] pt-1.5">{children}</div>
+  <div className="text-[9.5px] uppercase tracking-wide text-[color:var(--h-777777,#777777)] mt-2 mb-1 border-t border-[color:var(--h-333333,#333333)] pt-1.5">{children}</div>
 );
 
 // --------------------------------------------------------------------------------------------------------------
@@ -167,10 +169,10 @@ const GradientEditor: React.FC<{ stops: GradStop[]; onChange: (s: GradStop[]) =>
 
   return (
     <div className="mb-2">
-      <div className="text-[10.5px] text-[#bbb] mb-1">Gradient</div>
+      <div className="text-[10.5px] text-[color:var(--h-bbbbbb,#bbbbbb)] mb-1">Gradient</div>
       <div
         ref={barRef}
-        className="relative h-5 rounded border border-[#444] cursor-copy"
+        className="relative h-5 rounded border border-[color:var(--h-444444,#444444)] cursor-copy"
         style={{ backgroundImage: `${css}, repeating-conic-gradient(#555 0% 25%, #333 0% 50%)`, backgroundSize: '100% 100%, 8px 8px' }}
         onPointerDown={(e) => {
           if (e.target !== e.currentTarget) return;
@@ -198,14 +200,14 @@ const GradientEditor: React.FC<{ stops: GradStop[]; onChange: (s: GradStop[]) =>
             onPointerUp={() => {
               dragRef.current = null;
             }}
-            className={`absolute -bottom-1.5 w-2.5 h-3 -ml-[5px] rounded-sm border cursor-ew-resize ${i === idx ? 'border-white' : 'border-[#888]'}`}
+            className={`absolute -bottom-1.5 w-2.5 h-3 -ml-[5px] rounded-sm border cursor-ew-resize ${i === idx ? 'border-white' : 'border-[color:var(--h-888888,#888888)]'}`}
             style={{ left: `${s.pos}%`, background: s.color }}
           />
         ))}
       </div>
       <div className="mt-2.5 flex items-center gap-1.5">
         <ColorSwatchButton value={cur.color} onChange={(c) => onChange(stops.map((x, k) => (k === idx ? { ...x, color: c } : x)))} />
-        <span className="text-[10px] text-[#999]">punkt {idx + 1} z {stops.length}</span>
+        <span className="text-[10px] text-[color:var(--h-999999,#999999)]">punkt {idx + 1} z {stops.length}</span>
         <button
           type="button"
           disabled={stops.length <= 2}
@@ -213,7 +215,7 @@ const GradientEditor: React.FC<{ stops: GradStop[]; onChange: (s: GradStop[]) =>
             onChange(stops.filter((_, k) => k !== idx));
             setSel(0);
           }}
-          className="ml-auto h-5 px-1.5 text-[10px] rounded border bg-[#282828] border-[#3e3e3e] text-[#ccc] hover:bg-[#383838] disabled:opacity-40 cursor-pointer disabled:cursor-default"
+          className="ml-auto h-5 px-1.5 text-[10px] rounded border bg-[color:var(--h-282828,#282828)] border-[color:var(--h-3e3e3e,#3e3e3e)] text-[color:var(--h-cccccc,#cccccc)] hover:bg-[color:var(--h-383838,#383838)] disabled:opacity-40 cursor-pointer disabled:cursor-default"
         >
           Usuń punkt
         </button>
@@ -541,14 +543,14 @@ const PresetsPane: React.FC<{ current: LayerStyles; onApply: (s: LayerStyles) =>
       <button
         type="button"
         onClick={() => onApply(p.styles)}
-        className="flex-1 min-w-0 flex items-center justify-between gap-2 h-6 px-2 rounded border bg-[#282828] border-[#3e3e3e] text-[11px] text-[#ddd] hover:bg-[#10549c] hover:border-[#2980b9] hover:text-white cursor-pointer"
+        className="flex-1 min-w-0 flex items-center justify-between gap-2 h-6 px-2 rounded border bg-[color:var(--h-282828,#282828)] border-[color:var(--h-3e3e3e,#3e3e3e)] text-[11px] text-[color:var(--h-dddddd,#dddddd)] hover:bg-[color:var(--h-10549c,#10549c)] hover:border-[color:var(--h-2980b9,#2980b9)] hover:text-white cursor-pointer"
         title="Zastosuj preset (zastępuje ustawienia stylizacji tej warstwy)"
       >
         <span className="truncate">{p.name}</span>
         <PresetChips styles={p.styles} />
       </button>
       {!p.builtin && (
-        <button type="button" onClick={() => del(p.id)} title="Usuń preset" className="p-1 rounded text-[#bbb] hover:bg-[#4a2a2a] hover:text-white cursor-pointer">
+        <button type="button" onClick={() => del(p.id)} title="Usuń preset" className="p-1 rounded text-[color:var(--h-bbbbbb,#bbbbbb)] hover:bg-[#4a2a2a] hover:text-[color:var(--t-white,#fff)] cursor-pointer">
           <Trash2 size={12} />
         </button>
       )}
@@ -556,7 +558,7 @@ const PresetsPane: React.FC<{ current: LayerStyles; onApply: (s: LayerStyles) =>
   );
   return (
     <div>
-      <div className="text-[9.5px] uppercase tracking-wide text-[#777] mb-1.5">Zapisz bieżące ustawienia</div>
+      <div className="text-[9.5px] uppercase tracking-wide text-[color:var(--h-777777,#777777)] mb-1.5">Zapisz bieżące ustawienia</div>
       <div className="flex gap-1.5 mb-3">
         <input
           type="text"
@@ -569,22 +571,22 @@ const PresetsPane: React.FC<{ current: LayerStyles; onApply: (s: LayerStyles) =>
               save();
             }
           }}
-          className="flex-1 h-6 bg-[#111] border border-[#3e3e3e] rounded px-1.5 text-[11px] text-white focus:outline-none focus:border-[#007acc]"
+          className="flex-1 h-6 bg-[color:var(--h-111111,#111111)] border border-[color:var(--h-3e3e3e,#3e3e3e)] rounded px-1.5 text-[11px] text-[color:var(--t-white,#fff)] focus:outline-none focus:border-[color:var(--h-007acc,#007acc)]"
         />
-        <button type="button" onClick={save} className="h-6 px-2.5 text-[11px] rounded border bg-[#10549c] border-[#2980b9] text-white hover:bg-[#1465b5] cursor-pointer">
+        <button type="button" onClick={save} className="h-6 px-2.5 text-[11px] rounded border bg-[color:var(--h-10549c,#10549c)] border-[color:var(--h-2980b9,#2980b9)] text-white hover:bg-[color:var(--h-1465b5,#1465b5)] cursor-pointer">
           Zapisz
         </button>
       </div>
       {user.length > 0 && (
         <>
-          <div className="text-[9.5px] uppercase tracking-wide text-[#777] mb-1.5">Moje presety</div>
+          <div className="text-[9.5px] uppercase tracking-wide text-[color:var(--h-777777,#777777)] mb-1.5">Moje presety</div>
           {user.map((p) => (
             <Row key={p.id} p={p} />
           ))}
           <div className="h-2" />
         </>
       )}
-      <div className="text-[9.5px] uppercase tracking-wide text-[#777] mb-1.5">Wbudowane</div>
+      <div className="text-[9.5px] uppercase tracking-wide text-[color:var(--h-777777,#777777)] mb-1.5">Wbudowane</div>
       {BUILTIN_PRESETS.map((p) => (
         <Row key={p.id} p={p} />
       ))}
@@ -602,11 +604,6 @@ export const StylesDialog: React.FC<StylesDialogProps> = ({ layerName, initial, 
   const [preview, setPreview] = useState(true);
   const previewRef = useRef(true);
   previewRef.current = preview;
-  const [pos, setPos] = useState(() => ({
-    x: Math.max(16, (typeof window !== 'undefined' ? window.innerWidth : 1200) - 224 - 580 - 24),
-    y: Math.max(8, Math.min(90, (typeof window !== 'undefined' ? window.innerHeight : 800) - 470)),
-  }));
-  const dragRef = useRef<{ dx: number; dy: number } | null>(null);
 
   const push = (next: LayerStyles, previewOn = previewRef.current) => {
     setStyles(next);
@@ -622,6 +619,7 @@ export const StylesDialog: React.FC<StylesDialogProps> = ({ layerName, initial, 
   latest.current = { onOk, onCancel };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (!dialogOwnsKey(e, 'styles-dialog')) return;
       if (isColorPopoverOpen()) return; // Esc / Enter obsługuje mały panel koloru
       if (e.key === 'Escape') {
         e.preventDefault();
@@ -635,56 +633,31 @@ export const StylesDialog: React.FC<StylesDialogProps> = ({ layerName, initial, 
     return () => window.removeEventListener('keydown', onKey, true);
   }, []);
 
-  const onTitleDown = (e: React.PointerEvent) => {
-    if ((e.target as HTMLElement).closest('button')) return;
-    dragRef.current = { dx: e.clientX - pos.x, dy: e.clientY - pos.y };
-    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-  };
-  const onTitleMove = (e: React.PointerEvent) => {
-    const d = dragRef.current;
-    if (!d) return;
-    setPos({
-      x: Math.max(0, Math.min(window.innerWidth - 80, e.clientX - d.dx)),
-      y: Math.max(0, Math.min(window.innerHeight - 40, e.clientY - d.dy)),
-    });
-  };
-  const onTitleUp = () => {
-    dragRef.current = null;
-  };
-
   const activeName = useMemo(() => (tab === 'presets' ? 'Presety' : STYLE_LIST.find((e) => e.kind === tab)!.name), [tab]);
 
   return (
-    <div
-      role="dialog"
-      aria-label="Stylizacje warstwy"
-      className="fixed z-[60] w-[580px] bg-[#1e1e1e] border border-[#3a3a3a] rounded-md shadow-2xl text-xs select-none flex flex-col"
-      style={{ left: pos.x, top: pos.y, maxHeight: 'calc(100vh - 24px)' }}
-      onKeyDown={(e) => e.stopPropagation()}
+    <DialogWindow
+      width={580}
+      onClose={onCancel}
+      testId="styles-dialog"
+      initialPos={() => ({
+        x: Math.max(16, (typeof window !== 'undefined' ? window.innerWidth : 1200) - 224 - 580 - 24),
+        y: Math.max(8, Math.min(90, (typeof window !== 'undefined' ? window.innerHeight : 800) - 470)),
+      })}
+      title={
+        <>
+          Stylizacje warstwy <span className="font-normal text-[color:var(--h-999999,#999999)]">· {layerName}</span>
+        </>
+      }
     >
-      <div
-        className="flex items-center justify-between px-2.5 h-7 bg-[#2a2a2b] border-b border-[#3a3a3a] rounded-t-md cursor-move shrink-0"
-        onPointerDown={onTitleDown}
-        onPointerMove={onTitleMove}
-        onPointerUp={onTitleUp}
-        onPointerCancel={onTitleUp}
-      >
-        <span className="text-[11px] font-semibold text-white truncate">
-          Stylizacje warstwy <span className="font-normal text-[#999]">· {layerName}</span>
-        </span>
-        <button type="button" onClick={onCancel} title="Anuluj (Esc)" className="p-0.5 rounded text-[#bbb] hover:bg-[#4a2a2a] hover:text-white cursor-pointer">
-          <X size={13} />
-        </button>
-      </div>
-
       <div className="flex min-h-0 flex-1" style={{ height: 'min(430px, calc(100vh - 110px))' }}>
         {/* lewa kolumna: zakładki z polem wyboru i okiem */}
-        <div className="w-[196px] shrink-0 border-r border-[#333] p-1.5 overflow-y-auto">
+        <div className="w-[196px] shrink-0 border-r border-[color:var(--h-333333,#333333)] p-1.5 overflow-y-auto">
           <button
             type="button"
             onClick={() => setTab('presets')}
             className={`w-full h-6 mb-1.5 text-left px-2 rounded border text-[11px] cursor-pointer ${
-              tab === 'presets' ? 'bg-[#10549c] border-[#2980b9] text-white' : 'bg-[#282828] border-[#3e3e3e] text-[#ddd] hover:bg-[#333]'
+              tab === 'presets' ? 'bg-[color:var(--h-10549c,#10549c)] border-[color:var(--h-2980b9,#2980b9)] text-white' : 'bg-[color:var(--h-282828,#282828)] border-[color:var(--h-3e3e3e,#3e3e3e)] text-[color:var(--h-dddddd,#dddddd)] hover:bg-[color:var(--h-333333,#333333)]'
             }`}
           >
             Presety
@@ -697,7 +670,7 @@ export const StylesDialog: React.FC<StylesDialogProps> = ({ layerName, initial, 
                 key={e.kind}
                 onClick={() => setTab(e.kind)}
                 className={`flex items-center gap-1.5 h-6 mb-0.5 px-1.5 rounded border cursor-pointer ${
-                  selected ? 'bg-[#10549c] border-[#2980b9] text-white' : 'bg-[#252526] border-transparent text-[#ddd] hover:bg-[#2f2f30]'
+                  selected ? 'bg-[color:var(--h-10549c,#10549c)] border-[color:var(--h-2980b9,#2980b9)] text-white' : 'bg-[color:var(--h-252526,#252526)] border-transparent text-[color:var(--h-dddddd,#dddddd)] hover:bg-[color:var(--h-2f2f30,#2f2f30)]'
                 }`}
               >
                 <input
@@ -712,7 +685,7 @@ export const StylesDialog: React.FC<StylesDialogProps> = ({ layerName, initial, 
                     });
                     if (ev.target.checked) setTab(e.kind);
                   }}
-                  className="accent-[#007acc] cursor-pointer"
+                  className="accent-[color:var(--h-007acc,#007acc)] cursor-pointer"
                 />
                 <span className={`flex-1 min-w-0 truncate text-[11px] ${x.enabled ? '' : 'opacity-70'}`}>{e.name}</span>
                 <button
@@ -722,7 +695,7 @@ export const StylesDialog: React.FC<StylesDialogProps> = ({ layerName, initial, 
                     ev.stopPropagation();
                     set((s) => void ((s[e.kind] as StyleBase).visible = !(s[e.kind] as StyleBase).visible));
                   }}
-                  className={`p-0.5 rounded cursor-pointer ${x.enabled ? 'text-[#ddd] hover:bg-black/30' : 'text-[#666]'}`}
+                  className={`p-0.5 rounded cursor-pointer ${x.enabled ? 'text-[color:var(--h-dddddd,#dddddd)] hover:bg-black/30' : 'text-[color:var(--h-666666,#666666)]'}`}
                 >
                   {x.visible ? <Eye size={11} strokeWidth={2.2} /> : <EyeOff size={11} strokeWidth={2.2} />}
                 </button>
@@ -733,7 +706,7 @@ export const StylesDialog: React.FC<StylesDialogProps> = ({ layerName, initial, 
 
         {/* prawa kolumna: ustawienia */}
         <div className="flex-1 min-w-0 px-3 py-2 overflow-y-auto">
-          <div className="text-[11px] font-semibold text-white mb-2.5 pb-1.5 border-b border-[#333]">{activeName}</div>
+          <div className="text-[11px] font-semibold text-[color:var(--t-white,#fff)] mb-2.5 pb-1.5 border-b border-[color:var(--h-333333,#333333)]">{activeName}</div>
           {tab === 'presets' ? (
             <PresetsPane
               current={styles}
@@ -764,8 +737,8 @@ export const StylesDialog: React.FC<StylesDialogProps> = ({ layerName, initial, 
         </div>
       </div>
 
-      <div className="flex items-center gap-1.5 px-3 py-2 border-t border-[#333] shrink-0">
-        <label className="flex items-center gap-1.5 text-[10.5px] text-[#ccc] cursor-pointer mr-auto" title="Pokaż / ukryj wszystkie stylizacje tej warstwy na płótnie">
+      <div className="flex items-center gap-1.5 px-3 py-2 border-t border-[color:var(--h-333333,#333333)] shrink-0">
+        <label className="flex items-center gap-1.5 text-[10.5px] text-[color:var(--h-cccccc,#cccccc)] cursor-pointer mr-auto" title="Pokaż / ukryj wszystkie stylizacje tej warstwy na płótnie">
           <input
             type="checkbox"
             checked={preview}
@@ -773,7 +746,7 @@ export const StylesDialog: React.FC<StylesDialogProps> = ({ layerName, initial, 
               setPreview(e.target.checked);
               push(styles, e.target.checked);
             }}
-            className="accent-[#007acc]"
+            className="accent-[color:var(--h-007acc,#007acc)]"
           />
           Podgląd
         </label>
@@ -788,23 +761,23 @@ export const StylesDialog: React.FC<StylesDialogProps> = ({ layerName, initial, 
               (s as any)[tab] = { ...(d as any)[tab], enabled: keepEnabled };
             });
           }}
-          className="h-6 px-2.5 text-[11px] rounded border bg-[#282828] border-[#3e3e3e] text-[#ccc] hover:bg-[#383838] disabled:opacity-40 cursor-pointer disabled:cursor-default"
+          className="h-6 px-2.5 text-[11px] rounded border bg-[color:var(--h-282828,#282828)] border-[color:var(--h-3e3e3e,#3e3e3e)] text-[color:var(--h-cccccc,#cccccc)] hover:bg-[color:var(--h-383838,#383838)] disabled:opacity-40 cursor-pointer disabled:cursor-default"
           title="Przywróć domyślne ustawienia wybranej stylizacji"
         >
           Resetuj
         </button>
-        <button type="button" onClick={onCancel} className="h-6 px-2.5 text-[11px] rounded border bg-[#282828] border-[#3e3e3e] text-[#ccc] hover:bg-[#383838] cursor-pointer">
+        <button type="button" onClick={onCancel} className="h-6 px-2.5 text-[11px] rounded border bg-[color:var(--h-282828,#282828)] border-[color:var(--h-3e3e3e,#3e3e3e)] text-[color:var(--h-cccccc,#cccccc)] hover:bg-[color:var(--h-383838,#383838)] cursor-pointer">
           Anuluj
         </button>
         <button
           type="button"
           onClick={onOk}
-          className="h-6 px-3 text-[11px] rounded border bg-[#10549c] border-[#2980b9] text-white hover:bg-[#1465b5] cursor-pointer"
+          className="h-6 px-3 text-[11px] rounded border bg-[color:var(--h-10549c,#10549c)] border-[color:var(--h-2980b9,#2980b9)] text-white hover:bg-[color:var(--h-1465b5,#1465b5)] cursor-pointer"
           title={isNew ? 'Dodaj stylizacje do warstwy' : 'Zapisz zmiany'}
         >
           OK
         </button>
       </div>
-    </div>
+    </DialogWindow>
   );
 };

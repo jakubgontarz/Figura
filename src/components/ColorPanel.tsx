@@ -54,14 +54,14 @@ export const ColorPanel: React.FC<ColorPanelProps> = ({
   return (
     <div className="bg-transparent text-xs select-none">
       {/* Pasek Zakładek (Tab Strip) */}
-      <div className="flex items-center border-b border-[#333] mb-2 pb-0.5">
+      <div className="flex items-center border-b border-[color:var(--h-333333,#333333)] mb-2 pb-0.5">
         {(['color', 'props', 'nav'] as const).map((t) => (
           <button
             key={t}
             type="button"
             onClick={() => onChangeTab?.(t)}
             data-testid={`tab-${t}`}
-            className={`text-[11px] font-semibold tracking-wide pb-1 px-0.5 mr-3 border-b-2 focus:outline-none cursor-pointer ${tab === t ? 'text-white border-[#007acc]' : 'text-[#888] border-transparent hover:text-[#ccc]'}`}
+            className={`text-[11px] font-semibold tracking-wide pb-1 px-0.5 mr-3 border-b-2 focus:outline-none cursor-pointer ${tab === t ? 'text-[color:var(--t-white,#fff)] border-[color:var(--h-007acc,#007acc)]' : 'text-[color:var(--h-888888,#888888)] border-transparent hover:text-[color:var(--h-cccccc,#cccccc)]'}`}
           >
             {t === 'color' ? 'Kolor' : t === 'props' ? 'Właściwości' : 'Nawigator'}
           </button>
@@ -84,7 +84,7 @@ export const ColorPanel: React.FC<ColorPanelProps> = ({
               onClick={() => setActiveSlot('secondary')}
               title="Kolor dodatkowy (kliknij, aby edytować)"
               className={`absolute right-0 bottom-0 w-[22px] h-[22px] rounded-xs border cursor-pointer z-0 transition-transform overflow-hidden ${
-                activeSlot === 'secondary' ? 'border-[#007acc] scale-110 z-20 shadow-md' : 'border-[#333]'
+                activeSlot === 'secondary' ? 'border-[color:var(--h-007acc,#007acc)] scale-110 z-20 shadow-md' : 'border-[color:var(--h-333333,#333333)]'
               }`}
               style={{
                 backgroundImage: `repeating-conic-gradient(#e4e4e4 0% 25%, #ffffff 0% 50%)`,
@@ -103,7 +103,7 @@ export const ColorPanel: React.FC<ColorPanelProps> = ({
               onClick={() => setActiveSlot('primary')}
               title="Kolor główny (kliknij, aby edytować)"
               className={`absolute left-0 top-0 w-[22px] h-[22px] rounded-xs border cursor-pointer z-10 transition-transform overflow-hidden ${
-                activeSlot === 'primary' ? 'border-[#007acc] scale-110 z-20 shadow-md' : 'border-[#333]'
+                activeSlot === 'primary' ? 'border-[color:var(--h-007acc,#007acc)] scale-110 z-20 shadow-md' : 'border-[color:var(--h-333333,#333333)]'
               }`}
               style={{
                 backgroundImage: `repeating-conic-gradient(#e4e4e4 0% 25%, #ffffff 0% 50%)`,
@@ -124,7 +124,7 @@ export const ColorPanel: React.FC<ColorPanelProps> = ({
             type="button"
             onClick={swapColors}
             title="Zamień kolory (X)"
-            className="w-6 h-5.5 flex items-center justify-center bg-[#282828] border border-[#3e3e3e] rounded transition-colors hover:bg-[#383838] text-[#ccc] hover:text-white cursor-pointer"
+            className="w-6 h-5.5 flex items-center justify-center bg-[color:var(--h-282828,#282828)] border border-[color:var(--h-3e3e3e,#3e3e3e)] rounded transition-colors hover:bg-[color:var(--h-383838,#383838)] text-[color:var(--h-cccccc,#cccccc)] hover:text-[color:var(--t-white,#fff)] cursor-pointer"
           >
             <ArrowLeftRight size={12} />
           </button>
@@ -144,14 +144,14 @@ export const ColorPanel: React.FC<ColorPanelProps> = ({
               }
             }}
             onBlur={() => setHexInput(hexString)}
-            className="w-16 h-5 bg-[#121212] border border-[#444] rounded px-1 text-[10px] font-mono text-white text-center focus:outline-none focus:border-[#007acc]"
+            className="w-16 h-5 bg-[color:var(--h-121212,#121212)] border border-[color:var(--h-444444,#444444)] rounded px-1 text-[10px] font-mono text-[color:var(--t-white,#fff)] text-center focus:outline-none focus:border-[color:var(--h-007acc,#007acc)]"
           />
           <button
             type="button"
             onClick={() => setFieldsMode((v) => !v)}
             aria-pressed={fieldsMode}
             className={`h-5.5 px-2 rounded border text-[11px] cursor-pointer transition-colors ${
-              fieldsMode ? 'bg-[#094771] border-[#007acc] text-white' : 'bg-[#282828] border-[#3e3e3e] text-[#ccc] hover:bg-[#383838] hover:text-white'
+              fieldsMode ? 'bg-[color:var(--h-094771,#094771)] border-[color:var(--h-007acc,#007acc)] text-white' : 'bg-[color:var(--h-282828,#282828)] border-[color:var(--h-3e3e3e,#3e3e3e)] text-[color:var(--h-cccccc,#cccccc)] hover:bg-[color:var(--h-383838,#383838)] hover:text-[color:var(--t-white,#fff)]'
             }`}
             title={fieldsMode ? 'Wróć do kwadratu barw i paska odcienia' : 'Pokaż pola R, G, B, H, S, V'}
           >

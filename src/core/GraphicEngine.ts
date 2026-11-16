@@ -15,6 +15,8 @@ import { Layer, grayToAlpha, finishPassThrough } from './Layer.ts';
 import { Quad, drawPerspectiveMesh, drawPerspectivePreview, isConvexQuad, warpPerspectiveExact, warpPerspectivePreview, PerspectivePreview, WarpResult } from './Perspective.ts';
 import { renderGradientPreview } from './GradientRenderer.ts';
 import { BrushEngine } from './BrushEngine.ts';
+import { offsetAlpha } from './SelectionOffset.ts';
+import { settings } from './Settings.ts';
 import { AlphaList, ChannelCombine, ChannelModel, combineIntoGrid, drawCoverage, gridContentBounds, gridFromCoverage, gridContentTiles, restrictSnapshotsToChannels } from './Channels.ts';
 import { SelectionManager, SelectionSnapshot } from './SelectionManager.ts';
 import { bumpTileEpoch, getTileEpoch, Tile } from './Tile.ts';
@@ -67,6 +69,8 @@ import { RichText, pickCharStyle, renderVectorText } from './TextEngine.ts';
 import { VectorLayerOps } from './VectorLayerOps.ts';
 import { LayerTransformOp, VecBounds, VectorObject, cloneVectorObjects, newVectorId, reviveVectorObjects, transformVectorObject, unionBounds, vectorObjectTightBounds } from './VectorObjects.ts';
 import { compositeObjectsRegion } from './VectorSprites.ts';
+import { ResampleMethod, resampleRGBA } from './Resample.ts';
+import { DocGeom, canvasGeom, mapDocPoint, orthoGeom, remapCorrections, remapStyles, remapVectorObject, scaleGeom } from './DocTransform.ts';
 
 /**
  * Rysuje fragment `solid` przekształcony ramką `st` i przycięty konturem zaznaczenia `path`. Jest wspólna dla podglądu
@@ -214,8 +218,29 @@ function layerHistoryBytes(l: Layer): number {
   return n;
 }
 
+/**
+ * Stan dokumentu zależny od jego rozmiaru: zmiana rozmiaru, płótna, kadrowanie, odbicie i obrót całego obrazu budują NOWE warstwy
+ * (z tymi samymi identyfikatorami), a poprzednie trzymają tu w całości, bez kopiowania. Cofnięcie i ponowienie zamieniają stany miejscami.
+ */
+export interface DocState {
+  width: number;
+  height: number;
+  dpi: number;
+  layers: Layer[];
+  activeLayerIndex: number;
+  guides: Guide[];
+  selection: SelectionSnapshot;
+  alpha: AlphaList;
+}
+
 /** Akcja historii cofania i ponawiania; każdy wariant przechowuje stan przed i po zmianie. */
 export type HistoryAction =
+  | {
+      type: 'document';
+      description: string;
+      /** Stan, do którego przejdzie dokument po cofnięciu (lub ponowieniu) tej akcji; po zamianie trzyma stan odwrotny. */
+      state: DocState;
+    }
   | {
       type: 'tiles';
       description: string;
@@ -421,7 +446,7 @@ export class GraphicEngine {
   /** Górna granica liczby akcji, tylko jako bezpiecznik przed nieograniczonym wzrostem stosu; realnym limitem jest pamięć (`maxHistoryBytes`). */
   private maxHistory: number = 20000;
   /** Limit pamięci historii (migawki pikseli i szacunek reszty); najstarsze akcje są usuwane po jego przekroczeniu. */
-  public maxHistoryBytes: number = 1024 * 1024 * 1024;
+  public maxHistoryBytes: number = 64 * 1024 * 1024 * 1024;
   private historyBytesCache = new WeakMap<object, number>();
 
   public lastDirtyRect: SKRectI | null = null;
@@ -473,19 +498,25 @@ export class GraphicEngine {
     }
   }
 
-  /** Tworzy domyślny układ dokumentu: białe tło i przezroczystą „Warstwę 1” (aktywną); czyści historię. */
-  public initDefaultLayers(): void {
+  /**
+   * Tworzy domyślny układ dokumentu: „Tło” (domyślnie białe; można podać kolor albo `'none'` = bez warstwy tła)
+   * i przezroczystą „Warstwę 1” (aktywną); czyści historię.
+   */
+  public initDefaultLayers(background: 'white' | 'none' | { r: number; g: number; b: number } = 'white'): void {
     this.layers = [];
 
-    const backgroundLayer = new Layer('bg', 'Tło', this.width, this.height, this.tileSize);
-    backgroundLayer.fill({ r: 255, g: 255, b: 255, a: 255 });
-    this.layers.push(backgroundLayer);
+    if (background !== 'none') {
+      const backgroundLayer = new Layer('bg', 'Tło', this.width, this.height, this.tileSize);
+      const c = background === 'white' ? { r: 255, g: 255, b: 255 } : background;
+      backgroundLayer.fill({ r: c.r, g: c.g, b: c.b, a: 255 });
+      this.layers.push(backgroundLayer);
+    }
 
     const layer1 = new Layer('layer1', 'Warstwa 1', this.width, this.height, this.tileSize);
     layer1.updateThumbnail();
     this.layers.push(layer1);
 
-    this.activeLayerIndex = 1;
+    this.activeLayerIndex = this.layers.length - 1;
     this.selectionManager.resize(this.width, this.height);
     this.clearHistory();
   }
@@ -581,6 +612,11 @@ export class GraphicEngine {
         for (const g of a2) if (!a1.has(g)) n += gridContentTiles(g) * 16384 + g.rows * g.cols * TILE_OBJECT_BYTES;
         break;
       }
+      case 'document':
+        for (const l of a.state.layers) n += layerHistoryBytes(l);
+        for (const c of a.state.alpha) n += gridContentTiles(c.grid) * 16384;
+        n += selBytes(a.state.selection);
+        break;
       case 'layers':
         // Warstwy trzymane przez referencję nie kosztują nic ponad wpis w tablicy; liczą się kopie oraz warstwy usunięte
         // z dokumentu, które żyją już tylko w historii (`retainedBytes`).
@@ -611,11 +647,14 @@ export class GraphicEngine {
   }
 
   /** Usuwa najstarsze akcje po przekroczeniu limitu liczby akcji lub pamięci. */
-  private trimHistory(): void {
-    while (this.undoStack.length > this.maxHistory) this.undoStack.shift();
+  public trimHistory(): void {
+    const cfg = settings.get();
+    const maxSteps = Math.max(1, Math.min(this.maxHistory, cfg.historySteps));
+    const maxBytes = Math.min(this.maxHistoryBytes, cfg.historyMB * 1024 * 1024);
+    while (this.undoStack.length > maxSteps) this.undoStack.shift();
     let total = this.getHistoryBytes();
     // Zawsze zostaje ostatnia akcja, nawet jeśli sama przekracza limit
-    while (total > this.maxHistoryBytes && this.undoStack.length > 1) {
+    while (total > maxBytes && this.undoStack.length > 1) {
       total -= this.actionBytes(this.undoStack.shift()!);
     }
   }
@@ -951,6 +990,8 @@ export class GraphicEngine {
       if (layer && action.other) this.applyOtherSnapshot(layer, action.onMask, action.other.before);
       this.selectionManager.restoreMaskSnapshot(action.selectionBefore);
       this.redoStack.push(action);
+    } else if (action.type === 'document') {
+      this.redoStack.push(this.swapDocState(action));
     } else {
       this.redoStack.push(this.swapLayersAction(action));
       structural = !!action.shared;
@@ -1050,6 +1091,8 @@ export class GraphicEngine {
       if (layer && action.other) this.applyOtherSnapshot(layer, action.onMask, action.other.after);
       this.selectionManager.restoreMaskSnapshot(action.selectionAfter);
       this.undoStack.push(action);
+    } else if (action.type === 'document') {
+      this.undoStack.push(this.swapDocState(action));
     } else {
       this.undoStack.push(this.swapLayersAction(action));
       structural = !!action.shared;
@@ -1110,6 +1153,33 @@ export class GraphicEngine {
     return true;
   }
 
+  /**
+   * Kopiuje widoczny obraz (wszystkie warstwy złożone, z maskami, efektami i trybami mieszania) do schowka;
+   * przy aktywnym zaznaczeniu tylko jego zawartość, z miękką krawędzią.
+   */
+  public copyMerged(): boolean {
+    const flat = this.getCompositeFlatCanvas();
+    const clip = document.createElement('canvas');
+    clip.width = this.width;
+    clip.height = this.height;
+    const cctx = clip.getContext('2d')!;
+    const maskClip = document.createElement('canvas');
+    maskClip.width = this.width;
+    maskClip.height = this.height;
+    const mctx = maskClip.getContext('2d')!;
+    cctx.drawImage(flat, 0, 0);
+    if (this.selectionManager.hasActiveSelection) {
+      cctx.globalCompositeOperation = 'destination-in';
+      cctx.drawImage(this.selectionManager.maskCanvas, 0, 0);
+      mctx.drawImage(this.selectionManager.maskCanvas, 0, 0);
+    } else {
+      mctx.fillStyle = '#ffffff';
+      mctx.fillRect(0, 0, this.width, this.height);
+    }
+    this.storeRasterClipboard(clip, maskClip);
+    return true;
+  }
+
   /** Wycina rysowany (niezatwierdzony) obiekt: kopiuje go jak `copyPendingObject`, a potem odrzuca (edytowany istniejący obiekt jest usuwany z warstwy). */
   public cutPendingObject(o: VectorObject): boolean {
     if (!this.copyPendingObject(o)) return false;
@@ -1132,6 +1202,28 @@ export class GraphicEngine {
         }
       });
     } catch {}
+  }
+
+  /**
+   * Wypełnia aktywną warstwę kolorem (`null` = czyści do przezroczystości), w zaznaczeniu, jeśli jest. Krok trafia do historii.
+   */
+  public fillOrClearActive(color: SKColor | null): boolean {
+    const layer = this.getActiveLayer();
+    if (!layer || layer.locked || layer.vectorTarget) return false;
+    this.finishOpenSessions();
+    const before = layer.tileGrid.getTilesSnapshot();
+    const mask = this.selectionManager.hasActiveSelection ? this.selectionManager.maskCanvas : null;
+    if (color) layer.fill(color, mask);
+    else layer.clear(mask);
+    this.pushTileAction({
+      type: 'tiles',
+      description: color ? 'Wypełnienie kolorem' : 'Wyczyść',
+      layerIndex: this.activeLayerIndex,
+      before,
+      after: layer.tileGrid.getTilesSnapshot(),
+    });
+    this.markAllLayersDirty();
+    return true;
   }
 
   /** Wycina zaznaczony fragment (lub całą warstwę) do schowka i zapisuje akcję w historii; zapamiętuje wycięcie dla wklejenia w to samo miejsce. */
@@ -1297,7 +1389,7 @@ export class GraphicEngine {
       sourceLayerIndex: this.activeLayerIndex,
       initialTilesSnapshot,
       initialSelectionSnapshot,
-      interpolation: 'bilinear',
+      interpolation: settings.get().defaultInterpolation,
       srcMask: pasteSrcMask,
       softContent: true,
     };
@@ -2632,6 +2724,326 @@ export class GraphicEngine {
     return { ok: true, dropped };
   }
 
+  // ---- Przekształcenia całego obrazu (menu „Obraz”) ----
+
+  /** Największy dopuszczalny wymiar obrazu po zmianie rozmiaru lub płótna (px) i największa liczba pikseli. */
+  public static readonly MAX_DOC_SIDE = 16000;
+  public static readonly MAX_DOC_PIXELS = 120_000_000;
+
+  /** Błąd, gdy wymiary wykraczają poza limity (null = dobre). */
+  public static checkDocSize(w: number, h: number): string | null {
+    if (!Number.isFinite(w) || !Number.isFinite(h) || w < 1 || h < 1) return 'Wymiary muszą być dodatnie';
+    if (w > GraphicEngine.MAX_DOC_SIDE || h > GraphicEngine.MAX_DOC_SIDE) return `Obraz może mieć najwyżej ${GraphicEngine.MAX_DOC_SIDE} px na bok`;
+    if (w * h > GraphicEngine.MAX_DOC_PIXELS) return `Obraz może mieć najwyżej ${Math.round(GraphicEngine.MAX_DOC_PIXELS / 1e6)} Mpx (jest ${(w * h / 1e6).toFixed(1)} Mpx)`;
+    return null;
+  }
+
+  private captureDocState(): DocState {
+    return {
+      width: this.width,
+      height: this.height,
+      dpi: this.dpi,
+      layers: this.layers,
+      activeLayerIndex: this.activeLayerIndex,
+      guides: this.guides.map((g) => ({ ...g })),
+      selection: this.selectionManager.getMaskSnapshot(),
+      alpha: this.channels.alpha.slice(),
+    };
+  }
+
+  /** Wprowadza stan do dokumentu: rozmiar, warstwy, prowadnice, zaznaczenie i kanały alfa; odświeża wszystko, co zależy od wymiarów. */
+  private installDocState(s: DocState): void {
+    this.width = s.width;
+    this.height = s.height;
+    this.dpi = s.dpi;
+    this.layers = s.layers;
+    this.activeLayerIndex = Math.max(0, Math.min(s.activeLayerIndex, s.layers.length - 1));
+    this.guides = s.guides.map((g) => ({ ...g }));
+    this.brushEngine.ensureBufferSize(this.width, this.height);
+    this.selectionManager.resize(this.width, this.height);
+    this.selectionManager.restoreMaskSnapshot(s.selection);
+    this.channels.setList(s.alpha);
+    this.channelLayers.clear();
+    this.maskView = null;
+    this.maskViewProxy = null;
+    this.pixelVersion++;
+    bumpTileEpoch();
+    this.invalidateComposite();
+  }
+
+  /** Cofnięcie / ponowienie zmiany rozmiaru: zamienia stan dokumentu ze stanem zapisanym w akcji i zwraca akcję odwrotną. */
+  private swapDocState(action: Extract<HistoryAction, { type: 'document' }>): Extract<HistoryAction, { type: 'document' }> {
+    const current = this.captureDocState();
+    this.installDocState(action.state);
+    return { type: 'document', description: action.description, state: current };
+  }
+
+  /** Czy siatka ma jakiekolwiek piksele. */
+  private gridHasContent(g: TileGrid): boolean {
+    for (const row of g.tiles) for (const t of row) if (t.hasContent) return true;
+    return false;
+  }
+
+  /** Siatka kafelków z gotowej tablicy RGBA `w x h`; kafelki bez żadnego widocznego piksela zostają puste. */
+  private gridFromRGBA(data: Uint8ClampedArray, w: number, h: number, tileSize: number): TileGrid {
+    const grid = new TileGrid(w, h, tileSize);
+    const img = new ImageData(data as Uint8ClampedArray<ArrayBuffer>, w, h);
+    for (const row of grid.tiles) {
+      for (const tile of row) {
+        let any = false;
+        for (let y = 0; y < tile.height && !any; y++) {
+          let i = ((tile.pixelY + y) * w + tile.pixelX) * 4 + 3;
+          for (let x = 0; x < tile.width; x++, i += 4) {
+            if (data[i] !== 0) {
+              any = true;
+              break;
+            }
+          }
+        }
+        if (!any) continue;
+        tile.ctx.putImageData(img, -tile.pixelX, -tile.pixelY, tile.pixelX, tile.pixelY, tile.width, tile.height);
+        tile.hasContent = true;
+        tile.isDirty = true;
+      }
+    }
+    return grid;
+  }
+
+  /** Piksele płaskiego obrazu `src` po przekształceniu dokumentu `g` (tablica RGBA o nowych wymiarach); `fillWhite` = nowy obszar biały. */
+  private mapPixelsDoc(src: HTMLCanvasElement, g: DocGeom, fillWhite: boolean): Uint8ClampedArray {
+    if (g.kind === 'scale') {
+      const data = src.getContext('2d', { willReadFrequently: true })!.getImageData(0, 0, g.oldW, g.oldH).data;
+      return resampleRGBA(data, g.oldW, g.oldH, g.newW, g.newH, g.method);
+    }
+    const cv = document.createElement('canvas');
+    cv.width = g.newW;
+    cv.height = g.newH;
+    const ctx = cv.getContext('2d', { willReadFrequently: true })!;
+    if (fillWhite) {
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, g.newW, g.newH);
+    }
+    ctx.imageSmoothingEnabled = false;
+    if (g.kind === 'canvas') {
+      ctx.drawImage(src, g.dx, g.dy);
+    } else {
+      const W = g.oldW;
+      const H = g.oldH;
+      switch (g.op) {
+        case 'flipH': ctx.setTransform(-1, 0, 0, 1, W, 0); break;
+        case 'flipV': ctx.setTransform(1, 0, 0, -1, 0, H); break;
+        case 'cw': ctx.setTransform(0, 1, -1, 0, H, 0); break;
+        case 'ccw': ctx.setTransform(0, -1, 1, 0, 0, W); break;
+        case 'r180': ctx.setTransform(-1, 0, 0, -1, W, H); break;
+        default: break;
+      }
+      ctx.drawImage(src, 0, 0);
+    }
+    return ctx.getImageData(0, 0, g.newW, g.newH).data;
+  }
+
+  private mapGridDoc(grid: TileGrid, g: DocGeom, fillWhite: boolean): TileGrid {
+    if (!fillWhite && !this.gridHasContent(grid)) return new TileGrid(g.newW, g.newH, grid.tileSize);
+    const flat = grid.compositeToFlatCanvas();
+    return this.gridFromRGBA(this.mapPixelsDoc(flat, g, fillWhite), g.newW, g.newH, grid.tileSize);
+  }
+
+  /** Nowa warstwa odpowiadająca `old` po przekształceniu dokumentu `g` (ten sam identyfikator i właściwości). */
+  private remapLayerDoc(old: Layer, g: DocGeom): Layer {
+    old.ensurePixels();
+    const ts = old.pixelGridPeek.tileSize;
+    const derived = old.isVector;
+    const px = derived || old.isAdjustment ? new TileGrid(g.newW, g.newH, ts) : this.mapGridDoc(old.pixelGrid, g, false);
+    const n = old.cloneShell(px);
+    n.layerObjects = old.layerObjects.map((o) => remapVectorObject(o, g));
+    n.maskObjects = old.maskObjects.map((o) => remapVectorObject(o, g));
+    const mg = old.maskGrid;
+    n.maskGrid = mg ? this.mapGridDoc(mg, g, true) : null;
+    n.maskBase = old.maskBase ? this.mapGridDoc(old.maskBase, g, true) : null;
+    n.corrections = remapCorrections(old.corrections, g);
+    n.styles = old.styles ? remapStyles(old.styles, g) : null;
+    n.touchCorrections();
+    return n;
+  }
+
+  /** Prowadnice po przekształceniu: oś może się zmienić (obrót o 90°); prowadnice poza nowym obrazem są pomijane. */
+  private remapGuidesDoc(g: DocGeom): Guide[] {
+    const out: Guide[] = [];
+    for (const gd of this.guides) {
+      let axis = gd.axis;
+      let pos = gd.pos;
+      if (g.kind === 'scale') pos = gd.axis === 'v' ? gd.pos * g.sx : gd.pos * g.sy;
+      else if (g.kind === 'canvas') pos = gd.axis === 'v' ? gd.pos + g.dx : gd.pos + g.dy;
+      else {
+        const v = gd.axis === 'v';
+        switch (g.op) {
+          case 'flipH': if (v) pos = g.oldW - gd.pos; break;
+          case 'flipV': if (!v) pos = g.oldH - gd.pos; break;
+          case 'r180': pos = v ? g.oldW - gd.pos : g.oldH - gd.pos; break;
+          case 'cw': axis = v ? 'h' : 'v'; pos = v ? gd.pos : g.oldH - gd.pos; break;
+          case 'ccw': axis = v ? 'h' : 'v'; pos = v ? g.oldW - gd.pos : gd.pos; break;
+          default: break;
+        }
+      }
+      const lim = axis === 'v' ? g.newW : g.newH;
+      if (pos < 0 || pos > lim) continue;
+      out.push({ ...gd, axis, pos });
+    }
+    return out;
+  }
+
+  /** Wykonuje przekształcenie całego dokumentu jednym krokiem historii. Zakłada poprawną geometrię (sprawdzaną przez wołającego). */
+  private applyDocGeom(g: DocGeom, description: string, newDpi?: number): void {
+    this.exitChannelEdit();
+    this.finishOpenSessions();
+    this.vec.settle();
+    this.vec.clearSelection();
+    if (this.transformContentSession) this.cancelTransformContent();
+
+    const before = this.captureDocState();
+    const hadSelection = this.selectionManager.hasActiveSelection;
+    const selCanvas = hadSelection ? this.selectionManager.maskCanvas : null;
+    const newSel = selCanvas ? this.mapPixelsDoc(selCanvas, g, false) : null;
+    const newAlpha: AlphaList = this.channels.alpha.map((c) => ({ ...c, grid: this.mapGridDoc(c.grid, g, false) }));
+    const newGuides = this.remapGuidesDoc(g);
+
+    // wymiary dokumentu muszą być nowe, zanim warstwy wektorowe zostaną odtworzone z obiektów
+    this.width = g.newW;
+    this.height = g.newH;
+    const layers: Layer[] = [];
+    try {
+      for (const l of before.layers) layers.push(this.remapLayerDoc(l, g));
+    } catch (e) {
+      this.width = before.width;
+      this.height = before.height;
+      throw e;
+    }
+    this.undoStack.push({ type: 'document', description, state: before });
+    this.finishHistoryPush();
+    this.installDocState({
+      width: g.newW,
+      height: g.newH,
+      dpi: newDpi ?? this.dpi,
+      layers,
+      activeLayerIndex: this.activeLayerIndex,
+      guides: newGuides,
+      selection: { imgData: null, seedPoint: null, activeMultiPoly: [] },
+      alpha: newAlpha,
+    });
+    for (const l of layers) {
+      if (l.isVector) this.vec.rebuildAll(l);
+      l.updateThumbnail(l === layers[this.activeLayerIndex]);
+    }
+    if (newSel) {
+      const tmp = document.createElement('canvas');
+      tmp.width = g.newW;
+      tmp.height = g.newH;
+      tmp.getContext('2d')!.putImageData(new ImageData(newSel as Uint8ClampedArray<ArrayBuffer>, g.newW, g.newH), 0, 0);
+      this.selectionManager.replaceMaskRaster((ctx) => ctx.drawImage(tmp, 0, 0));
+    }
+    this.selectedCorrection = null;
+    this.syncTransformState();
+    this.markAllLayersDirty();
+  }
+
+  /** Skaluje cały obraz (piksele, obiekty wektorowe, parametry efektów i stylów) do nowych wymiarów; `dpi` ustawia też rozdzielczość. */
+  public resizeImage(newW: number, newH: number, method: ResampleMethod, dpi?: number): { ok: true } | { ok: false; reason: string } {
+    newW = Math.round(newW);
+    newH = Math.round(newH);
+    const err = GraphicEngine.checkDocSize(newW, newH);
+    if (err) return { ok: false, reason: err };
+    if (newW === this.width && newH === this.height) {
+      if (dpi && Math.abs(dpi - this.dpi) > 1e-9) {
+        // sama rozdzielczość: piksele bez zmian, więc stan „przed” to te same warstwy ze starym dpi
+        this.undoStack.push({ type: 'document', description: 'Zmiana rozdzielczości', state: this.captureDocState() });
+        this.finishHistoryPush();
+        this.dpi = dpi;
+        return { ok: true };
+      }
+      return { ok: false, reason: 'Rozmiar obrazu się nie zmienił' };
+    }
+    this.applyDocGeom(scaleGeom(this.width, this.height, newW, newH, method), 'Zmiana rozmiaru obrazu', dpi);
+    return { ok: true };
+  }
+
+  /**
+   * Zmienia rozmiar płótna bez skalowania zawartości. `ax`, `ay` (0..1) to położenie dotychczasowego obrazu w nowym płótnie:
+   * 0 = przy lewej / górnej krawędzi, 0.5 = środek, 1 = przy prawej / dolnej. Nowy obszar warstw jest przezroczysty.
+   */
+  public resizeCanvas(newW: number, newH: number, ax: number, ay: number): { ok: true } | { ok: false; reason: string } {
+    newW = Math.round(newW);
+    newH = Math.round(newH);
+    const err = GraphicEngine.checkDocSize(newW, newH);
+    if (err) return { ok: false, reason: err };
+    if (newW === this.width && newH === this.height) return { ok: false, reason: 'Rozmiar płótna się nie zmienił' };
+    const dx = Math.floor((newW - this.width) * ax);
+    const dy = Math.floor((newH - this.height) * ay);
+    this.applyDocGeom(canvasGeom(this.width, this.height, newW, newH, dx, dy), 'Zmiana rozmiaru płótna');
+    return { ok: true };
+  }
+
+  /** Przycina obraz do prostokąta obejmującego zaznaczenie. */
+  public cropToSelection(): { ok: true; w: number; h: number } | { ok: false; reason: string } {
+    this.finishOpenSessions();
+    if (!this.selectionManager.hasActiveSelection) return { ok: false, reason: 'Brak zaznaczenia: zaznacz obszar do przycięcia' };
+    const b = this.selectionManager.getSelectionBounds();
+    if (!b || b.width < 1 || b.height < 1) return { ok: false, reason: 'Zaznaczenie jest puste' };
+    const x0 = Math.max(0, b.left);
+    const y0 = Math.max(0, b.top);
+    const x1 = Math.min(this.width, b.right);
+    const y1 = Math.min(this.height, b.bottom);
+    const w = x1 - x0;
+    const h = y1 - y0;
+    if (w < 1 || h < 1) return { ok: false, reason: 'Zaznaczenie leży poza obrazem' };
+    if (w === this.width && h === this.height) return { ok: false, reason: 'Zaznaczenie obejmuje cały obraz' };
+    this.applyDocGeom(canvasGeom(this.width, this.height, w, h, -x0, -y0), 'Przycięcie do zaznaczenia');
+    return { ok: true, w, h };
+  }
+
+  /** Przycina obraz do prostokąta zawierającego widoczne (niecałkiem przezroczyste) piksele złożenia. */
+  public cropToTransparency(): { ok: true; w: number; h: number } | { ok: false; reason: string } {
+    this.finishOpenSessions();
+    this.vec.settle();
+    const cv = this.getCompositeFlatCanvas();
+    const W = this.width;
+    const H = this.height;
+    const data = cv.getContext('2d', { willReadFrequently: true })!.getImageData(0, 0, W, H).data;
+    let x0 = W;
+    let y0 = H;
+    let x1 = -1;
+    let y1 = -1;
+    for (let y = 0; y < H; y++) {
+      let i = y * W * 4 + 3;
+      for (let x = 0; x < W; x++, i += 4) {
+        if (data[i] !== 0) {
+          if (x < x0) x0 = x;
+          if (x > x1) x1 = x;
+          if (y < y0) y0 = y;
+          y1 = y;
+        }
+      }
+    }
+    if (x1 < 0) return { ok: false, reason: 'Obraz jest w całości przezroczysty' };
+    const w = x1 - x0 + 1;
+    const h = y1 - y0 + 1;
+    if (w === W && h === H) return { ok: false, reason: 'Obraz nie ma przezroczystych brzegów do przycięcia' };
+    this.applyDocGeom(canvasGeom(W, H, w, h, -x0, -y0), 'Przycięcie do przezroczystości');
+    return { ok: true, w, h };
+  }
+
+  /** Odbicie lub obrót całego obrazu (wszystkie warstwy, maski, kanały, zaznaczenie i prowadnice); obrót o 90° zamienia szerokość z wysokością. */
+  public transformImage(op: LayerTransformOp): { ok: true } {
+    const names: Record<LayerTransformOp, string> = {
+      flipH: 'Odbicie obrazu w poziomie',
+      flipV: 'Odbicie obrazu w pionie',
+      cw: 'Obrót obrazu w prawo',
+      ccw: 'Obrót obrazu w lewo',
+      r180: 'Obrót obrazu o 180°',
+    };
+    this.applyDocGeom(orthoGeom(this.width, this.height, op), names[op]);
+    return { ok: true };
+  }
+
   /** Dokładny prostokąt niepustych pikseli (alfa > 0) siatki w pikselach dokumentu; null = siatka pusta. */
   private exactGridBounds(grid: TileGrid): VecBounds | null {
     let x0 = Infinity;
@@ -3868,6 +4280,74 @@ export class GraphicEngine {
     this.markAllLayersDirty();
   }
 
+  /**
+   * Zaznacz > Rozszerz / zmniejsz: przesuwa krawędź zaznaczenia o `deltaPx` (dodatnie rozszerza, ujemne zmniejsza),
+   * opcjonalnie wtapiając krawędź o `featherPx`. Zaznaczenie, które znika całkiem, jest czyszczone.
+   */
+  public offsetSelection(deltaPx: number, featherPx = 0): { ok: boolean; reason?: string } {
+    const sm = this.selectionManager;
+    if (!sm.hasActiveSelection) return { ok: false, reason: 'Brak zaznaczenia' };
+    if (!(Math.abs(deltaPx) > 0) && !(featherPx > 0)) return { ok: false, reason: 'Podaj wielkość większą od zera' };
+    if (this.transformContentSession) this.commitTransformContent();
+    const b = sm.getSelectionBounds();
+    if (!b) return { ok: false, reason: 'Brak zaznaczenia' };
+    const r = Math.abs(deltaPx);
+    const fpad = featherPx > 0 ? Math.ceil(featherPx * 3) + 2 : 0;
+    const pad = (deltaPx > 0 ? Math.ceil(r) + 2 : 1) + fpad;
+    const rx0 = b.left - pad;
+    const ry0 = b.top - pad;
+    const w = b.right + pad - rx0;
+    const h = b.bottom + pad - ry0;
+    if (w * h > 60_000_000) return { ok: false, reason: 'Zaznaczenie jest za duże na tę operację' };
+    const before = sm.getMaskSnapshot();
+    const tmp = document.createElement('canvas');
+    tmp.width = w;
+    tmp.height = h;
+    const tctx = tmp.getContext('2d', { willReadFrequently: true })!;
+    tctx.drawImage(sm.maskCanvas, -rx0, -ry0);
+    const img = tctx.getImageData(0, 0, w, h);
+    const plane = new Uint8Array(w * h);
+    for (let i = 0; i < plane.length; i++) plane[i] = img.data[i * 4 + 3];
+    const res = deltaPx === 0 ? plane : offsetAlpha(plane, w, h, deltaPx);
+    const out = new ImageData(w, h);
+    for (let i = 0; i < res.length; i++) {
+      const o = i * 4;
+      out.data[o] = out.data[o + 1] = out.data[o + 2] = 255;
+      out.data[o + 3] = res[i];
+    }
+    tctx.putImageData(out, 0, 0);
+    let result: HTMLCanvasElement = tmp;
+    if (featherPx > 0) {
+      const bl = document.createElement('canvas');
+      bl.width = w;
+      bl.height = h;
+      const bctx = bl.getContext('2d')!;
+      bctx.filter = `blur(${Math.max(1, featherPx)}px)`;
+      bctx.drawImage(tmp, 0, 0);
+      result = bl;
+    }
+    // czy w obrębie obrazu coś zostało
+    const vx0 = Math.max(0, rx0);
+    const vy0 = Math.max(0, ry0);
+    const vx1 = Math.min(this.width, rx0 + w);
+    const vy1 = Math.min(this.height, ry0 + h);
+    let any = false;
+    if (vx1 > vx0 && vy1 > vy0) {
+      const d = result.getContext('2d', { willReadFrequently: true })!.getImageData(vx0 - rx0, vy0 - ry0, vx1 - vx0, vy1 - vy0).data;
+      for (let i = 3; i < d.length; i += 4) {
+        if (d[i] > 0) {
+          any = true;
+          break;
+        }
+      }
+    }
+    if (!any) sm.clear();
+    else sm.replaceMaskRaster((ctx) => ctx.drawImage(result, rx0, ry0));
+    this.pushSelectionAction(before, sm.getMaskSnapshot(), deltaPx > 0 ? 'Rozszerzenie zaznaczenia' : deltaPx < 0 ? 'Zmniejszenie zaznaczenia' : 'Wtopienie zaznaczenia');
+    this.markAllLayersDirty();
+    return { ok: true };
+  }
+
   public applySelectionShape(
     shapeType: 'rect' | 'ellipse' | 'lasso',
     points: SKPoint[],
@@ -4617,7 +5097,7 @@ export class GraphicEngine {
     return { content, cutMask, shape, solid };
   }
 
-  public beginTransformContent(interpolation: InterpolationMode = 'bilinear'): boolean {
+  public beginTransformContent(interpolation: InterpolationMode = settings.get().defaultInterpolation): boolean {
     if (this.transformContentSession) return true;
 
     // Jeśli zaznaczenie zostało zmodyfikowane narzędziem transform-selection, zatwierdź je najpierw
@@ -5340,6 +5820,9 @@ export class GraphicEngine {
    * (przy filtrach – jego okno z marginesem). Opcjonalny podgląd kształtu lub własny renderer jest nakładany na aktywną
    * warstwę. Po złożeniu wywołuje `onViewportComposited` z faktycznie odświeżonym fragmentem.
    */
+  /** Licznik zmian płótna podglądu (rośnie przy każdym odświeżeniu): pozwala wykryć, że pomniejszona kopia jest nieaktualna. */
+  public displayVersion = 0;
+
   public compositeToViewport(
     targetCanvas: HTMLCanvasElement,
     dirtyRect?: SKRectI | null,
@@ -5350,6 +5833,7 @@ export class GraphicEngine {
     customPreviewRenderer?: ((ctx: CanvasRenderingContext2D) => void) | null,
     customPreviewBlendMode?: SKBlendMode | null
   ): void {
+    this.displayVersion++;
     const wasResized = targetCanvas.width !== this.width || targetCanvas.height !== this.height;
     this.viewportRefreshRect = null;
     this.viewportRefreshWin = null;
@@ -6694,7 +7178,7 @@ export class GraphicEngine {
     tempCanvas.height = this.height;
     const tctx = tempCanvas.getContext('2d');
     if (tctx) {
-      tctx.drawImage(img, 0, 0, Math.min(img.width, this.width), Math.min(img.height, this.height));
+      tctx.drawImage(img, 0, 0); // bez skalowania: nadmiar poza płótnem jest odcinany
 
       for (let ty = 0; ty < layer.tileGrid.rows; ty++) {
         for (let tx = 0; tx < layer.tileGrid.cols; tx++) {

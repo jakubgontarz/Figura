@@ -32,6 +32,8 @@ import {
   Ruler,
 } from 'lucide-react';
 import { ShapeKind, ToolType } from '../core/types.ts';
+import { toolKeyLabel } from '../core/ToolKeys.ts';
+import { useSettings } from './useSettings.ts';
 
 interface ToolboxProps {
   activeTool: ToolType;
@@ -53,6 +55,7 @@ export const Toolbox: React.FC<ToolboxProps> = ({
   onSelectTool,
   vectorMode = false,
 }) => {
+  useSettings(); // podpowiedzi odświeżają się po zmianie skrótów
   const tools: ToolDefinition[] = [
     {
       id: 'select-rect',
@@ -204,7 +207,7 @@ export const Toolbox: React.FC<ToolboxProps> = ({
       byId('zoom'),
     ];
     return (
-      <div className="w-12 bg-[#252526] border-r border-[#1a1a1a] p-1.5 flex flex-col items-center gap-1 z-10 select-none shadow-md flex-shrink-0">
+      <div className="w-12 bg-[color:var(--h-252526,#252526)] border-r border-[color:var(--h-1a1a1a,#1a1a1a)] p-1.5 flex flex-col items-center gap-1 z-10 select-none shadow-md flex-shrink-0">
         {vtools.map((tool, i) => {
           if ('placeholder' in tool) {
             return (
@@ -213,7 +216,7 @@ export const Toolbox: React.FC<ToolboxProps> = ({
                 type="button"
                 disabled
                 title={tool.placeholder}
-                className="w-9 h-9 rounded flex items-center justify-center text-[#666] border border-transparent opacity-50 cursor-not-allowed"
+                className="w-9 h-9 rounded flex items-center justify-center text-[color:var(--h-666666,#666666)] border border-transparent opacity-50 cursor-not-allowed"
               >
                 {tool.icon}
               </button>
@@ -225,11 +228,11 @@ export const Toolbox: React.FC<ToolboxProps> = ({
               key={tool.id}
               type="button"
               onClick={() => onSelectTool(tool.id)}
-              title={`${tool.name} (${tool.shortcut})`}
+              title={`${tool.name} (${toolKeyLabel(tool.id) ?? tool.shortcut})`}
               className={`w-9 h-9 rounded flex items-center justify-center transition-all cursor-pointer ${
                 isActive
-                  ? 'bg-[#094771] border border-[#007acc] text-white shadow'
-                  : 'text-[#bbbbbb] hover:bg-[#333333] hover:text-white border border-transparent'
+                  ? 'bg-[color:var(--h-094771,#094771)] border border-[color:var(--h-007acc,#007acc)] text-white shadow'
+                  : 'text-[color:var(--h-bbbbbb,#bbbbbb)] hover:bg-[color:var(--h-333333,#333333)] hover:text-[color:var(--t-white,#fff)] border border-transparent'
               }`}
             >
               {tool.icon}
@@ -241,7 +244,7 @@ export const Toolbox: React.FC<ToolboxProps> = ({
   }
 
   return (
-    <div className="w-12 bg-[#252526] border-r border-[#1a1a1a] p-1.5 flex flex-col items-center gap-1 z-10 select-none shadow-md flex-shrink-0">
+    <div className="w-12 bg-[color:var(--h-252526,#252526)] border-r border-[color:var(--h-1a1a1a,#1a1a1a)] p-1.5 flex flex-col items-center gap-1 z-10 select-none shadow-md flex-shrink-0">
       {tools.map((tool) => {
         const isActive = activeTool === tool.id;
         return (
@@ -249,11 +252,11 @@ export const Toolbox: React.FC<ToolboxProps> = ({
             key={tool.id}
             type="button"
             onClick={() => onSelectTool(tool.id)}
-            title={`${tool.name} (${tool.shortcut})`}
+            title={`${tool.name} (${toolKeyLabel(tool.id) ?? tool.shortcut})`}
             className={`w-9 h-9 rounded flex items-center justify-center transition-all cursor-pointer ${
               isActive
-                ? 'bg-[#094771] border border-[#007acc] text-white shadow'
-                : 'text-[#bbbbbb] hover:bg-[#333333] hover:text-white border border-transparent'
+                ? 'bg-[color:var(--h-094771,#094771)] border border-[color:var(--h-007acc,#007acc)] text-white shadow'
+                : 'text-[color:var(--h-bbbbbb,#bbbbbb)] hover:bg-[color:var(--h-333333,#333333)] hover:text-[color:var(--t-white,#fff)] border border-transparent'
             }`}
           >
             {tool.icon}

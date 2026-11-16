@@ -31,8 +31,8 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({ labels, current, onG
         data-testid={`history-item-${index}`}
         onClick={() => !isCurrent && onGoTo(index)}
         title={undone ? 'Krok cofnięty: kliknij, aby do niego przejść' : isCurrent ? 'Bieżący stan' : 'Kliknij, aby wrócić do tego kroku'}
-        className={`w-full text-left px-2 py-1 text-[11px] border-b border-[#262626] cursor-pointer truncate ${
-          isCurrent ? 'bg-[#094771] text-white' : undone ? 'text-[#777] italic hover:bg-[#262626]' : 'text-[#ddd] hover:bg-[#2a2a2a]'
+        className={`w-full text-left px-2 py-1 text-[11px] border-b border-[color:var(--h-262626,#262626)] cursor-pointer truncate ${
+          isCurrent ? 'bg-[color:var(--h-094771,#094771)] text-white' : undone ? 'text-[color:var(--h-777777,#777777)] italic hover:bg-[color:var(--h-262626,#262626)]' : 'text-[color:var(--h-dddddd,#dddddd)] hover:bg-[color:var(--h-2a2a2a,#2a2a2a)]'
         }`}
       >
         {text}
@@ -41,7 +41,7 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({ labels, current, onG
   };
 
   return (
-    <div className="flex-1 min-h-0 overflow-y-auto bg-[#181818] border border-[#2a2a2a] rounded" data-testid="history-panel">
+    <div className="flex-1 min-h-0 overflow-y-auto bg-[color:var(--h-181818,#181818)] border border-[color:var(--h-2a2a2a,#2a2a2a)] rounded" data-testid="history-panel">
       {row(0, 'Początek historii')}
       {labels.map((l, i) => row(i + 1, l))}
     </div>

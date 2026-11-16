@@ -4,7 +4,7 @@ import { CorrectionType, cloneParams } from '../core/Corrections.ts';
 import { CorrectionPreset, loadCorrectionPresets, sameParams, saveCorrectionPresets } from '../core/CorrectionPresets.ts';
 
 const BTN =
-  'w-6 h-6 shrink-0 flex items-center justify-center bg-[#282828] border border-[#3e3e3e] rounded transition-colors hover:bg-[#383838] text-[#ccc] hover:text-white cursor-pointer disabled:opacity-40 disabled:cursor-default disabled:hover:bg-[#282828] disabled:hover:text-[#ccc]';
+  'w-6 h-6 shrink-0 flex items-center justify-center bg-[color:var(--h-282828,#282828)] border border-[color:var(--h-3e3e3e,#3e3e3e)] rounded transition-colors hover:bg-[color:var(--h-383838,#383838)] text-[color:var(--h-cccccc,#cccccc)] hover:text-[color:var(--t-white,#fff)] cursor-pointer disabled:opacity-40 disabled:cursor-default disabled:hover:bg-[color:var(--h-282828,#282828)] disabled:hover:text-[color:var(--h-cccccc,#cccccc)]';
 
 /**
  * Jeden wiersz: lista rozwijana z presetami użytkownika + przycisk zapisu (dyskietka) + przycisk usuwania (kosz).
@@ -87,8 +87,8 @@ export const CorrectionPresetsBar: React.FC<{
   };
 
   return (
-    <div className="flex items-center gap-1.5 px-3 py-2 border-b border-[#333] shrink-0">
-      <span className="text-[11px] text-[#999] shrink-0">Preset:</span>
+    <div className="flex items-center gap-1.5 px-3 py-2 border-b border-[color:var(--h-333333,#333333)] shrink-0">
+      <span className="text-[11px] text-[color:var(--h-999999,#999999)] shrink-0">Preset:</span>
       {naming ? (
         <input
           ref={nameRef}
@@ -108,13 +108,13 @@ export const CorrectionPresetsBar: React.FC<{
               setNaming(false);
             }
           }}
-          className="flex-1 min-w-0 h-6 bg-[#111] border border-[#007acc] rounded px-1.5 text-[11px] text-white focus:outline-none"
+          className="flex-1 min-w-0 h-6 bg-[color:var(--h-111111,#111111)] border border-[color:var(--h-007acc,#007acc)] rounded px-1.5 text-[11px] text-[color:var(--t-white,#fff)] focus:outline-none"
         />
       ) : (
         <select
           value={selectedId}
           onChange={(e) => onSelect(e.target.value)}
-          className="flex-1 min-w-0 h-6 bg-[#282828] border border-[#3e3e3e] rounded px-1 text-[11px] text-[#ddd] focus:outline-none focus:border-[#007acc] cursor-pointer"
+          className="flex-1 min-w-0 h-6 bg-[color:var(--h-282828,#282828)] border border-[color:var(--h-3e3e3e,#3e3e3e)] rounded px-1 text-[11px] text-[color:var(--h-dddddd,#dddddd)] focus:outline-none focus:border-[color:var(--h-007acc,#007acc)] cursor-pointer"
           title="Presety użytkownika dla tego okna"
         >
           <option value="">{list.length ? '(wybierz preset)' : '(brak zapisanych presetów)'}</option>

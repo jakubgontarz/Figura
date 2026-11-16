@@ -4,6 +4,7 @@
  */
 
 import { VectorObject, cloneVectorObjects, compositeVectorObject, drawVectorObject, scaleVectorObject, vectorObjectBlend } from './VectorObjects.ts';
+import { settings } from './Settings.ts';
 import { TileGrid } from './TileGrid.ts';
 import { Tile } from './Tile.ts';
 import { SKBlendMode, SKColor } from './types.ts';
@@ -30,8 +31,6 @@ let corrVersionCounter = 0;
 // po jednej warstwie na zadanie i wstrzymywane, gdy czeka zdarzenie wejścia. Panel warstw dostaje powiadomienie.
 const THUMB_MAX_W = 35;
 const THUMB_MAX_H = 35;
-const THUMB_DEBOUNCE_MS = 150;
-const THUMB_MAX_WAIT_MS = 900;
 const pendingThumbs = new Set<Layer>();
 const urgentThumbs = new Set<Layer>();
 const thumbListeners = new Set<() => void>();
@@ -54,7 +53,8 @@ function scheduleThumb(layer: Layer, urgent: boolean): void {
   (urgent ? urgentThumbs : pendingThumbs).add(layer);
   const now = performance.now();
   if (!thumbFirstAt) thumbFirstAt = now;
-  armThumbTimer(Math.max(0, Math.min(THUMB_DEBOUNCE_MS, thumbFirstAt + THUMB_MAX_WAIT_MS - now)));
+  const rp = settings.render();
+  armThumbTimer(Math.max(0, Math.min(rp.thumbDebounceMs, thumbFirstAt + rp.thumbMaxWaitMs - now)));
 }
 
 function pumpThumbs(): void {
@@ -834,6 +834,7 @@ export class Layer {
     copy.touchCorrections();
     copy.editMask = this.editMask;
     copy.maskEnabled = this.maskEnabled;
+    copy.maskLinked = this.maskLinked;
     copy.thumbW = this.thumbW;
     copy.thumbH = this.thumbH;
     copy.thumbnailCanvas.width = this.thumbW;
@@ -849,6 +850,33 @@ export class Layer {
       copy.thumbDirty = false;
       copy.thumbVersion++;
     }
+    return copy;
+  }
+
+  /**
+   * „Powłoka” warstwy na nowej siatce pikseli: wszystkie właściwości (widoczność, blokada, rodzaj, grupa, krycie, tryb mieszania,
+   * stan maski) bez pikseli, maski, obiektów wektorowych, korekcji i stylizacji. Służy do odtworzenia warstwy po zmianie
+   * rozmiaru dokumentu (menu „Obraz”): wołający uzupełnia resztę przeliczonymi danymi.
+   */
+  public cloneShell(grid: TileGrid): Layer {
+    const copy = new Layer(this.id, this.name, grid.width, grid.height, grid.tileSize, grid);
+    copy._visible = this._visible;
+    copy._locked = this._locked;
+    copy.isGroup = this.isGroup;
+    copy.isAdjustment = this.isAdjustment;
+    copy.isVector = this.isVector;
+    copy.maskRaster = this.maskRaster;
+    copy.groupId = this.groupId;
+    copy.expanded = this.expanded;
+    copy.groupHidden = this.groupHidden;
+    copy.groupLocked = this.groupLocked;
+    copy.opacity = this.opacity;
+    copy.blendMode = this.blendMode;
+    copy.correctionsExpanded = this.correctionsExpanded;
+    copy.editMask = this.editMask;
+    copy.maskEnabled = this.maskEnabled;
+    copy.maskLinked = this.maskLinked;
+    copy.grayView = this.grayView;
     return copy;
   }
 

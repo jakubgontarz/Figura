@@ -236,7 +236,7 @@ export const ColorPickerBody: React.FC<{
             const css = (c: { r: number; g: number; b: number }) => `rgb(${c.r},${c.g},${c.b})`;
             const row = (label: string, field: React.ReactNode) => (
               <div key={label} className="flex items-center gap-1.5">
-                <span className="w-2.5 text-[10px] font-mono text-[#999]">{label}</span>
+                <span className="w-2.5 text-[10px] font-mono text-[color:var(--h-999999,#999999)]">{label}</span>
                 <div className="flex-1 min-w-0">{field}</div>
               </div>
             );
@@ -309,7 +309,7 @@ export const ColorPickerBody: React.FC<{
             setIsDraggingSv(true);
             handleSvPointer(e);
           }}
-          className="relative w-full aspect-[2/1] rounded-xs cursor-crosshair overflow-hidden border border-[#333]"
+          className="relative w-full aspect-[2/1] rounded-xs cursor-crosshair overflow-hidden border border-[color:var(--h-333333,#333333)]"
           style={{
             backgroundColor: `hsl(${hue}, 100%, 50%)`,
           }}
@@ -345,7 +345,7 @@ export const ColorPickerBody: React.FC<{
             setIsDraggingHue(true);
             handleHuePointer(e);
           }}
-          className="relative w-full h-full min-h-0 rounded-xs cursor-ns-resize border border-[#333]"
+          className="relative w-full h-full min-h-0 rounded-xs cursor-ns-resize border border-[color:var(--h-333333,#333333)]"
           style={{
             background:
               'linear-gradient(to bottom, #ff0000 0%, #ffff00 17%, #00ff00 33%, #00ffff 50%, #0000ff 67%, #ff00ff 83%, #ff0000 100%)',
@@ -362,9 +362,9 @@ export const ColorPickerBody: React.FC<{
       {/* Suwak przezroczystości (Alpha / Krycie pędzla) */}
       {showAlpha && (
       <div className="mb-2">
-        <div className="flex justify-between text-[10px] text-[#999] mb-0.5">
+        <div className="flex justify-between text-[10px] text-[color:var(--h-999999,#999999)] mb-0.5">
           <span>Przezroczystość:</span>
-          <span className="font-mono text-[#ccc]">{Math.round((currentColor.a / 255) * 100)}%</span>
+          <span className="font-mono text-[color:var(--h-cccccc,#cccccc)]">{Math.round((currentColor.a / 255) * 100)}%</span>
         </div>
         <div
           ref={alphaTrackRef}
@@ -372,7 +372,7 @@ export const ColorPickerBody: React.FC<{
             setIsDraggingAlpha(true);
             handleAlphaPointer(e);
           }}
-          className="relative h-3.5 rounded-xs border border-[#333] overflow-hidden cursor-pointer touch-none"
+          className="relative h-3.5 rounded-xs border border-[color:var(--h-333333,#333333)] overflow-hidden cursor-pointer touch-none"
           style={{
             backgroundImage: `repeating-conic-gradient(#e4e4e4 0% 25%, #ffffff 0% 50%)`,
             backgroundSize: '8px 8px',
@@ -395,15 +395,15 @@ export const ColorPickerBody: React.FC<{
       )}
 
       {/* Paleta próbek kolorów (kwadratowe próbki barw) */}
-      <div className="border-t border-[#2a2a2a] pt-1.5">
+      <div className="border-t border-[color:var(--h-2a2a2a,#2a2a2a)] pt-1.5">
         <div className="flex items-center justify-between mb-1">
-          <span className="text-[10px] text-[#888]">Próbki barw</span>
+          <span className="text-[10px] text-[color:var(--h-888888,#888888)]">Próbki barw</span>
           <div className="flex items-center gap-1">
             <button
               type="button"
               onClick={addColorToPalette}
               title="Dodaj obecny kolor do palety"
-              className="w-6 h-5.5 flex items-center justify-center bg-[#282828] border border-[#3e3e3e] rounded transition-colors hover:bg-[#383838] text-[#ccc] hover:text-white cursor-pointer"
+              className="w-6 h-5.5 flex items-center justify-center bg-[color:var(--h-282828,#282828)] border border-[color:var(--h-3e3e3e,#3e3e3e)] rounded transition-colors hover:bg-[color:var(--h-383838,#383838)] text-[color:var(--h-cccccc,#cccccc)] hover:text-[color:var(--t-white,#fff)] cursor-pointer"
             >
               <Plus size={12} />
             </button>
@@ -411,7 +411,7 @@ export const ColorPickerBody: React.FC<{
               type="button"
               onClick={() => setPalette(DEFAULT_PALETTE_HEX)}
               title="Przywróć domyślną paletę"
-              className="w-6 h-5.5 flex items-center justify-center bg-[#282828] border border-[#3e3e3e] rounded transition-colors hover:bg-[#383838] text-[#ccc] hover:text-white cursor-pointer"
+              className="w-6 h-5.5 flex items-center justify-center bg-[color:var(--h-282828,#282828)] border border-[color:var(--h-3e3e3e,#3e3e3e)] rounded transition-colors hover:bg-[color:var(--h-383838,#383838)] text-[color:var(--h-cccccc,#cccccc)] hover:text-[color:var(--t-white,#fff)] cursor-pointer"
             >
               <Palette size={12} />
             </button>
@@ -427,7 +427,7 @@ export const ColorPickerBody: React.FC<{
                 e.preventDefault();
                 onChangeSecondary?.(hexToSkColor(c, currentColor.a));
               }}
-              className="w-full aspect-[2/1] rounded-xs border border-[#222] cursor-pointer hover:scale-110 hover:border-white transition-transform"
+              className="w-full aspect-[2/1] rounded-xs border border-[color:var(--h-222222,#222222)] cursor-pointer hover:scale-110 hover:border-white transition-transform"
               style={{ backgroundColor: c }}
               title={`${c} (LPM: kolor aktywny, PPM: kolor dodatkowy)`}
             />
@@ -500,7 +500,7 @@ export const ColorSwatchButton: React.FC<{ value: string; onChange: (hex: string
         type="button"
         onClick={() => (open ? setOpen(false) : openPanel())}
         title="Wybierz kolor"
-        className={className ?? 'w-7 h-5 p-0 border border-[#3e3e3e] rounded cursor-pointer shrink-0'}
+        className={className ?? 'w-7 h-5 p-0 border border-[color:var(--h-3e3e3e,#3e3e3e)] rounded cursor-pointer shrink-0'}
         style={{ backgroundColor: hexOk(value) ? value : '#000000' }}
       />
       {open &&
@@ -508,12 +508,12 @@ export const ColorSwatchButton: React.FC<{ value: string; onChange: (hex: string
           <div
             ref={panelRef}
             data-color-popover
-            className="fixed z-[80] w-[232px] p-2 bg-[#1e1e1e] border border-[#3a3a3a] rounded-md shadow-2xl text-xs select-none"
+            className="fixed z-[80] w-[232px] p-2 bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[color:var(--h-3a3a3a,#3a3a3a)] rounded-md shadow-2xl text-xs select-none"
             style={{ left: pos.x, top: pos.y }}
             onKeyDown={(e) => e.stopPropagation()}
           >
             <div className="flex items-center gap-1.5 mb-2">
-              <div className="w-6 h-5 rounded-xs border border-[#444]" style={{ backgroundColor: skColorToHex(color) }} />
+              <div className="w-6 h-5 rounded-xs border border-[color:var(--h-444444,#444444)]" style={{ backgroundColor: skColorToHex(color) }} />
               <input
                 type="text"
                 value={hexInput}
@@ -527,7 +527,7 @@ export const ColorSwatchButton: React.FC<{ value: string; onChange: (hex: string
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
                 }}
-                className="flex-1 h-5 bg-[#121212] border border-[#444] rounded px-1 text-[10px] font-mono text-white text-center focus:outline-none focus:border-[#007acc]"
+                className="flex-1 h-5 bg-[color:var(--h-121212,#121212)] border border-[color:var(--h-444444,#444444)] rounded px-1 text-[10px] font-mono text-[color:var(--t-white,#fff)] text-center focus:outline-none focus:border-[color:var(--h-007acc,#007acc)]"
               />
             </div>
             <ColorPickerBody color={color} onChange={(c) => onChange(skColorToHex(c).toLowerCase())} showAlpha={false} />
