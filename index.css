@@ -1,0 +1,24 @@
+@import "tailwindcss";
+
+html, body, #root { background: var(--h-1e1e1e, #1e1e1e); }
+:root { --accent: #007acc; }
+
+
+/* Zaznaczony wiersz warstwy ma w każdym motywie ciemne tło akcentu, więc jego ikony, liczniki i przyciski zostają jasne */
+:root[data-theme='white'] [data-sel='true'],
+:root[data-theme='light'] [data-sel='true'] {
+  --c-cyan: #6fd3e6;
+  --c-blue: #9cdcfe;
+  --c-amber: #ffd479;
+  --c-red: #ff8a8a;
+  --c-teal: #00ffcc;
+  --c-btn: rgba(0, 0, 0, 0.45);
+  --c-btn-h: rgba(0, 0, 0, 0.7);
+  --c-btn-fg: #ffffff;
+  --c-btn-off: rgba(0, 0, 0, 0.6);
+  --c-badge: rgba(0, 0, 0, 0.35);
+  --c-badge-h: rgba(0, 0, 0, 0.6);
+  --h-dddddd: #dddddd;
+  --h-777777: #aab8c4;
+  color: #ffffff;
+}
