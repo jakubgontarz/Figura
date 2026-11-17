@@ -612,8 +612,8 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                 style={isChild ? { marginLeft: 14 } : undefined}
                 title="Korekcja"
                 className={`group flex items-center gap-1.5 h-[26px] pl-1 pr-1.5 rounded border cursor-pointer text-[10.5px] transition-all ${
-                  isSelected ? 'bg-[#17454f] border-[#19b5cf] text-[color:var(--t-white,#fff)]' : 'bg-[#1b2a2e] hover:bg-[#223a40] border-[#25444c] text-[#cfe9ee]'
-                } ${dp === 'before' ? 'border-t-2 border-t-[#00ffcc]' : ''} ${dp === 'after' ? 'border-b-2 border-b-[#00ffcc]' : ''}`}
+                  isSelected ? 'bg-[color:var(--c-selbg,#17454f)] border-[color:var(--c-selborder,#19b5cf)] text-[color:var(--t-white,#fff)]' : 'bg-[color:var(--c-rowbg,#1b2a2e)] hover:bg-[color:var(--c-rowbg-h,#223a40)] border-[color:var(--c-rowborder,#25444c)] text-[color:var(--c-rowfg,#cfe9ee)]'
+                } ${dp === 'before' ? 'border-t-2 border-t-[color:var(--c-teal,#00ffcc)]' : ''} ${dp === 'after' ? 'border-b-2 border-b-[color:var(--c-teal,#00ffcc)]' : ''}`}
               >
                 <button
                   type="button"
@@ -623,14 +623,14 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                   }}
                   onDoubleClick={(e) => e.stopPropagation()}
                   title={layer.ownVisible ? 'Wyłącz korekcję' : 'Włącz korekcję'}
-                  className={`p-0.5 rounded cursor-pointer shrink-0 ${layer.ownVisible ? 'bg-black/60 hover:bg-black/90 text-[color:var(--t-white,#fff)]' : 'bg-black/80 text-[#ff6666]'}`}
+                  className={`p-0.5 rounded cursor-pointer shrink-0 ${layer.ownVisible ? 'bg-[color:var(--c-btn,rgba(0,0,0,.6))] hover:bg-[color:var(--c-btn-h,rgba(0,0,0,.9))] text-[color:var(--c-btn-fg,#fff)]' : 'bg-[color:var(--c-btn-off,rgba(0,0,0,.8))] text-[color:var(--c-red,#ff6666)]'}`}
                 >
                   {layer.ownVisible ? <Eye size={10} strokeWidth={2.2} /> : <EyeOff size={10} strokeWidth={2.2} />}
                 </button>
                 {isFilterType(layer.corrections[0]?.type ?? 'invert') ? (
-                  <Filter size={11} strokeWidth={2.2} className="shrink-0 text-[#6fd3e6]" />
+                  <Filter size={11} strokeWidth={2.2} className="shrink-0 text-[color:var(--c-cyan,#6fd3e6)]" />
                 ) : (
-                  <SlidersHorizontal size={11} strokeWidth={2.2} className="shrink-0 text-[#6fd3e6]" />
+                  <SlidersHorizontal size={11} strokeWidth={2.2} className="shrink-0 text-[color:var(--c-cyan,#6fd3e6)]" />
                 )}
                 <span className={`flex-1 min-w-0 truncate ${adjHidden || !layer.corrections[0]?.enabled ? 'opacity-50' : ''}`}>{correctionName(layer.corrections[0]?.type ?? 'invert')}</span>
               </div>
@@ -647,13 +647,14 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
               onDragEnd={handleDragEnd}
               onClick={() => onSelectLayer(index)}
               style={isChild ? { marginLeft: 14 } : undefined}
+              data-sel={isSelected ? 'true' : undefined}
               className={`group/layer relative flex items-center gap-1 p-1 rounded cursor-pointer border transition-all ${
                 isSelected
                   ? 'bg-[color:var(--h-10549c,#10549c)] border-[color:var(--h-2980b9,#2980b9)] text-white shadow-sm'
                   : 'bg-[color:var(--h-1e1e1e,#1e1e1e)] hover:bg-[color:var(--h-282828,#282828)] border-transparent text-[color:var(--h-cccccc,#cccccc)]'
-              } ${dropHere === 'before' ? 'border-t-2 border-t-[#00ffcc]' : ''} ${
-                dropHere === 'after' ? 'border-b-2 border-b-[#00ffcc]' : ''
-              } ${dropHere === 'into' || corrInto || objIntoHere ? 'ring-2 ring-[#00ffcc]' : ''}`}
+              } ${dropHere === 'before' ? 'border-t-2 border-t-[color:var(--c-teal,#00ffcc)]' : ''} ${
+                dropHere === 'after' ? 'border-b-2 border-b-[color:var(--c-teal,#00ffcc)]' : ''
+              } ${dropHere === 'into' || corrInto || objIntoHere ? 'ring-2 ring-[color:var(--c-teal,#00ffcc)]' : ''}`}
             >
               {/* Miniatura Warstwy: slot 35x35 bez szarej ramki i czarnego tła; ramka tylko wokół samej miniaturki */}
               <div
@@ -668,7 +669,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
               >
                 {isGroup ? (
                   <div
-                    className={`w-[35px] h-[35px] rounded-xs border overflow-hidden flex items-center justify-center text-[#e0b84a] pb-2 ${
+                    className={`w-[35px] h-[35px] rounded-xs border overflow-hidden flex items-center justify-center text-[color:var(--c-amber,#e0b84a)] pb-2 ${
                       isSelected && !layer.editMask && layer.hasMask
                         ? 'border-[#00e5ff] ring-1 ring-[#00e5ff]'
                         : 'border-[color:var(--h-444444,#444444)] bg-[color:var(--h-242424,#242424)]'
@@ -708,7 +709,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                     }
                     className={`p-0.5 rounded transition-opacity cursor-pointer shadow-xs ${
                       layer.ownVisible
-                        ? 'bg-black/70 hover:bg-black/90 text-[color:var(--t-white,#fff)] opacity-0 group-hover/layer:opacity-100 focus-visible:opacity-100'
+                        ? 'bg-black/70 hover:bg-black/90 text-white opacity-0 group-hover/layer:opacity-100 focus-visible:opacity-100'
                         : 'bg-black/85 text-[#ff6666]'
                     }`}
                   >
@@ -789,7 +790,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                     onDoubleClick={(e) => e.stopPropagation()}
                     title={layer.maskEnabled ? 'Wyłącz maskę (pokaż warstwę bez maski)' : 'Włącz maskę'}
                     className={`absolute bottom-0.5 left-0.5 p-0.5 rounded cursor-pointer z-10 shadow-xs transition-opacity ${
-                      layer.maskEnabled ? 'bg-black/70 hover:bg-black/90 text-[color:var(--t-white,#fff)] opacity-0 group-hover/layer:opacity-100 focus-visible:opacity-100' : 'bg-black/85 text-[#ff6666]'
+                      layer.maskEnabled ? 'bg-black/70 hover:bg-black/90 text-white opacity-0 group-hover/layer:opacity-100 focus-visible:opacity-100' : 'bg-black/85 text-[#ff6666]'
                     }`}
                   >
                     {layer.maskEnabled ? <Eye size={10} strokeWidth={2.2} /> : <EyeOff size={10} strokeWidth={2.2} />}
@@ -855,7 +856,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                     {isVec && (
                       <span
                         title={`Obiekty na warstwie`}
-                        className="flex items-center gap-0.5 text-[9px] text-[#e0b84a] shrink-0 opacity-90"
+                        className="flex items-center gap-0.5 text-[9px] text-[color:var(--c-amber,#e0b84a)] shrink-0 opacity-90"
                       >
                         <PenTool size={9} strokeWidth={2.2} />
                         <span>{layer.vectorObjects.length}</span>
@@ -864,7 +865,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                     {hasCorr && layer.corrections.some((c) => !isFilterType(c.type)) && (
                       <span
                         title={`Korekcje na warstwie`}
-                        className="flex items-center gap-0.5 text-[9px] text-[#9cdcfe] shrink-0 opacity-90"
+                        className="flex items-center gap-0.5 text-[9px] text-[color:var(--c-blue,#9cdcfe)] shrink-0 opacity-90"
                       >
                         <SlidersHorizontal size={9} strokeWidth={2.2} />
                         <span>{layer.corrections.filter((c) => !isFilterType(c.type)).length}</span>
@@ -873,7 +874,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                     {hasCorr && layer.corrections.some((c) => isFilterType(c.type)) && (
                       <span
                         title={`Filtry na warstwie`}
-                        className="flex items-center gap-0.5 text-[9px] text-[#9cdcfe] shrink-0 opacity-90"
+                        className="flex items-center gap-0.5 text-[9px] text-[color:var(--c-blue,#9cdcfe)] shrink-0 opacity-90"
                       >
                         <Filter size={9} strokeWidth={2.2} />
                         <span>{layer.corrections.filter((c) => isFilterType(c.type)).length}</span>
@@ -893,9 +894,9 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                           }}
                           onDoubleClick={(e) => e.stopPropagation()}
                           title={`Stylizacje warstwy`}
-                          className={`flex items-center justify-center gap-1 h-[18px] min-w-[26px] px-1 rounded text-[10px] font-medium cursor-pointer bg-black/35 hover:bg-black/60 ${
-                            layer.styles?.visible === false ? 'text-[color:var(--h-777777,#777777)]' : 'text-[#ffd479]'
-                          } ${editingStylesLayerId === layer.id ? 'bg-black/70 ring-1 ring-[#ffd479]/60' : ''}`}
+                          className={`flex items-center justify-center gap-1 h-[18px] min-w-[26px] px-1 rounded text-[10px] font-medium cursor-pointer bg-[color:var(--c-badge,rgba(0,0,0,.35))] hover:bg-[color:var(--c-badge-h,rgba(0,0,0,.6))] ${
+                            layer.styles?.visible === false ? 'text-[color:var(--h-777777,#777777)]' : 'text-[color:var(--c-amber,#ffd479)]'
+                          } ${editingStylesLayerId === layer.id ? 'bg-[color:var(--c-badge-h,rgba(0,0,0,.7))] ring-1 ring-[color:var(--c-amber,#ffd479)]/60' : ''}`}
                         >
                           <Sparkles size={13} strokeWidth={2.2} />
                           <span>{nStyles}</span>
@@ -908,7 +909,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                           }}
                           onDoubleClick={(e) => e.stopPropagation()}
                           title={layer.styles?.visible === false ? 'Pokaż stylizacje warstwy' : 'Ukryj stylizacje warstwy'}
-                          className="flex items-center justify-center w-[18px] h-[18px] rounded text-[#dddddd] bg-black/35 hover:bg-black/60 cursor-pointer"
+                          className="flex items-center justify-center w-[18px] h-[18px] rounded text-[color:var(--h-dddddd,#dddddd)] bg-[color:var(--c-badge,rgba(0,0,0,.35))] hover:bg-[color:var(--c-badge-h,rgba(0,0,0,.6))] cursor-pointer"
                         >
                           {layer.styles?.visible === false ? <EyeOff size={12} strokeWidth={2.2} /> : <Eye size={12} strokeWidth={2.2} />}
                         </button>
@@ -924,7 +925,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                         }}
                         onDoubleClick={(e) => e.stopPropagation()}
                         title={layer.expanded ? 'Zwiń grupę' : 'Rozwiń grupę'}
-                        className="flex items-center justify-center w-[18px] h-[18px] rounded bg-black/40 hover:bg-black/70 text-[#dddddd] cursor-pointer shrink-0"
+                        className="flex items-center justify-center w-[18px] h-[18px] rounded bg-[color:var(--c-badge,rgba(0,0,0,.4))] hover:bg-[color:var(--c-badge-h,rgba(0,0,0,.7))] text-[color:var(--h-dddddd,#dddddd)] cursor-pointer shrink-0"
                       >
                         {layer.expanded ? <ChevronDown size={13} strokeWidth={2.4} /> : <ChevronRight size={13} strokeWidth={2.4} />}
                       </button>
@@ -939,7 +940,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                         }}
                         onDoubleClick={(e) => e.stopPropagation()}
                         title={layer.correctionsExpanded ? (isVec ? 'Zwiń listę obiektów i efektów' : 'Zwiń listę korekcji') : isVec ? 'Rozwiń listę obiektów i efektów' : 'Rozwiń listę korekcji'}
-                        className="flex items-center justify-center w-[18px] h-[18px] rounded bg-black/40 hover:bg-black/70 text-[#dddddd] cursor-pointer shrink-0"
+                        className="flex items-center justify-center w-[18px] h-[18px] rounded bg-[color:var(--c-badge,rgba(0,0,0,.4))] hover:bg-[color:var(--c-badge-h,rgba(0,0,0,.7))] text-[color:var(--h-dddddd,#dddddd)] cursor-pointer shrink-0"
                       >
                         {layer.correctionsExpanded ? <ChevronDown size={13} strokeWidth={2.4} /> : <ChevronRight size={13} strokeWidth={2.4} />}
                       </button>
@@ -1034,12 +1035,12 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                         title="Korekcja"
                         className={`group flex items-center gap-1.5 h-[22px] pl-1 pr-0.5 rounded border cursor-pointer text-[10.5px] ${
                           editing
-                            ? 'border-[#00e5ff] bg-[#17313a]'
+                            ? 'border-[color:var(--c-edit-border,#00e5ff)] bg-[color:var(--c-edit-bg,#17313a)]'
                             : picked
-                              ? 'border-[#19b5cf] bg-[#17454f] text-[color:var(--t-white,#fff)]'
+                              ? 'border-[color:var(--c-selborder,#19b5cf)] bg-[color:var(--c-selbg,#17454f)] text-[color:var(--c-selfg,#fff)]'
                               : 'border-[color:var(--h-2a2a2a,#2a2a2a)] bg-[color:var(--h-191919,#191919)] hover:bg-[color:var(--h-242424,#242424)]'
-                        } ${beingDragged ? 'opacity-40' : ''} ${over === 'before' ? 'border-t-2 border-t-[#00ffcc]' : ''} ${
-                          over === 'after' ? 'border-b-2 border-b-[#00ffcc]' : ''
+                        } ${beingDragged ? 'opacity-40' : ''} ${over === 'before' ? 'border-t-2 border-t-[color:var(--c-teal,#00ffcc)]' : ''} ${
+                          over === 'after' ? 'border-b-2 border-b-[color:var(--c-teal,#00ffcc)]' : ''
                         }`}
                       >
                         <button
@@ -1051,15 +1052,15 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                           onDoubleClick={(e) => e.stopPropagation()}
                           title={c.enabled ? 'Wyłącz korekcję' : 'Włącz korekcję'}
                           className={`p-0.5 rounded cursor-pointer shrink-0 ${
-                            c.enabled ? 'bg-black/60 hover:bg-black/90 text-[color:var(--t-white,#fff)]' : 'bg-black/80 text-[#ff6666]'
+                            c.enabled ? 'bg-[color:var(--c-btn,rgba(0,0,0,.6))] hover:bg-[color:var(--c-btn-h,rgba(0,0,0,.9))] text-[color:var(--c-btn-fg,#fff)]' : 'bg-[color:var(--c-btn-off,rgba(0,0,0,.8))] text-[color:var(--c-red,#ff6666)]'
                           }`}
                         >
                           {c.enabled ? <Eye size={10} strokeWidth={2.2} /> : <EyeOff size={10} strokeWidth={2.2} />}
                         </button>
                         {isFilterType(c.type) ? (
-                          <Filter size={9} strokeWidth={2.2} className="shrink-0 text-[#6fd3e6] opacity-80" />
+                          <Filter size={9} strokeWidth={2.2} className="shrink-0 text-[color:var(--c-cyan,#6fd3e6)] opacity-80" />
                         ) : (
-                          <SlidersHorizontal size={9} strokeWidth={2.2} className="shrink-0 text-[#6fd3e6] opacity-80" />
+                          <SlidersHorizontal size={9} strokeWidth={2.2} className="shrink-0 text-[color:var(--c-cyan,#6fd3e6)] opacity-80" />
                         )}
                         <span className={`flex-1 min-w-0 truncate ${c.enabled ? 'text-[color:var(--h-d4d4d4,#d4d4d4)]' : 'text-[color:var(--h-777777,#777777)]'}`}>{correctionName(c.type)}</span>
                       </div>
@@ -1071,7 +1072,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
             {objListOpen && (
               <div style={{ marginLeft: (isChild ? 14 : 0) + 12 }} className="space-y-0.5">
                 {pendingHere && (
-                  <div className="flex items-center gap-1.5 h-[22px] pl-1 pr-0.5 rounded border border-[#e0b84a] bg-[#3a3217] text-[color:var(--t-white,#fff)] text-[10.5px] italic">
+                  <div className="flex items-center gap-1.5 h-[22px] pl-1 pr-0.5 rounded border border-[color:var(--c-amber,#e0b84a)] bg-[color:var(--c-editbg,#3a3217)] text-[color:var(--t-white,#fff)] text-[10.5px] italic">
                     <span className="w-[18px] shrink-0" />
                     <span className="flex-1 min-w-0 truncate">{pendingVectorObject!.label} (rysowanie…)</span>
                   </div>
@@ -1140,8 +1141,8 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                         onDoubleClick={() => setRenamingObj({ id: o.id, name: vectorObjectLabel(o) })}
                         title="Obiekt wektorowy"
                         className={`group flex items-center gap-1.5 h-[22px] pl-1 pr-0.5 rounded border cursor-pointer text-[10.5px] ${
-                          editing ? 'border-[#e0b84a] bg-[#3a3217] text-[color:var(--t-white,#fff)]' : 'border-[color:var(--h-2a2a2a,#2a2a2a)] bg-[color:var(--h-191919,#191919)] hover:bg-[color:var(--h-242424,#242424)]'
-                        } ${beingDragged ? 'opacity-40' : ''} ${over === 'before' ? 'border-t-2 border-t-[#00ffcc]' : ''} ${over === 'after' ? 'border-b-2 border-b-[#00ffcc]' : ''}`}
+                          editing ? 'border-[color:var(--c-amber,#e0b84a)] bg-[color:var(--c-editbg,#3a3217)] text-[color:var(--t-white,#fff)]' : 'border-[color:var(--h-2a2a2a,#2a2a2a)] bg-[color:var(--h-191919,#191919)] hover:bg-[color:var(--h-242424,#242424)]'
+                        } ${beingDragged ? 'opacity-40' : ''} ${over === 'before' ? 'border-t-2 border-t-[color:var(--c-teal,#00ffcc)]' : ''} ${over === 'after' ? 'border-b-2 border-b-[color:var(--c-teal,#00ffcc)]' : ''}`}
                       >
                         <button
                           type="button"
@@ -1153,7 +1154,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                           }}
                           onDoubleClick={(e) => e.stopPropagation()}
                           title={o.visible ? 'Ukryj obiekt' : 'Pokaż obiekt'}
-                          className={`p-0.5 rounded cursor-pointer shrink-0 ${o.visible ? 'bg-black/60 hover:bg-black/90 text-[color:var(--t-white,#fff)]' : 'bg-black/80 text-[#ff6666]'}`}
+                          className={`p-0.5 rounded cursor-pointer shrink-0 ${o.visible ? 'bg-[color:var(--c-btn,rgba(0,0,0,.6))] hover:bg-[color:var(--c-btn-h,rgba(0,0,0,.9))] text-[color:var(--c-btn-fg,#fff)]' : 'bg-[color:var(--c-btn-off,rgba(0,0,0,.8))] text-[color:var(--c-red,#ff6666)]'}`}
                         >
                           {o.visible ? <Eye size={10} strokeWidth={2.2} /> : <EyeOff size={10} strokeWidth={2.2} />}
                         </button>
@@ -1167,10 +1168,10 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                             }}
                             className="shrink-0 flex items-center cursor-pointer"
                           >
-                            <KindIcon size={10} strokeWidth={2.2} className="text-[#e0b84a] opacity-90" />
+                            <KindIcon size={10} strokeWidth={2.2} className="text-[color:var(--c-amber,#e0b84a)] opacity-90" />
                           </span>
                         ) : (
-                          <KindIcon size={10} strokeWidth={2.2} className="shrink-0 text-[#e0b84a] opacity-90" />
+                          <KindIcon size={10} strokeWidth={2.2} className="shrink-0 text-[color:var(--c-amber,#e0b84a)] opacity-90" />
                         )}
                         {renamingObj?.id === o.id ? (
                           <input
@@ -1291,7 +1292,7 @@ export const LayersPanel: React.FC<LayersPanelProps> = ({
                   setCorrMenu(null);
                   onOpenCorrection(activeLayerIndex, d.type, corrOnlyActive);
                 }}
-                className="w-full text-left px-2.5 py-1 text-[11px] text-[#dddddd] hover:bg-[color:var(--h-10549c,#10549c)] hover:text-white cursor-pointer"
+                className="w-full text-left px-2.5 py-1 text-[11px] text-[color:var(--h-dddddd,#dddddd)] hover:bg-[color:var(--h-10549c,#10549c)] hover:text-white cursor-pointer"
               >
                 {d.name}
               </button>

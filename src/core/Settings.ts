@@ -4,6 +4,7 @@
  */
 
 import type { LengthUnit } from './Units.ts';
+import { persist } from './Persist.ts';
 import { THEME_IDS, ThemeId } from './Theme.ts';
 
 /**
@@ -44,7 +45,7 @@ export interface Settings {
   antsSpeed: 'slow' | 'normal' | 'fast';
   // --- Wydajność i pamięć ---
   renderMode: RenderMode;
-  gpu: 'auto' | 'off';
+  gpu: 'auto' | 'safe' | 'off';
   /** Przy oddaleniu poniżej 50% pokazuj pomniejszoną, uśrednioną kopię obrazu zamiast skalowania przez przeglądarkę (bez aliasingu) */
   downscaleSmooth: boolean;
   previewCacheMB: number;
@@ -136,12 +137,22 @@ class SettingsStore {
   private listeners = new Set<Listener>();
 
   constructor() {
+    this.load();
+  }
+
+  private load(): void {
     try {
-      const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(KEY) : null;
+      const raw = persist.get(KEY);
       if (raw) this.cur = this.sanitize(JSON.parse(raw));
     } catch {
       /* uszkodzony zapis: zostają wartości domyślne */
     }
+  }
+
+  /** Ponowne wczytanie po `initPersist()` (w Tauri stan przychodzi z pliku, nie z localStorage). */
+  reload(): void {
+    this.load();
+    this.emit();
   }
 
   /** Scala wczytane wartości z domyślnymi: nieznane klucze są pomijane, a wartości złego typu zastępowane domyślnymi. */
@@ -204,11 +215,7 @@ class SettingsStore {
   }
 
   private persist(): void {
-    try {
-      localStorage.setItem(KEY, JSON.stringify(this.cur));
-    } catch {
-      /* brak miejsca / tryb prywatny: ustawienia działają do końca sesji */
-    }
+    persist.set(KEY, JSON.stringify(this.cur));
   }
 }
 

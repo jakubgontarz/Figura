@@ -36,6 +36,7 @@ import {
   GL2 as GL,
   GL_HEAD,
   Tex,
+  gpuIsSoftware,
   gpuSessionBeginTex,
   gpuSessionEndTex,
   kitBind,
@@ -372,7 +373,10 @@ export class GpuComposer {
     if (f === false) return false;
     if (settings.get().gpu === 'off') return false;
     if (typeof location !== 'undefined' && /[?&]nogpucompose\b/.test(location.search)) return false;
-    return !!kitGl();
+    if (!kitGl()) return false;
+    // WebGL liczony programowo na procesorze (np. WebView2 bez dostępu do karty) jest wolniejszy niż ścieżka procesorowa
+    if (gpuIsSoftware() && !(typeof location !== 'undefined' && /[?&]softgpu\b/.test(location.search))) return false;
+    return true;
   }
 
   public dispose(): void {

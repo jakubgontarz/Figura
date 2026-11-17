@@ -1398,6 +1398,63 @@ export class GraphicEngine {
     return true;
   }
 
+  /**
+   * Wkleja obraz zewnętrzny w jego pełnym rozmiarze, także gdy jest większy od płótna: nic nie jest zmniejszane ani odcinane
+   * przy wklejaniu. Obraz trafia do pływającej ramki (przenoszenie, skalowanie, obrót), a części poza płótnem są widoczne
+   * na nakładce widoku do zatwierdzenia; dopiero po zatwierdzeniu zostają odcięte brzegiem płótna.
+   * `dx`, `dy` to lewy górny róg obrazu w układzie dokumentu (mogą być ujemne).
+   */
+  public pasteCanvasOverhang(img: HTMLCanvasElement, dx: number, dy: number): boolean {
+    const layer = this.getActiveLayer();
+    if (!layer || layer.locked || layer.vectorTarget || img.width < 1 || img.height < 1) return false;
+    if (this.transformContentSession) this.commitTransformContent();
+
+    const initialTilesSnapshot = layer.tileGrid.getTilesSnapshot();
+    const initialSelectionSnapshot = this.selectionManager.getMaskSnapshot();
+    const iw = img.width;
+    const ih = img.height;
+    const full = { left: dx, top: dy, right: dx + iw, bottom: dy + ih, width: iw, height: ih };
+
+    this.selectionManager.clear();
+    this.selectionManager.selectRect(dx, dy, iw, ih);
+    const st = this.selectionManager.beginTransformSelection();
+    if (!st) {
+      this.selectionManager.clear();
+      return false;
+    }
+    // Ramka dotyczy całego obrazu, a nie jego widocznej części (maska selekcji jest przycięta do płótna)
+    const c = { x: dx + iw / 2, y: dy + ih / 2 };
+    st.initialBounds = full;
+    st.initialCenter = { ...c };
+    st.pos = { ...c };
+    st.pivot = { ...c };
+    st.width = iw;
+    st.height = ih;
+
+    const srcMask = document.createElement('canvas');
+    srcMask.width = iw;
+    srcMask.height = ih;
+    const mctx = srcMask.getContext('2d')!;
+    mctx.fillStyle = '#ffffff';
+    mctx.fillRect(0, 0, iw, ih);
+
+    this.transformContentSession = {
+      cutMask: undefined,
+      cutDone: false,
+      identityTiles: undefined,
+      sourceContentCanvas: img,
+      sourceBounds: full,
+      sourceLayerIndex: this.activeLayerIndex,
+      initialTilesSnapshot,
+      initialSelectionSnapshot,
+      interpolation: settings.get().defaultInterpolation,
+      srcMask,
+      softContent: true,
+    };
+    this.markAllLayersDirty();
+    return true;
+  }
+
   /** Prostokąt opisany na pikselach o niezerowej alfie (null, gdy płótno jest puste). */
   private alphaBounds(canvas: HTMLCanvasElement): { x: number; y: number; w: number; h: number } | null {
     const w = canvas.width;
@@ -1453,6 +1510,61 @@ export class GraphicEngine {
 
   public canRedo(): boolean {
     return this.redoStack.length > 0;
+  }
+
+  /** Znacznik bieżącego stanu historii (ostatnia akcja) do wykrywania niezapisanych zmian: równy znacznikowi z chwili zapisu = brak zmian. */
+  public historyMark(): object | null {
+    return this.undoStack.length ? (this.undoStack[this.undoStack.length - 1] as object) : null;
+  }
+
+  /** Licznik zmian spoza historii (np. rozdzielczość w metadanych): dokument jest zmieniony, choć kroków nie przybyło. */
+  public metaRevision = 0;
+
+  /** Zestawienie dokumentu do okna „Właściwości dokumentu”. */
+  public documentStats(): {
+    layers: number;
+    raster: number;
+    vector: number;
+    groups: number;
+    adjustments: number;
+    masks: number;
+    objects: number;
+    smartObjects: number;
+    corrections: number;
+    pixelBytes: number;
+    historySteps: number;
+    redoSteps: number;
+  } {
+    let raster = 0, vector = 0, groups = 0, adjustments = 0, masks = 0, objects = 0, smartObjects = 0, corrections = 0, pixelBytes = 0;
+    for (const l of this.layers) {
+      if (l.isGroup) groups++;
+      else if (l.isAdjustment) adjustments++;
+      else if (l.isVector) vector++;
+      else raster++;
+      if (l.hasMask) masks++;
+      corrections += l.corrections?.length ?? 0;
+      for (const o of l.layerObjects ?? []) {
+        objects++;
+        if ((o as { kind?: string }).kind === 'smart') smartObjects++;
+      }
+      if (!l.isGroup && !l.isAdjustment) {
+        for (const row of l.tileGrid.tiles) for (const t of row) if (t.hasContent) pixelBytes += t.width * t.height * 4;
+      }
+    }
+    return {
+      layers: this.layers.length,
+      raster,
+      vector,
+      groups,
+      adjustments,
+      masks,
+      objects,
+      smartObjects,
+      corrections,
+      pixelBytes,
+      historySteps: this.undoStack.length,
+      redoSteps: this.redoStack.length,
+    };
   }
 
   public clearHistory(): void {

@@ -978,7 +978,13 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
   const pendingVectorRef = useRef(pendingVectorObject);
   pendingVectorRef.current = pendingVectorObject;
   useEffect(() => {
-    engine.setVectorSessionHook({ active: () => vectorActiveRef.current, commit: () => commitVectorRef.current(), pending: () => pendingVectorRef.current(), discard: () => deleteWholeCurveRef.current() });
+    engine.setVectorSessionHook({ active: () => vectorActiveRef.current, commit: () => {
+        // Sesja jest zatwierdzana raz: stan Reacta (a z nim `vectorActiveRef`) odświeża się dopiero po renderze, więc bez tego
+        // drugie wywołanie w tej samej chwili (np. `settle` i zaraz `setEditTarget` przy kliknięciu warstwy) dodałoby obiekt ponownie
+        if (!vectorActiveRef.current) return;
+        vectorActiveRef.current = false;
+        commitVectorRef.current();
+      }, pending: () => pendingVectorRef.current(), discard: () => deleteWholeCurveRef.current() });
     return () => engine.setVectorSessionHook(null);
   }, [engine]);
 
@@ -4131,7 +4137,8 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
           oCanvas.height = pxH;
         }
 
-        const oCtx = oCanvas.getContext('2d');
+        // desynchronized: nakładka (w tym kursor rysowany programowo) omija synchronizację z kompozytorem, co zmniejsza opóźnienie kursora w WebView2
+        const oCtx = oCanvas.getContext('2d', { desynchronized: true } as CanvasRenderingContext2DSettings);
         if (oCtx) {
           oCtx.setTransform(1, 0, 0, 1, 0, 0);
           oCtx.clearRect(0, 0, pxW, pxH);
@@ -4184,6 +4191,32 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
           oCtx.translate(screenCenterX, screenCenterY);
           oCtx.scale(zoom, zoom);
           oCtx.translate(-engine.width / 2, -engine.height / 2);
+
+          // Przekształcana zawartość większa od płótna (np. wklejony duży obraz): część poza płótnem jest widoczna do zatwierdzenia.
+          // Wnętrze płótna rysuje zwykły podgląd, więc nakładka obejmuje tylko obszar poza nim.
+          {
+            const tcsO = engine.transformContentSession;
+            const stO = engine.selectionManager.transformState;
+            if (tcsO && stO && !tcsO.persp && tcsO.sourceLayerIndex === engine.activeLayerIndex) {
+              const iwO = Math.max(1, stO.initialBounds.width);
+              const ihO = Math.max(1, stO.initialBounds.height);
+              const bb = boundsForRotatedBox(stO.pos, stO.width, stO.height, stO.angle, 0);
+              if (bb.left < 0 || bb.top < 0 || bb.right > engine.width || bb.bottom > engine.height) {
+                oCtx.save();
+                const outside = new Path2D();
+                outside.rect(-1e6, -1e6, 2e6, 2e6);
+                outside.rect(0, 0, engine.width, engine.height);
+                oCtx.clip(outside, 'evenodd');
+                oCtx.translate(stO.pos.x, stO.pos.y);
+                oCtx.rotate(stO.angle);
+                oCtx.scale((stO.width / iwO) * (stO.flipX ? -1 : 1), (stO.height / ihO) * (stO.flipY ? -1 : 1));
+                oCtx.imageSmoothingEnabled = tcsO.interpolation !== 'nearest-neighbor';
+                oCtx.imageSmoothingQuality = tcsO.interpolation === 'bilinear' ? 'medium' : 'high';
+                oCtx.drawImage(tcsO.previewCanvas ?? tcsO.sourceContentCanvas, -iwO / 2, -ihO / 2);
+                oCtx.restore();
+              }
+            }
+          }
 
           // Siatka między pikselami: nieruchoma, bardzo delikatna (ciemna kreska + jasna przerywana jak maszerujące mrówki)
           const cfgNow = settings.get();
@@ -8009,7 +8042,7 @@ export const CanvasViewport: React.FC<CanvasViewportProps> = ({
               title="Usuń węzeł (Delete)"
               onClick={() => penDeleteNode(penMenu.index)}
               className={`w-full flex items-center gap-2 px-2 py-1 text-left ${
-                sess.nodes.length > 2 ? 'cursor-pointer hover:bg-[color:var(--h-2a2d2e,#2a2d2e)] text-[#f0a0a0]' : 'opacity-35 cursor-default'
+                sess.nodes.length > 2 ? 'cursor-pointer hover:bg-[color:var(--h-2a2d2e,#2a2d2e)] text-[color:var(--c-err,#f0a0a0)]' : 'opacity-35 cursor-default'
               }`}
             >
               <svg width="16" height="16" viewBox="0 0 16 16" fill="none" className="shrink-0">

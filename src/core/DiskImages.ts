@@ -149,10 +149,10 @@ async function idbGet(key: string): Promise<FsHandle | null> {
 // ---- wybór pliku ----
 
 /** Okno wyboru pliku obrazu. Wołać bezpośrednio z obsługi kliknięcia (przeglądarka wymaga gestu użytkownika). */
-export async function pickDiskImage(): Promise<DiskImageRef | null> {
+export async function pickDiskImage(nearPath?: string | null): Promise<DiskImageRef | null> {
   const t = tauri();
   if (t) {
-    const sel = await t.dialog!.open({ multiple: false, directory: false, filters: [{ name: 'Obrazy', extensions: IMAGE_EXTENSIONS }] });
+    const sel = await t.dialog!.open({ multiple: false, directory: false, ...(nearPath ? { defaultPath: nearPath } : {}), filters: [{ name: 'Obrazy', extensions: IMAGE_EXTENSIONS }] });
     const path = Array.isArray(sel) ? sel[0] : sel;
     if (!path) return null;
     return await registerFromPath(path);
@@ -216,7 +216,15 @@ export function ensureDiskImage(ref: DiskImageRef, force = false): Promise<void>
     try {
       const t = tauri();
       if (ref.path && t) {
-        const bytes = await t.fs!.readFile(ref.path);
+        let bytes: Uint8Array;
+        try {
+          bytes = await t.fs!.readFile(ref.path);
+        } catch {
+          // zwykle brak dostępu do ścieżki z poprzedniej sesji (zakres fs): dwukrotne kliknięcie otwiera okno wyboru, które go przywraca
+          if (force) bitmaps.delete(ref.key);
+          setState(ref.key, 'permission');
+          return;
+        }
         setReady(ref.key, await decode(new Blob([bytes as BlobPart], { type: mimeFor(ref.name) })));
         return;
       }
@@ -269,7 +277,7 @@ export async function reconnectDiskImage(ref: DiskImageRef): Promise<DiskImageRe
       }
     }
   }
-  const picked = await pickDiskImage();
+  const picked = await pickDiskImage(ref.path);
   return picked;
 }
 

@@ -160,13 +160,13 @@ export const CanvasSizeDialog: React.FC<Props> = ({ width, height, dpi, defaultU
               {shrinks && (
                 <>
                   <br />
-                  <span className="text-[#e6c36a]">Zawartość zostanie przycięta</span>
+                  <span className="text-[color:var(--c-warn,#e6c36a)]">Zawartość zostanie przycięta</span>
                 </>
               )}
             </div>
           </div>
 
-          {err && <div className="text-[11px] text-[#ff8a8a]" data-testid="canvas-error">{err}</div>}
+          {err && <div className="text-[11px] text-[color:var(--c-err,#ff8a8a)]" data-testid="canvas-error">{err}</div>}
 
           <div className="flex justify-end gap-2 pt-2 border-t border-[color:var(--h-333333,#333333)]">
             <button type="button" onClick={onCancel} className="px-3 py-1.5 bg-[color:var(--h-2d2d2d,#2d2d2d)] hover:bg-[color:var(--h-3d3d3d,#3d3d3d)] rounded text-xs text-[color:var(--h-cccccc,#cccccc)]">

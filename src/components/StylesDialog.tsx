@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { persist } from '../core/Persist.ts';
 import { dialogOwnsKey } from '../core/dialogStack.ts';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { DialogWindow } from './DialogWindow.tsx';
@@ -491,7 +492,7 @@ const PRESET_KEY = 'figura.stylePresets.v1';
 
 function loadUserPresets(): StylePreset[] {
   try {
-    const raw = JSON.parse(localStorage.getItem(PRESET_KEY) || '[]');
+    const raw = JSON.parse(persist.get(PRESET_KEY) || '[]');
     if (!Array.isArray(raw)) return [];
     const out: StylePreset[] = [];
     for (const r of raw) {
@@ -506,7 +507,7 @@ function loadUserPresets(): StylePreset[] {
 
 function saveUserPresets(list: StylePreset[]): void {
   try {
-    localStorage.setItem(PRESET_KEY, JSON.stringify(list.map((p) => ({ id: p.id, name: p.name, styles: p.styles }))));
+    persist.set(PRESET_KEY, JSON.stringify(list.map((p) => ({ id: p.id, name: p.name, styles: p.styles }))));
   } catch {
     /* brak dostępu do pamięci przeglądarki: preset działa do końca sesji */
   }

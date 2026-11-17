@@ -69,7 +69,7 @@ export const SelectionOffsetDialog: React.FC<Props> = ({ dpi, defaultUnit, maxPx
   return (
     <UnitsContext.Provider value={{ unit, dpi }}>
       <DialogWindow
-        width={320}
+        width={380}
         modal
         testId="selection-offset-dialog"
         autoFocus="input"
@@ -103,14 +103,14 @@ export const SelectionOffsetDialog: React.FC<Props> = ({ dpi, defaultUnit, maxPx
           <div className="flex items-center justify-between gap-3">
             <span className="text-[color:var(--h-cccccc,#cccccc)]">Wielkość</span>
             <span className="flex items-center gap-1.5" data-testid="selo-amount">
-              <LengthField valuePx={amount} minPx={0} maxPx={maxPx} trackMaxPx={Math.min(maxPx, 200)} integerPx={false} onCommitPx={setAmount} onEnter={submit} />
+              <LengthField valuePx={amount} minPx={0} maxPx={maxPx} trackMaxPx={Math.min(maxPx, 200)} width={200} integerPx={false} onCommitPx={setAmount} onEnter={submit} />
               <UnitLabel />
             </span>
           </div>
           <div className="flex items-center justify-between gap-3">
             <span className="text-[color:var(--h-cccccc,#cccccc)]">Wtopienie krawędzi</span>
             <span className="flex items-center gap-1.5" data-testid="selo-feather">
-              <LengthField valuePx={feather} minPx={0} maxPx={Math.min(maxPx, 500)} trackMaxPx={100} integerPx={false} onCommitPx={setFeather} onEnter={submit} />
+              <LengthField valuePx={feather} minPx={0} maxPx={Math.min(maxPx, 500)} trackMaxPx={100} width={200} integerPx={false} onCommitPx={setFeather} onEnter={submit} />
               <UnitLabel />
             </span>
           </div>

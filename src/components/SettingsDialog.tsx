@@ -14,6 +14,7 @@ import { useSettings } from './useSettings.ts';
 import { DEFAULT_SETTINGS, RENDER_MODE_LABEL, settings, type RenderMode, type Settings } from '../core/Settings.ts';
 import { RESERVED_TOOL_KEYS, TOOL_KEY_DEFS, toolKey } from '../core/ToolKeys.ts';
 import { LENGTH_UNITS, UNIT_LABEL } from '../core/Units.ts';
+import { gpuRendererName } from '../core/GpuFx.ts';
 
 type Cat = 'perf' | 'history' | 'look' | 'newdoc' | 'view' | 'keys';
 
@@ -244,7 +245,7 @@ const KeysTable: React.FC = () => {
         })}
       </div>
       <div className="flex items-center justify-between pt-3">
-        <span data-testid="keys-msg" className="text-[#ff8a80] text-[11px]">
+        <span data-testid="keys-msg" className="text-[color:var(--c-err,#ff8a80)] text-[11px]">
           {msg}
         </span>
         <button
@@ -274,6 +275,7 @@ interface Props {
 export const SettingsDialog: React.FC<Props> = ({ onClose, historyBytes, initialCat = 'perf' }) => {
   const [cat, setCat] = useState<Cat>(initialCat);
   const c = useSettings();
+  const gpuInfo = React.useMemo(() => gpuRendererName().replace(/^ANGLE \((.*)\)$/, '$1'), []);
   const [confirmReset, setConfirmReset] = useState(false);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
@@ -344,9 +346,10 @@ export const SettingsDialog: React.FC<Props> = ({ onClose, historyBytes, initial
               <Choice
                 k="gpu"
                 label="Przyspieszenie GPU"
-                hint="Składanie podglądu na karcie graficznej. Wyłączenie wymusza tryb procesorowy (wolniejszy, ale niezależny od sterowników)."
+                hint={`Składanie podglądu na karcie graficznej. „Bezpieczne” używa GPU do rysowania, ale edycję obiektów wektorowych leżących pod innymi liczy na procesorze (na niektórych kartach zintegrowanych w Tauri GPU psuje wtedy obraz). „Wyłączone” wymusza tryb procesorowy (wolniejszy, ale niezależny od sterowników).${gpuInfo ? ` Wykryta karta: ${gpuInfo}.` : ''}`}
                 options={[
                   { value: 'auto', label: 'Automatyczne' },
+                  { value: 'safe', label: 'Bezpieczne' },
                   { value: 'off', label: 'Wyłączone' },
                 ]}
               />
@@ -508,7 +511,7 @@ export const SettingsDialog: React.FC<Props> = ({ onClose, historyBytes, initial
       </div>
       <div className="flex items-center justify-between px-4 py-2.5 border-t border-[color:var(--h-2f2f2f,#2f2f2f)] shrink-0">
         {confirmReset ? (
-          <span className="flex items-center gap-2 text-[#ffb4a9]">
+          <span className="flex items-center gap-2 text-[color:var(--c-err,#ffb4a9)]">
             Przywrócić wszystkie ustawienia?
             <button
               type="button"

@@ -49,6 +49,15 @@ import { buildViewMenu } from './components/viewMenu.ts';
 import { buildSelectionMenu } from './components/selectionMenu.ts';
 import { SelectionOffsetDialog } from './components/SelectionOffsetDialog.tsx';
 import { SettingsDialog } from './components/SettingsDialog.tsx';
+import { buildFileMenu } from './components/fileMenu.ts';
+import { ExportDialog } from './components/ExportDialog.tsx';
+import { PrintDialog } from './components/PrintDialog.tsx';
+import { DocPropsDialog } from './components/DocPropsDialog.tsx';
+import { UnsavedDialog, UnsavedAnswer } from './components/UnsavedDialog.tsx';
+import { appWindow, canWriteInPlace, FileRef, isTauri, openFiles, OpenedFile, pickFileNear, readRef, saveFile, readClipboardItems, canReadClipboard } from './platform/index.ts';
+import { recents, RecentItem } from './core/Recent.ts';
+import { saveWindowStateNow } from './platform/windowState.ts';
+import { encodeExport, ExportOptions, formatInfo, sniffDpi } from './core/Export.ts';
 import { ImageResizeDialog } from './components/ImageResizeDialog.tsx';
 import { CanvasSizeDialog } from './components/CanvasSizeDialog.tsx';
 import { settings, type Settings } from './core/Settings.ts';
@@ -80,7 +89,26 @@ interface DocumentTab {
   engine: GraphicEngine;
   /** Zakładka obiektu inteligentnego: skąd pochodzi (zakładka nadrzędna, warstwa, obiekt) i zawartość wyjściowa. */
   smart?: { parentTabId: string; layerId: string; objectId: string; origFig: string | null };
+  /** Plik .fig, z którego dokument pochodzi albo w którym został zapisany (brak = jeszcze nie zapisany) */
+  file?: FileRef | null;
+  /** Stan historii i metadanych w chwili ostatniego zapisu (do wykrywania niezapisanych zmian) */
+  savedMark?: object | null;
+  savedMeta?: number;
+  savedAt?: number | null;
+  fileSize?: number | null;
 }
+
+/** Czy dokument ma zmiany od ostatniego zapisu. Zakładki obiektów inteligentnych nie mają własnego pliku, więc nigdy nie są „zmienione”. */
+const tabDirty = (t: DocumentTab): boolean => !t.smart && (t.engine.historyMark() !== (t.savedMark ?? null) || t.engine.metaRevision !== (t.savedMeta ?? 0));
+
+const FIG_FILTERS = [{ name: 'Projekt Figura (*.fig)', extensions: ['fig'] }];
+const OPEN_FILTERS = [
+  { name: 'Projekty i obrazy', extensions: ['fig', 'png', 'jpg', 'jpeg', 'webp', 'bmp', 'gif'] },
+  { name: 'Projekt Figura (*.fig)', extensions: ['fig'] },
+  { name: 'Obrazy', extensions: ['png', 'jpg', 'jpeg', 'webp', 'bmp', 'gif'] },
+];
+/** Nazwa pliku bez znaków niedozwolonych w systemie plików. */
+const safeFileName = (n: string): string => n.replace(/[\\/:*?"<>|]/g, '_').trim() || 'bez-tytulu';
 
 /** Powiększenie i przesunięcie widoku jednej zakładki. */
 interface TabView {
@@ -105,7 +133,7 @@ export default function App() {
     const doc1 = new GraphicEngine('obraz1.fig', st0.newDocWidth, st0.newDocHeight);
     doc1.dpi = st0.newDocDpi;
     if (st0.newDocBackground === 'none') doc1.initDefaultLayers('none');
-    return [{ id: 'tab_1', title: 'obraz1', engine: doc1 }];
+    return [{ id: 'tab_1', title: 'obraz1', engine: doc1, file: null, savedMark: doc1.historyMark(), savedMeta: doc1.metaRevision }];
   });
 
   const [activeTabId, setActiveTabId] = useState<string>('tab_1');
@@ -646,7 +674,6 @@ export default function App() {
   viewActRef.current = { viewFitWindow, viewZoomIn, viewZoomOut, viewActualSize };
 
   const [isNewDocModalOpen, setIsNewDocModalOpen] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleUpdateBrushSettings = (newSettings: Partial<BrushSettings>) => {
     setBrushSettings((prev) => ({ ...prev, ...newSettings }));
@@ -685,6 +712,7 @@ export default function App() {
     registerSmartBitmap(png, canvas);
     if (parent.engine.vec.updateSmartContent(tab.smart.layerId, tab.smart.objectId, fig, png)) {
       tab.smart.origFig = fig;
+      parent.engine.metaRevision++;
       if (parent.id === activeTabIdRef.current) bumpEngineRevision();
     }
   }, [bumpEngineRevision]);
@@ -822,7 +850,8 @@ export default function App() {
   };
 
   const handleCloseTab = (id: string) => {
-    const closing = tabs.find((t) => t.id === id);
+    const tabsNow = tabsRef.current;
+    const closing = tabsNow.find((t) => t.id === id);
     if (!closing) return;
     closing?.engine.finishOpenSessions();
     flushSmartTab(closing);
@@ -831,17 +860,17 @@ export default function App() {
     let grew = true;
     while (grew) {
       grew = false;
-      for (const t of tabs) if (t.smart && dropped.has(t.smart.parentTabId) && !dropped.has(t.id)) { dropped.add(t.id); grew = true; }
+      for (const t of tabsNow) if (t.smart && dropped.has(t.smart.parentTabId) && !dropped.has(t.id)) { dropped.add(t.id); grew = true; }
     }
-    for (const t of tabs) if (dropped.has(t.id) && t.id !== id) flushSmartTab(t);
-    const remaining = tabs.filter((t) => !dropped.has(t.id));
+    for (const t of tabsNow) if (dropped.has(t.id) && t.id !== id) flushSmartTab(t);
+    const remaining = tabsNow.filter((t) => !dropped.has(t.id));
     setTabs(remaining);
     setViews((prev) => {
       const next = { ...prev };
       for (const d of dropped) delete next[d];
       return next;
     });
-    if (dropped.has(activeTabId)) {
+    if (dropped.has(activeTabIdRef.current)) {
       // Zamknięcie ostatniej zakładki zostawia pusty obszar roboczy (bez aktywnego dokumentu)
       const back = closing.smart && remaining.find((t) => t.id === closing.smart!.parentTabId);
       setActiveTabId((back ?? remaining[0])?.id ?? '');
@@ -859,6 +888,9 @@ export default function App() {
       id: `tab_${Date.now()}`,
       title: title.replace(/\.fig$/, ''),
       engine: newDoc,
+      file: null,
+      savedMark: newDoc.historyMark(),
+      savedMeta: newDoc.metaRevision,
     };
     setTabs((prev) => [...prev, newTab]);
 
@@ -868,95 +900,332 @@ export default function App() {
     bumpEngineRevision();
   };
 
-  const handleOpenFilePicker = () => {
-    fileInputRef.current?.click();
+  // ---------------------------------------------------------------------------------------------
+  // Plik: otwieranie, zapis, eksport, zamykanie. Te same reguły w przeglądarce i w Tauri, różnice kryje `platform`.
+  // ---------------------------------------------------------------------------------------------
+  const tabSeq = useRef(0);
+  const [exportOpen, setExportOpen] = useState(false);
+  const [printOpen, setPrintOpen] = useState(false);
+  const [propsOpen, setPropsOpen] = useState(false);
+  const [unsavedDlg, setUnsavedDlg] = useState<{ names: string[]; action: 'close' | 'exit'; resolve: (a: UnsavedAnswer) => void } | null>(null);
+  const [recentList, setRecentList] = useState<RecentItem[]>(() => recents.list());
+  useEffect(() => recents.subscribe(() => setRecentList(recents.list())), []);
+  /** Trwa pytanie o zapis albo zamykanie: kolejne próby zamknięcia są ignorowane. */
+  const closingRef = useRef(false);
+  /** Program się zamyka: `beforeunload` nie pyta już o niezapisane zmiany. */
+  const exitingRef = useRef(false);
+
+  const handleOpenFilePicker = () => void handleOpen();
+
+  /** Dodaje gotowy silnik jako nową zakładkę i ją uaktywnia. */
+  const addDocumentTab = (eng: GraphicEngine, title: string, file: FileRef | null, extra?: { size?: number | null; savedAt?: number | null }) => {
+    leaveActiveTab();
+    const tab: DocumentTab = {
+      id: `tab_${Date.now()}_${tabSeq.current++}`,
+      title,
+      engine: eng,
+      file,
+      savedMark: eng.historyMark(),
+      savedMeta: eng.metaRevision,
+      savedAt: extra?.savedAt ?? null,
+      fileSize: extra?.size ?? null,
+    };
+    setTabs((prev) => [...prev, tab]);
+    setViewOf(tab.id, initialZoomFor(eng.width, eng.height));
+    setActiveTabId(tab.id);
+    bumpEngineRevision();
+    return tab;
   };
 
-  const handleFileLoaded = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    if (file.name.endsWith('.fig') || file.type === 'application/json') {
-      const reader = new FileReader();
-      reader.onload = async (ev) => {
-        const text = ev.target?.result as string;
-        const newEngine = new GraphicEngine(file.name, 800, 600);
-        const success = await newEngine.loadFromFigFile(text);
-        if (success) {
-          // Obiekt rysowany w dotychczasowej zakładce zostaje w niej zatwierdzony
-          leaveActiveTab();
-          const newTab: DocumentTab = {
-            id: `tab_${Date.now()}`,
-            title: file.name.replace(/\.fig$/, ''),
-            engine: newEngine,
-          };
-          setTabs((prev) => [...prev, newTab]);
-          const maxDim = Math.max(newEngine.width, newEngine.height);
-          setViewOf(newTab.id, maxDim >= 2000 ? 0.35 : 1.0);
-          setActiveTabId(newTab.id);
-          bumpEngineRevision();
-        }
-      };
-      reader.readAsText(file);
-    } else {
-      const reader = new FileReader();
-      reader.onload = (ev) => {
-        const dataUrl = ev.target?.result as string;
-        const img = new Image();
-        img.onload = () => {
-          if (!tabsRef.current.length) {
-            // Bez otwartych dokumentów obraz otwiera się jako nowy dokument o jego rozmiarze
-            const doc = new GraphicEngine(file.name, img.naturalWidth || img.width, img.naturalHeight || img.height);
-            doc.importImage(img, file.name);
-            const tab: DocumentTab = { id: `tab_${Date.now()}`, title: file.name.replace(/\.[^/.]+$/, ''), engine: doc };
-            setTabs([tab]);
-            setViewOf(tab.id, initialZoomFor(doc.width, doc.height));
-            setActiveTabId(tab.id);
-          } else {
-            engine.importImage(img, file.name);
-          }
-          bumpEngineRevision();
-        };
-        img.src = dataUrl;
-      };
-      reader.readAsDataURL(file);
+  /** Otwiera obraz rastrowy jako nowy dokument (jedna warstwa, rozmiar obrazu). */
+  const openImageBytes = async (data: Uint8Array, baseName: string): Promise<boolean> => {
+    const url = URL.createObjectURL(new Blob([data as BlobPart]));
+    try {
+      const img = await new Promise<HTMLImageElement>((res, rej) => {
+        const i = new Image();
+        i.onload = () => res(i);
+        i.onerror = () => rej(new Error('decode'));
+        i.src = url;
+      });
+      const doc = new GraphicEngine(baseName, img.naturalWidth || img.width, img.naturalHeight || img.height);
+      doc.initDefaultLayers('none');
+      doc.importImage(img, baseName);
+      // obraz jest jedyną warstwą: pusta „Warstwa 1” z inicjalizacji i historia importu są zbędne
+      doc.layers.splice(0, 1);
+      doc.activeLayerIndex = 0;
+      doc.clearHistory();
+      const dpi = sniffDpi(data);
+      if (dpi && dpi > 1 && dpi < 5000) doc.dpi = dpi;
+      addDocumentTab(doc, baseName, null, { size: data.length });
+      return true;
+    } catch {
+      showToast(`Nie udało się wczytać obrazu „${baseName}”`);
+      return false;
+    } finally {
+      URL.revokeObjectURL(url);
     }
-    e.target.value = '';
   };
 
-  const handleSaveFig = () => {
-    if (!activeTab) return;
-    for (const t of tabs) if (t.smart) flushSmartTab(t);
-    const jsonStr = engine.saveToFigFile();
-    const blob = new Blob([jsonStr], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    const baseName = engine.title.replace(/\.[^/.]+$/, '');
-    a.download = `${baseName}.fig`;
-    a.click();
-    URL.revokeObjectURL(url);
+  /** Otwiera wczytany plik: .fig jako dokument, obraz jako nowy dokument. */
+  const openFileData = async (f: OpenedFile): Promise<boolean> => {
+    const name = f.ref.name;
+    const lower = name.toLowerCase();
+    const base = name.replace(/\.[^/.]+$/, '');
+    if (f.ref.path) {
+      const existing = tabsRef.current.find((t) => t.file?.path === f.ref.path);
+      if (existing) {
+        leaveActiveTab();
+        setActiveTabId(existing.id);
+        bumpEngineRevision();
+        return true;
+      }
+    }
+    if (lower.endsWith('.fig') || lower.endsWith('.json')) {
+      const eng = new GraphicEngine(name, 800, 600);
+      let ok = false;
+      try {
+        ok = await eng.loadFromFigFile(new TextDecoder().decode(f.data));
+      } catch {
+        ok = false;
+      }
+      if (!ok) {
+        showToast(`Nie udało się otworzyć „${name}” (plik uszkodzony lub w nieobsługiwanym formacie)`);
+        return false;
+      }
+      addDocumentTab(eng, base, f.ref, { size: f.data.length, savedAt: f.modified ?? null });
+      void recents.add(f.ref);
+      return true;
+    }
+    return openImageBytes(f.data, base);
   };
 
-  const handleExportPng = () => {
-    if (!activeTab) return;
-    const dataUrl = engine.exportPng();
-    const a = document.createElement('a');
-    a.href = dataUrl;
-    const baseName = engine.title.replace(/\.[^/.]+$/, '');
-    a.download = `${baseName}.png`;
-    a.click();
+  const handleOpen = async () => {
+    try {
+      const files = await openFiles(OPEN_FILTERS, true);
+      for (const f of files) await openFileData(f);
+    } catch (e: any) {
+      showToast(`Nie udało się otworzyć pliku: ${e?.message ?? e}`);
+    }
   };
 
-  const handleExportJpg = () => {
-    if (!activeTab) return;
-    const dataUrl = engine.exportJpeg();
-    const a = document.createElement('a');
-    a.href = dataUrl;
-    const baseName = engine.title.replace(/\.[^/.]+$/, '');
-    a.download = `${baseName}.jpg`;
-    a.click();
+  const handleOpenRecent = async (item: RecentItem) => {
+    try {
+      const ref = await recents.resolve(item);
+      let f: OpenedFile | null = null;
+      try {
+        f = ref ? await readRef(ref) : null;
+      } catch (err: any) {
+        // Tauri: brak dostępu do ścieżki z poprzedniej sesji (zakres fs) albo plik zniknął: pozwól wskazać plik w oknie wyboru, które daje dostęp
+        if (isTauri() && item.path) {
+          showToast(`Brak dostępu do „${item.name}” (${err?.message ?? err}). Wskaż plik w oknie, aby go otworzyć.`);
+          f = await pickFileNear(item.path, OPEN_FILTERS);
+          if (!f) return;
+        } else throw err;
+      }
+      if (!f) {
+        showToast(`Nie można otworzyć „${item.name}”: plik został przeniesiony, usunięty albo brak dostępu`);
+        if (!ref || !(item.hasHandle && ref.handle)) recents.remove(item.id);
+        return;
+      }
+      await openFileData(f);
+    } catch (e: any) {
+      showToast(`Nie udało się otworzyć pliku: ${e?.message ?? e}`);
+    }
   };
+
+  const handleNewFromClipboard = async () => {
+    try {
+      const items = await readClipboardItems();
+      for (const it of items) {
+        const type = it.types.find((t) => t.startsWith('image/'));
+        if (!type) continue;
+        const blob = await it.getType(type);
+        await openImageBytes(new Uint8Array(await blob.arrayBuffer()), 'Schowek');
+        return;
+      }
+      showToast('W schowku nie ma obrazu');
+    } catch {
+      showToast('Nie można odczytać schowka (brak zgody albo w schowku nie ma obrazu)');
+    }
+  };
+
+  /** Zapisuje dokument jako .fig. `forceAsk` = „Zapisz jako”. Zwraca false po anulowaniu albo błędzie. */
+  const saveTab = async (tab: DocumentTab, forceAsk = false): Promise<boolean> => {
+    if (tab.smart) {
+      // Obiekt inteligentny nie ma własnego pliku: jego zawartość trafia do dokumentu nadrzędnego, który zapisujemy
+      flushSmartTab(tab);
+      const parent = tabsRef.current.find((t) => t.id === tab.smart!.parentTabId);
+      return parent ? saveTab(parent, forceAsk) : true;
+    }
+    tab.engine.finishOpenSessions();
+    for (const t of tabsRef.current) if (t.smart && t.smart.parentTabId === tab.id) flushSmartTab(t);
+    try {
+      const bytes = new TextEncoder().encode(tab.engine.saveToFigFile());
+      const ref = await saveFile(bytes, `${safeFileName(tab.title)}.fig`, FIG_FILTERS, tab.file ?? null, forceAsk || !canWriteInPlace(tab.file));
+      if (!ref) return false;
+      tab.file = ref;
+      tab.title = ref.name.replace(/\.[^/.]+$/, '');
+      tab.engine.title = ref.name;
+      tab.savedMark = tab.engine.historyMark();
+      tab.savedMeta = tab.engine.metaRevision;
+      tab.savedAt = Date.now();
+      tab.fileSize = bytes.length;
+      void recents.add(ref);
+      bumpEngineRevision();
+      return true;
+    } catch (e: any) {
+      showToast(`Nie udało się zapisać pliku: ${e?.message ?? e}`);
+      return false;
+    }
+  };
+
+  const handleSave = () => {
+    const t = tabsRef.current.find((x) => x.id === activeTabIdRef.current);
+    if (t) void saveTab(t);
+  };
+  const handleSaveAs = () => {
+    const t = tabsRef.current.find((x) => x.id === activeTabIdRef.current);
+    if (t) void saveTab(t, true);
+  };
+  const handleSaveAll = async () => {
+    for (const t of tabsRef.current.filter((x) => !x.smart)) {
+      if (!tabDirty(t)) continue;
+      if (!(await saveTab(t))) return;
+    }
+  };
+
+  const askUnsaved = (names: string[], action: 'close' | 'exit') => new Promise<UnsavedAnswer>((resolve) => setUnsavedDlg({ names, action, resolve }));
+
+  /**
+   * Pyta o zapis zmian w podanych dokumentach i w razie zgody zapisuje je.
+   * Zwraca true, gdy można je zamknąć (zapisane albo odrzucone), false po anulowaniu.
+   */
+  const resolveUnsaved = async (list: DocumentTab[], action: 'close' | 'exit'): Promise<boolean> => {
+    for (const t of tabsRef.current) if (t.smart) flushSmartTab(t);
+    const dirty = list.filter(tabDirty);
+    if (!dirty.length) return true;
+    const ans = await askUnsaved(dirty.map((t) => t.title), action);
+    if (ans === 'cancel') return false;
+    if (ans === 'discard') return true;
+    for (const t of dirty) {
+      if (!t.file) {
+        // dokument bez pliku zapisze się przez okno „Zapisz jako”: pokaż go, żeby było wiadomo, o który chodzi
+        leaveActiveTab();
+        setActiveTabId(t.id);
+        bumpEngineRevision();
+      }
+      if (!(await saveTab(t))) return false;
+    }
+    return true;
+  };
+
+  const requestCloseTab = async (id: string) => {
+    if (closingRef.current) return;
+    closingRef.current = true;
+    try {
+      const t = tabsRef.current.find((x) => x.id === id);
+      if (!t) return;
+      if (!t.smart && !(await resolveUnsaved([t], 'close'))) return;
+      handleCloseTab(id);
+    } finally {
+      closingRef.current = false;
+    }
+  };
+
+  const requestCloseAll = async (): Promise<boolean> => {
+    if (closingRef.current) return false;
+    closingRef.current = true;
+    try {
+      if (!(await resolveUnsaved(tabsRef.current.filter((t) => !t.smart), 'close'))) return false;
+      for (const t of tabsRef.current) t.engine.finishOpenSessions();
+      setTabs([]);
+      setViews({});
+      setActiveTabId('');
+      bumpEngineRevision();
+      return true;
+    } finally {
+      closingRef.current = false;
+    }
+  };
+
+  const requestExit = async () => {
+    if (closingRef.current) return;
+    closingRef.current = true;
+    try {
+      if (!(await resolveUnsaved(tabsRef.current.filter((t) => !t.smart), 'exit'))) return;
+      exitingRef.current = true;
+      if (appWindow.isNative()) {
+        await saveWindowStateNow();
+        await appWindow.destroy();
+      }
+      else {
+        window.close();
+        // przeglądarka zwykle nie pozwala zamknąć karty, której nie otworzył skrypt
+        setTimeout(() => {
+          exitingRef.current = false;
+          showToast('Przeglądarka nie pozwala programowi zamknąć tej karty. Zamknij ją ręcznie.');
+        }, 300);
+      }
+    } finally {
+      closingRef.current = false;
+    }
+  };
+
+  /** Zapisuje plik wyeksportowany z okna „Eksportuj”. */
+  const handleExportFile = async (opts: ExportOptions, fileName: string): Promise<boolean> => {
+    const info = formatInfo(opts.format);
+    const bytes = await encodeExport(engine, opts);
+    const ref = await saveFile(bytes, fileName, [{ name: `${info.label} (*.${info.ext})`, extensions: [info.ext] }], null, true);
+    if (ref) showToast(`Wyeksportowano: ${ref.name}`);
+    return !!ref;
+  };
+
+  const openFileDialog = (which: 'export' | 'print' | 'props') => {
+    if (!activeTab) return;
+    engine.finishOpenSessions();
+    for (const t of tabsRef.current) if (t.smart) flushSmartTab(t);
+    bumpEngineRevision();
+    if (which === 'export') setExportOpen(true);
+    else if (which === 'print') setPrintOpen(true);
+    else setPropsOpen(true);
+  };
+
+  /** Najnowsze działania menu „Plik” dla obsługi klawiatury i zdarzeń okna. */
+  const fileActRef = useRef<Record<string, () => void>>({});
+  fileActRef.current = {
+    newDoc: () => setIsNewDocModalOpen(true),
+    open: handleOpenFilePicker,
+    save: handleSave,
+    saveAs: handleSaveAs,
+    saveAll: () => void handleSaveAll(),
+    exportAs: () => openFileDialog('export'),
+    print: () => openFileDialog('print'),
+    properties: () => openFileDialog('props'),
+    close: () => void requestCloseTab(activeTabIdRef.current),
+    closeAll: () => void requestCloseAll(),
+    exit: () => void requestExit(),
+  };
+
+  // Tytuł okna: nazwa dokumentu, gwiazdka przy niezapisanych zmianach
+  const docWindowTitle = activeTab ? `${tabDirty(activeTab) ? '* ' : ''}${activeTab.title} – Figura` : 'Figura';
+  useEffect(() => {
+    document.title = docWindowTitle;
+  }, [docWindowTitle]);
+
+  // Zamknięcie okna programu (krzyżyk, Alt+F4) i odświeżenie / zamknięcie karty: pytanie o niezapisane zmiany
+  useEffect(() => appWindow.onCloseRequested(() => fileActRef.current.exit()), []);
+  useEffect(() => {
+    const h = (e: BeforeUnloadEvent) => {
+      if (exitingRef.current) return;
+      for (const t of tabsRef.current) if (t.smart) flushSmartTab(t);
+      if (tabsRef.current.some(tabDirty)) {
+        e.preventDefault();
+        e.returnValue = '';
+      }
+    };
+    window.addEventListener('beforeunload', h);
+    return () => window.removeEventListener('beforeunload', h);
+  }, [flushSmartTab]);
 
   /** Zwraca indeks aktywnej warstwy wektorowej i zaznaczone na niej obiekty (z otwartą edycją włącznie) albo null, gdy nic nie zaznaczono. */
   const vectorSelection = useCallback((): { idx: number; ids: string[] } | null => {
@@ -1093,15 +1362,27 @@ export default function App() {
       const choice = await askPasteFit(img.width, img.height, true);
       if (choice === 'cancel') return;
       if (choice === 'expand' && !expandCanvasForPaste(img.width, img.height)) return;
-      const cvs = document.createElement('canvas');
-      cvs.width = engine.width;
-      cvs.height = engine.height;
-      const ctx = cvs.getContext('2d')!;
-
-      // Obraz w swoim rozmiarze (bez skalowania), wyśrodkowany na płótnie; ewentualny nadmiar poza płótnem jest odcięty
+      // Obraz w swoim rozmiarze (bez skalowania), wyśrodkowany na płótnie
       const dx = Math.round((engine.width - img.width) / 2);
       const dy = Math.round((engine.height - img.height) / 2);
-      ctx.drawImage(img, dx, dy);
+      const oversize = img.width > engine.width || img.height > engine.height;
+      const cvs = document.createElement('canvas');
+      if (oversize) {
+        // Większy od płótna: pełny obraz pływa w ramce i wystaje za płótno do zatwierdzenia
+        cvs.width = img.width;
+        cvs.height = img.height;
+        cvs.getContext('2d')!.drawImage(img, 0, 0);
+        if (!engine.pasteCanvasOverhang(cvs, dx, dy)) {
+          showToast(engine.pixelEditBlockReason() || 'Nie można wkleić obrazu na tej warstwie');
+          return;
+        }
+        setActiveTool('transform-content');
+        bumpEngineRevision();
+        return;
+      }
+      cvs.width = engine.width;
+      cvs.height = engine.height;
+      cvs.getContext('2d')!.drawImage(img, dx, dy);
 
       engine.pasteCanvas(cvs);
       setActiveTool('transform-content');
@@ -1177,9 +1458,8 @@ export default function App() {
         if (engine.clipboardCanvas) pasteAsSmart(engine.clipboardCanvas);
         else pasteObjs();
       };
-      if (navigator.clipboard && typeof navigator.clipboard.read === 'function') {
-        navigator.clipboard
-          .read()
+      if (canReadClipboard()) {
+        readClipboardItems()
           .then(async (items) => {
             for (const item of items) {
               const imageType = item.types.find((t) => t.startsWith('image/'));
@@ -1209,9 +1489,8 @@ export default function App() {
       }
     }
     // Najpierw próba odczytu obrazu ze schowka systemowego (zrzuty ekranu, obrazy skopiowane z przeglądarki lub systemu)
-    if (navigator.clipboard && typeof navigator.clipboard.read === 'function') {
-      navigator.clipboard
-        .read()
+    if (canReadClipboard()) {
+      readClipboardItems()
         .then((items) => {
           let foundImage = false;
           for (const item of items) {
@@ -1303,8 +1582,14 @@ export default function App() {
       const activeEl = document.activeElement as HTMLElement | null;
       // Edytor tekstu na płótnie sam obsługuje wszystkie skróty (Ctrl+Z, Ctrl+A, Ctrl+C/V/X itd.)
       if (activeEl?.dataset?.figuraTextEditor === '1') return;
-      // Bez otwartych dokumentów działają tylko skróty Nowy i Otwórz
+      const fa = fileActRef.current;
+      // Bez otwartych dokumentów działają tylko skróty Nowy, Otwórz i Wyjdź
       if (!tabsRef.current.length) {
+        if ((e.ctrlKey || e.metaKey) && e.code === 'KeyQ') {
+          e.preventDefault();
+          fa.exit();
+          return;
+        }
         if ((e.ctrlKey || e.metaKey) && (e.key === 'n' || e.key === 'N')) {
           e.preventDefault();
           setIsNewDocModalOpen(true);
@@ -1320,7 +1605,37 @@ export default function App() {
           (activeEl as HTMLInputElement).type === 'text' &&
           !(e.ctrlKey || e.metaKey));
 
+      // Plik: kody klawiszy zamiast znaków, bo Ctrl+Alt to na polskiej klawiaturze AltGr (Ctrl+Alt+S wysyła „ś”)
+      if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && e.key === 'Enter') {
+        e.preventDefault();
+        fa.properties();
+        return;
+      }
       if (e.ctrlKey || e.metaKey) {
+        if (e.code === 'KeyS') {
+          e.preventDefault();
+          if (e.altKey) fa.saveAll();
+          else if (e.shiftKey) fa.saveAs();
+          else fa.save();
+          return;
+        } else if (e.code === 'KeyW') {
+          e.preventDefault();
+          if (e.altKey || e.shiftKey) fa.closeAll();
+          else fa.close();
+          return;
+        } else if (e.code === 'KeyP' && !e.altKey) {
+          e.preventDefault();
+          fa.print();
+          return;
+        } else if (e.code === 'KeyQ') {
+          e.preventDefault();
+          fa.exit();
+          return;
+        } else if (e.code === 'KeyE' && e.shiftKey) {
+          e.preventDefault();
+          fa.exportAs();
+          return;
+        }
         if (e.key === 'z' || e.key === 'Z') {
           e.preventDefault();
           if (activeEl?.tagName === 'SELECT' || (activeEl?.tagName === 'INPUT' && (activeEl as HTMLInputElement).type === 'range')) {
@@ -1372,10 +1687,6 @@ export default function App() {
         } else if (e.key === 't' || e.key === 'T') {
           e.preventDefault();
           setActiveTool('transform-content');
-          return;
-        } else if (e.key === 's' || e.key === 'S') {
-          e.preventDefault();
-          handleSaveFig();
           return;
         } else if (e.key === 'n' || e.key === 'N') {
           e.preventDefault();
@@ -1690,12 +2001,27 @@ export default function App() {
     layersMenuActions
   );
 
+  const fileMenu = buildFileMenu(
+    { hasDoc: !!activeTab, dirtyCount: tabs.filter(tabDirty).length, activeDirty: !!activeTab && tabDirty(activeTab), recents: recentList, canExit: appWindow.isNative() },
+    {
+      newDoc: () => setIsNewDocModalOpen(true),
+      newFromClipboard: () => void handleNewFromClipboard(),
+      open: handleOpenFilePicker,
+      openRecent: (r) => void handleOpenRecent(r),
+      clearRecent: () => recents.clear(),
+      save: handleSave,
+      saveAs: handleSaveAs,
+      saveAll: () => void handleSaveAll(),
+      exportAs: () => openFileDialog('export'),
+      print: () => openFileDialog('print'),
+      properties: () => openFileDialog('props'),
+      close: () => void requestCloseTab(activeTabIdRef.current),
+      closeAll: () => void requestCloseAll(),
+      exit: () => void requestExit(),
+    }
+  );
+
   const menuHandlers: MenuActionHandlers = {
-    onNew: () => setIsNewDocModalOpen(true),
-    onOpen: handleOpenFilePicker,
-    onSaveFig: handleSaveFig,
-    onExportPng: handleExportPng,
-    onExportJpg: handleExportJpg,
     onUndo: () => {
       engine.undo();
       bumpEngineRevision();
@@ -1831,16 +2157,15 @@ export default function App() {
   if (!activeTab) {
     // Wszystkie zakładki zamknięte: tylko Nowy i Otwórz mają sens, reszta menu jest wyłączona
     const idleHandlers = Object.fromEntries(
-      Object.entries(menuHandlers).map(([k, v]) => [k, typeof v === 'function' && k !== 'onNew' && k !== 'onOpen' && k !== 'onOpenSettings' ? () => {} : v])
+      Object.entries(menuHandlers).map(([k, v]) => [k, typeof v === 'function' && k !== 'onOpenSettings' ? () => {} : v])
     ) as unknown as MenuActionHandlers;
     idleHandlers.canUndo = false;
     idleHandlers.canRedo = false;
     return (
       <UnitsContext.Provider value={{ unit: lengthUnit, dpi: engine.dpi }}>
         <div className="flex flex-col h-screen w-screen overflow-hidden bg-[color:var(--h-1e1e1e,#1e1e1e)] text-[color:var(--h-dddddd,#dddddd)] font-sans">
-          <input ref={fileInputRef} type="file" accept=".fig,application/json,image/*" onChange={handleFileLoaded} className="hidden" />
-          <TitleBar tabs={[]} activeTabId="" onSelectTab={handleSelectTab} onCloseTab={handleCloseTab} onNewTab={() => setIsNewDocModalOpen(true)} />
-          <MenuBar handlers={idleHandlers} editMenu={editMenu} layersMenu={layersMenu} imageMenu={imageMenu} viewMenu={viewMenu} selectionMenu={selectionMenu} />
+          <TitleBar tabs={[]} activeTabId="" onSelectTab={handleSelectTab} onCloseTab={requestCloseTab} onNewTab={() => setIsNewDocModalOpen(true)} onCloseWindow={() => void requestExit()} />
+          <MenuBar handlers={idleHandlers} fileMenu={fileMenu} editMenu={editMenu} layersMenu={layersMenu} imageMenu={imageMenu} viewMenu={viewMenu} selectionMenu={selectionMenu} />
           <div className="flex-1 min-h-0 flex flex-col items-center justify-center gap-4 select-none bg-[color:var(--h-252526,#252526)]">
             <div className="text-[color:var(--h-888888,#888888)] text-sm">Brak otwartych dokumentów</div>
             <div className="flex items-center gap-2">
@@ -1868,6 +2193,17 @@ export default function App() {
             defaultUnit={lengthUnit}
           />
           {settingsOpen && <SettingsDialog onClose={() => setSettingsOpen(false)} historyBytes={null} />}
+          {unsavedDlg && (
+            <UnsavedDialog
+              names={unsavedDlg.names}
+              action={unsavedDlg.action}
+              onAnswer={(a) => {
+                const r = unsavedDlg.resolve;
+                setUnsavedDlg(null);
+                r(a);
+              }}
+            />
+          )}
         </div>
       </UnitsContext.Provider>
     );
@@ -1876,23 +2212,16 @@ export default function App() {
   return (
     <UnitsContext.Provider value={{ unit: effectiveUnit, dpi: engine.dpi }}>
     <div className="flex flex-col h-screen w-screen overflow-hidden bg-[color:var(--h-1e1e1e,#1e1e1e)] text-[color:var(--h-dddddd,#dddddd)] font-sans">
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept=".fig,application/json,image/*"
-        onChange={handleFileLoaded}
-        className="hidden"
-      />
-
       <TitleBar
-        tabs={tabs.map((t) => ({ id: t.id, title: smartTabTitle(t), accent: t.smart ? SMART_TAB_COLOR : undefined, hint: t.smart ? 'Obiekt inteligentny: po zamknięciu lub powrocie do głównej zakładki zawartość jest składana do bitmapy' : undefined }))}
+        tabs={tabs.map((t) => ({ id: t.id, title: smartTabTitle(t), accent: t.smart ? SMART_TAB_COLOR : undefined, hint: t.smart ? 'Obiekt inteligentny: po zamknięciu lub powrocie do głównej zakładki zawartość jest składana do bitmapy' : undefined, dirty: tabDirty(t) }))}
         activeTabId={activeTabId}
         onSelectTab={handleSelectTab}
-        onCloseTab={handleCloseTab}
+        onCloseTab={requestCloseTab}
         onNewTab={() => setIsNewDocModalOpen(true)}
+        onCloseWindow={() => void requestExit()}
       />
 
-      <MenuBar handlers={menuHandlers} editMenu={editMenu} layersMenu={layersMenu} imageMenu={imageMenu} viewMenu={viewMenu} selectionMenu={selectionMenu} />
+      <MenuBar handlers={menuHandlers} fileMenu={fileMenu} editMenu={editMenu} layersMenu={layersMenu} imageMenu={imageMenu} viewMenu={viewMenu} selectionMenu={selectionMenu} />
 
       <ToolOptionsBar
         brushSettings={brushSettings}
@@ -2312,6 +2641,31 @@ export default function App() {
       )}
 
       {settingsOpen && <SettingsDialog onClose={() => setSettingsOpen(false)} historyBytes={activeTab ? engine.getHistoryBytes() : null} />}
+      {exportOpen && activeTab && <ExportDialog engine={engine} baseName={activeTab.title} onClose={() => setExportOpen(false)} onExport={handleExportFile} />}
+      {printOpen && activeTab && <PrintDialog engine={engine} docName={activeTab.title} onClose={() => setPrintOpen(false)} />}
+      {propsOpen && activeTab && (
+        <DocPropsDialog
+          engine={engine}
+          file={{ name: activeTab.smart ? `${activeTab.title} (obiekt inteligentny)` : activeTab.file?.name ?? `${activeTab.title}.fig`, location: activeTab.smart ? 'Część dokumentu nadrzędnego' : activeTab.file ? activeTab.file.path ?? activeTab.file.name : null, fileSize: activeTab.fileSize ?? null, savedAt: activeTab.savedAt ?? null, dirty: tabDirty(activeTab) }}
+          onClose={() => setPropsOpen(false)}
+          onChangeDpi={(dpi) => {
+            const r = engine.resizeImage(engine.width, engine.height, 'bicubic', dpi);
+            if (!r.ok) showToast(r.reason);
+            bumpEngineRevision();
+          }}
+        />
+      )}
+      {unsavedDlg && (
+        <UnsavedDialog
+          names={unsavedDlg.names}
+          action={unsavedDlg.action}
+          onAnswer={(a) => {
+            const r = unsavedDlg.resolve;
+            setUnsavedDlg(null);
+            r(a);
+          }}
+        />
+      )}
 
       {selOffsetDlg && (
         <SelectionOffsetDialog

@@ -114,12 +114,12 @@ const Tabs: React.FC<{
 
 const CHANNEL_TABS = [
   { id: 'rgb', label: 'RGB' },
-  { id: 'r', label: 'R', color: '#ff7b72' },
-  { id: 'g', label: 'G', color: '#7ee787' },
-  { id: 'b', label: 'B', color: '#79c0ff' },
+  { id: 'r', label: 'R', color: 'var(--c-ch-r, #ff7b72)' },
+  { id: 'g', label: 'G', color: 'var(--c-ch-g, #7ee787)' },
+  { id: 'b', label: 'B', color: 'var(--c-ch-b, #79c0ff)' },
 ];
 
-const CHANNEL_COLOR: Record<ChannelId, string> = { rgb: '#c8c8c8', r: '#ff6b6b', g: '#5fd068', b: '#5aa9ff' };
+const CHANNEL_COLOR: Record<ChannelId, string> = { rgb: 'var(--c-hist-rgb,#c8c8c8)', r: 'var(--c-hist-r,#ff6b6b)', g: 'var(--c-hist-g,#5fd068)', b: 'var(--c-hist-b,#5aa9ff)' };
 
 /** Histogram jako wypełniony wykres; skala ograniczona percentylem, żeby pojedyncze piki (czerń, biel) nie spłaszczały reszty. */
 const HistogramView: React.FC<{ histogram: Histogram | null; channel: ChannelId; height: number; children?: React.ReactNode }> = ({
@@ -138,7 +138,7 @@ const HistogramView: React.FC<{ histogram: Histogram | null; channel: ChannelId;
     return d + ` L255 ${height} Z`;
   }, [histogram, channel, height]);
   return (
-    <svg viewBox={`0 0 256 ${height}`} className="w-full block bg-[color:var(--h-101010,#101010)] border border-[color:var(--h-333333,#333333)] rounded" style={{ height }} preserveAspectRatio="none">
+    <svg viewBox={`0 0 256 ${height}`} className="w-full block bg-[color:var(--c-chart-bg,#151515)] border border-[color:var(--c-chart-border,#6a6a6a)] rounded" style={{ height }} preserveAspectRatio="none">
       <path d={path} fill={CHANNEL_COLOR[channel]} opacity={0.55} />
       {children}
     </svg>
@@ -201,8 +201,8 @@ const LevelsEditor: React.FC<{
       <div className="mb-1">
         <HistogramView histogram={histogram} channel={channel} height={56}>
           {/* znaczniki poziomów wejściowych */}
-          <line x1={ch.inBlack} x2={ch.inBlack} y1={0} y2={56} stroke="#ddd" strokeWidth={1} vectorEffect="non-scaling-stroke" />
-          <line x1={ch.inWhite} x2={ch.inWhite} y1={0} y2={56} stroke="#ddd" strokeWidth={1} vectorEffect="non-scaling-stroke" />
+          <line x1={ch.inBlack} x2={ch.inBlack} y1={0} y2={56} stroke="var(--c-chart-mark,#ddd)" strokeWidth={1} vectorEffect="non-scaling-stroke" />
+          <line x1={ch.inWhite} x2={ch.inWhite} y1={0} y2={56} stroke="var(--c-chart-mark,#ddd)" strokeWidth={1} vectorEffect="non-scaling-stroke" />
         </HistogramView>
         <div className="h-2.5 rounded-sm mt-0.5 border border-[color:var(--h-333333,#333333)]" style={{ background: 'linear-gradient(to right, #000, #fff)' }} />
       </div>
@@ -342,7 +342,7 @@ const CurvesEditor: React.FC<{
       <svg
         ref={svgRef}
         viewBox={`0 0 ${SIZE} ${SIZE}`}
-        className="w-full block bg-[color:var(--h-101010,#101010)] border border-[color:var(--h-333333,#333333)] rounded touch-none select-none"
+        className="w-full block bg-[color:var(--c-chart-bg,#151515)] border border-[color:var(--c-chart-border,#6a6a6a)] rounded touch-none select-none"
         style={{ aspectRatio: '1 / 1', cursor: 'crosshair' }}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
@@ -364,12 +364,12 @@ const CurvesEditor: React.FC<{
             return <path d={d + ` L255 ${SIZE} Z`} fill={CHANNEL_COLOR[channel]} opacity={0.22} />;
           })()}
         {[64, 128, 192].map((g) => (
-          <g key={g} stroke="#2e2e2e" strokeWidth={1} vectorEffect="non-scaling-stroke">
+          <g key={g} stroke="var(--c-chart-grid,#2e2e2e)" strokeWidth={1} vectorEffect="non-scaling-stroke">
             <line x1={g} x2={g} y1={0} y2={SIZE} vectorEffect="non-scaling-stroke" />
             <line x1={0} x2={SIZE} y1={g} y2={g} vectorEffect="non-scaling-stroke" />
           </g>
         ))}
-        <line x1={0} y1={SIZE} x2={SIZE} y2={0} stroke="#444" strokeWidth={1} strokeDasharray="4 4" vectorEffect="non-scaling-stroke" />
+        <line x1={0} y1={SIZE} x2={SIZE} y2={0} stroke="var(--c-chart-diag,#444)" strokeWidth={1} strokeDasharray="4 4" vectorEffect="non-scaling-stroke" />
         {otherPaths.map((o) => (
           <path key={o.id} d={o.d} fill="none" stroke={CHANNEL_COLOR[o.id]} strokeWidth={1.2} opacity={0.35} vectorEffect="non-scaling-stroke" pointerEvents="none" />
         ))}
@@ -381,8 +381,8 @@ const CurvesEditor: React.FC<{
             y={SIZE - p.y - 3.5}
             width={7}
             height={7}
-            fill={drag === i ? CHANNEL_COLOR[channel] : '#111'}
-            stroke="#fff"
+            fill={drag === i ? CHANNEL_COLOR[channel] : 'var(--c-chart-pt,#111)'}
+            stroke="var(--c-chart-ptb,#fff)"
             strokeWidth={1}
             vectorEffect="non-scaling-stroke"
           />

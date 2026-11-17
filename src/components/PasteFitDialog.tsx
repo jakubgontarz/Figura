@@ -49,7 +49,7 @@ export const PasteFitDialog: React.FC<Props> = ({ imageW, imageH, canvasW, canva
           </li>
           <li>
             <b className="text-[color:var(--h-dddddd,#dddddd)]">Wklej bez zmian</b>: obraz zachowa swój rozmiar i zostanie wyśrodkowany
-            {crops ? '; części poza płótnem zostaną odcięte.' : '; części poza płótnem pozostaną poza nim.'}
+            {crops ? '; do zatwierdzenia wystaje poza płótno, a po zatwierdzeniu części poza płótnem zostaną odcięte.' : '; części poza płótnem pozostaną poza nim.'}
           </li>
         </ul>
       </div>

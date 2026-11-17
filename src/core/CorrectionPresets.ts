@@ -1,3 +1,4 @@
+import { persist } from './Persist.ts';
 import { CorrectionType, cloneParams, defaultParams } from './Corrections.ts';
 
 /** Preset użytkownika dla jednej korekcji lub jednego filtru. */
@@ -30,7 +31,7 @@ function revive(def: any, raw: any): any {
 
 function readStore(): Record<string, any> {
   try {
-    const raw = JSON.parse(localStorage.getItem(KEY) || '{}');
+    const raw = JSON.parse(persist.get(KEY) || '{}');
     return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
   } catch {
     return {};
@@ -59,7 +60,7 @@ export function saveCorrectionPresets(type: CorrectionType, list: CorrectionPres
     const store = readStore();
     if (list.length) store[type] = list.map((p) => ({ id: p.id, name: p.name, params: p.params }));
     else delete store[type];
-    localStorage.setItem(KEY, JSON.stringify(store));
+    persist.set(KEY, JSON.stringify(store));
   } catch {
     /* brak dostępu do pamięci przeglądarki: presety działają do końca sesji okna */
   }

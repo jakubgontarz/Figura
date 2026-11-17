@@ -363,6 +363,8 @@ export class ViewportTileRenderer {
    */
   private tryGpu(req: TileRequest, exact: boolean): boolean {
     if (!GpuComposer.available()) return false;
+    // tryb „bezpieczny”: edycja obiektu leżącego pod innymi obiektami liczy się na procesorze (omija błędy sterowników kart zintegrowanych)
+    if (req.preview.live && settings.get().gpu === 'safe') return false;
     const v = req.view;
     const pv = req.preview;
     if (this.computeOverlay(pv, v.zoom)) return false;
@@ -617,7 +619,7 @@ export class ViewportTileRenderer {
 
   private computeOverlay(pv: TilePreview, zoom: number): boolean {
     // edycja „na żywo” obiektu pod innymi: składa ją GPU (segmenty + podgląd obiektu), a nie płótno dokumentu przebudowywane co klatkę
-    if (pv.live && !this.liveGpuFail && GpuComposer.available()) return false;
+    if (pv.live && !this.liveGpuFail && settings.get().gpu !== 'safe' && GpuComposer.available()) return false;
     if (pv.blendMode !== 'SrcOver') return false;
     // Duże powiększenie: piksele są wielkimi blokami, więc podgląd i dokument muszą być rysowane tym samym rasterem
     // (zwykłe płótno pod spodem zaokrągla krawędzie pikseli inaczej niż płótno kafelków - 1 px przesunięcia i szczeliny)

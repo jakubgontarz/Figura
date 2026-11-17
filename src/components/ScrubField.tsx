@@ -352,7 +352,7 @@ export const ScrubField: React.FC<ScrubFieldProps> = ({
           }
         }}
         style={{ width: openEnded ? '100%' : `${len + 1.5}ch`, maxWidth: '100%' }}
-        className={`absolute left-1/2 top-0 h-full -translate-x-1/2 px-0 text-center ${tall ? 'text-sm' : 'text-xs'} font-mono text-[color:var(--t-white,#fff)] focus:outline-none ${
+        className={`absolute left-1/2 top-0 h-full -translate-x-1/2 px-0 text-center ${tall ? 'text-sm' : 'text-xs'} font-mono ${trackStyle && !editing ? 'text-white [text-shadow:0_0_2px_#000]' : 'text-[color:var(--t-white,#fff)]'} focus:outline-none ${
           editing ? 'bg-[color:var(--h-121212,#121212)] cursor-text' : trackStyle ? 'bg-black/55 cursor-ew-resize pointer-events-auto' : 'bg-transparent cursor-ew-resize pointer-events-auto'
         }`}
       />

@@ -21,7 +21,7 @@ interface NewDocumentModalProps {
 }
 
 const MAX_PX = 8000;
-const MIN_PX = 16;
+const MIN_PX = 1;
 type Unit = LengthUnit;
 
 const UNIT_NAME: Record<Unit, string> = { px: 'Piksele', mm: 'mm', cm: 'cm', in: 'cal' };
@@ -300,7 +300,7 @@ export const NewDocumentModal: React.FC<NewDocumentModalProps> = ({
           </div>
 
           {(tooBig || tooSmall) && (
-            <div className="text-[11px] text-[#ff8a8a]">
+            <div className="text-[11px] text-[color:var(--c-err,#ff8a8a)]">
               {tooBig ? `Obraz jest za duży (najwyżej ${MAX_PX} px na bok przy tej rozdzielczości: ${wPx} × ${hPx} px).` : `Obraz jest za mały (co najmniej ${MIN_PX} px na bok).`}
             </div>
           )}

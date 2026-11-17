@@ -88,6 +88,50 @@ export function mapHex(hex: string, theme: ThemeId, accent: string = DEFAULT_ACC
 /** Kolor tekstu „białego” (nagłówki, aktywne etykiety) w danym motywie. */
 export const themeText = (theme: ThemeId): string => (theme === 'white' ? '#111111' : theme === 'light' ? '#1b1b1b' : '#ffffff');
 
+/**
+ * Kolory „semantyczne” panelu warstw (ikony i liczniki w wierszach, przyciski oka, zaznaczone korekcje).
+ * W ciemnych motywach obowiązują wartości domyślne z klas, w jasnych te przyciemnione.
+ */
+const LIGHT_VARS: Record<string, string> = {
+  '--c-ch-r': '#c4312a',
+  '--c-ch-g': '#1e7d2f',
+  '--c-ch-b': '#1d5fa8',
+  '--c-cyan': '#0b7285',
+  '--c-blue': '#1c6ea4',
+  '--c-amber': '#8a6200',
+  '--c-red': '#c62828',
+  '--c-teal': '#0b8f73',
+  '--c-selbg': '#cfeaf1',
+  '--c-selborder': '#19a3bd',
+  '--c-selfg': '#0f2d36',
+  '--c-rowbg': '#e4f1f4',
+  '--c-rowbg-h': '#d6e9ee',
+  '--c-rowborder': '#b4d3db',
+  '--c-rowfg': '#1d3a42',
+  '--c-editbg': '#f6ecc6',
+  '--c-edit-bg': '#d3eef5',
+  '--c-edit-border': '#0097b2',
+  '--c-btn': 'rgba(0,0,0,.09)',
+  '--c-btn-h': 'rgba(0,0,0,.18)',
+  '--c-btn-fg': '#222222',
+  '--c-btn-off': 'rgba(0,0,0,.09)',
+  '--c-chart-bg': '#f7f9fa',
+  '--c-chart-border': '#7d8a90',
+  '--c-chart-mark': '#333333',
+  '--c-chart-grid': '#d3dadd',
+  '--c-chart-diag': '#a3adb1',
+  '--c-chart-pt': '#ffffff',
+  '--c-chart-ptb': '#1b1b1b',
+  '--c-hist-rgb': '#5f6a6f',
+  '--c-hist-r': '#d23b34',
+  '--c-hist-g': '#2b9a3c',
+  '--c-hist-b': '#2a6fd0',
+  '--c-err': '#c62828',
+  '--c-warn': '#8a5a00',
+  '--c-badge': 'rgba(0,0,0,.07)',
+  '--c-badge-h': 'rgba(0,0,0,.15)',
+};
+
 /** Nakłada motyw i akcent na całą aplikację (zmienne CSS na <html>). */
 export function applyTheme(theme: ThemeId, accent: string): void {
   if (typeof document === 'undefined') return;
@@ -100,6 +144,11 @@ export function applyTheme(theme: ThemeId, accent: string): void {
   }
   if (theme === 'dark' || theme === 'black') root.style.removeProperty('--t-white');
   else root.style.setProperty('--t-white', themeText(theme));
+  const light = theme === 'white' || theme === 'light';
+  for (const [k, v] of Object.entries(LIGHT_VARS)) {
+    if (light) root.style.setProperty(k, v);
+    else root.style.removeProperty(k);
+  }
   root.style.setProperty('--accent', accent);
   root.style.colorScheme = theme === 'white' || theme === 'light' ? 'light' : 'dark';
   root.dataset.theme = theme;

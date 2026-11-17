@@ -178,6 +178,7 @@ let gl: GL | null = null;
 const progs = new Map<string, Prog>();
 const texPool: Record<string, Tex | undefined> = {};
 let maxTex = 0;
+let rendererName = '';
 
 function getGl(): GL | null {
   if (disabled) return null;
@@ -210,12 +211,30 @@ function getGl(): GL | null {
       return null;
     }
     maxTex = g.getParameter(g.MAX_TEXTURE_SIZE) as number;
+    try {
+      const info = g.getExtension('WEBGL_debug_renderer_info');
+      rendererName = String(info ? g.getParameter(info.UNMASKED_RENDERER_WEBGL) : g.getParameter(g.RENDERER));
+    } catch {
+      rendererName = '';
+    }
     gl = g;
     return g;
   } catch {
     disabled = true;
     return null;
   }
+}
+
+/** Nazwa karty graficznej używanej przez WebGL (pusta, gdy kontekst jeszcze nie powstał albo go nie ma). */
+export function gpuRendererName(): string {
+  getGl();
+  return rendererName;
+}
+
+/** Czy WebGL działa programowo na procesorze (SwiftShader, WARP, llvmpipe): składanie na GPU byłoby wtedy wolniejsze niż ścieżka procesorowa. */
+export function gpuIsSoftware(): boolean {
+  getGl();
+  return /swiftshader|llvmpipe|software|basic render|warp/i.test(rendererName);
 }
 
 function prog(g: GL, name: string, fs: string): Prog {

@@ -6,11 +6,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 
 export interface MenuActionHandlers {
-  onNew: () => void;
-  onOpen: () => void;
-  onSaveFig: () => void;
-  onExportPng: () => void;
-  onExportJpg: () => void;
   onUndo: () => void;
   onRedo: () => void;
   canUndo: boolean;
@@ -49,6 +44,8 @@ interface MenuBarProps {
   handlers: MenuActionHandlers;
   /** Zawartość menu „Warstwy” (budowana na podstawie stanu aktywnej warstwy) */
   layersMenu?: MenuEntry[];
+  /** Zawartość menu „Plik” */
+  fileMenu?: MenuEntry[];
   /** Zawartość menu „Edycja” */
   editMenu?: MenuEntry[];
   /** Zawartość menu „Obraz” */
@@ -112,6 +109,7 @@ const SubMenuItem: React.FC<{ entry: Extract<MenuEntry, { label: string }>; onDo
     <div ref={ref} onMouseEnter={open} onMouseLeave={() => setPos(null)} className="relative">
       <button
         type="button"
+        data-testid={entry.testId}
         disabled={entry.disabled}
         onClick={open}
         className={`${ITEM} ${entry.disabled ? ITEM_OFF : pos ? 'bg-[color:var(--h-007acc,#007acc)] text-white cursor-pointer' : ITEM_ON}`}
@@ -131,7 +129,7 @@ const SubMenuItem: React.FC<{ entry: Extract<MenuEntry, { label: string }>; onDo
   );
 };
 
-export const MenuBar: React.FC<MenuBarProps> = ({ handlers, editMenu, layersMenu, imageMenu, viewMenu, selectionMenu }) => {
+export const MenuBar: React.FC<MenuBarProps> = ({ handlers, fileMenu, editMenu, layersMenu, imageMenu, viewMenu, selectionMenu }) => {
   const [openMenu, setOpenMenu] = useState<string | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -168,43 +166,8 @@ export const MenuBar: React.FC<MenuBarProps> = ({ handlers, editMenu, layersMenu
           Plik
         </button>
         {openMenu === 'plik' && (
-          <div className="absolute left-0 top-full mt-0.5 min-w-[210px] bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[#3f3f46] shadow-xl py-1 text-[12px] text-[color:var(--h-cccccc,#cccccc)]">
-            <button
-              onClick={() => handleAction(handlers.onNew)}
-              className="w-full text-left px-3 py-1 hover:bg-[color:var(--h-007acc,#007acc)] hover:text-white flex justify-between cursor-pointer"
-            >
-              <span>Nowy...</span>
-              <span className="text-[color:var(--h-888888,#888888)] text-[11px]">Ctrl+N</span>
-            </button>
-            <button
-              onClick={() => handleAction(handlers.onOpen)}
-              className="w-full text-left px-3 py-1 hover:bg-[color:var(--h-007acc,#007acc)] hover:text-white flex justify-between cursor-pointer"
-            >
-              <span>Otwórz (.fig, obrazy)...</span>
-              <span className="text-[color:var(--h-888888,#888888)] text-[11px]">Ctrl+O</span>
-            </button>
-            <button
-              onClick={() => handleAction(handlers.onSaveFig)}
-              className="w-full text-left px-3 py-1 hover:bg-[color:var(--h-007acc,#007acc)] hover:text-white flex justify-between font-medium text-white cursor-pointer"
-            >
-              <span>Zapisz projekt (.fig)</span>
-              <span className="text-[color:var(--h-888888,#888888)] text-[11px]">Ctrl+S</span>
-            </button>
-            <div className="h-[1px] bg-[color:var(--h-333333,#333333)] my-1" />
-            <button
-              onClick={() => handleAction(handlers.onExportPng)}
-              className="w-full text-left px-3 py-1 hover:bg-[color:var(--h-007acc,#007acc)] hover:text-white flex justify-between cursor-pointer"
-            >
-              <span>Eksportuj jako PNG</span>
-              <span className="text-[color:var(--h-888888,#888888)] text-[10px]">PNG</span>
-            </button>
-            <button
-              onClick={() => handleAction(handlers.onExportJpg)}
-              className="w-full text-left px-3 py-1 hover:bg-[color:var(--h-007acc,#007acc)] hover:text-white flex justify-between cursor-pointer"
-            >
-              <span>Eksportuj jako JPG</span>
-              <span className="text-[color:var(--h-888888,#888888)] text-[10px]">JPG</span>
-            </button>
+          <div data-testid="file-menu" className="absolute left-0 top-full mt-0.5 min-w-[260px] bg-[color:var(--h-1e1e1e,#1e1e1e)] border border-[#3f3f46] shadow-xl py-1 text-[12px] text-[color:var(--h-cccccc,#cccccc)]">
+            <MenuList entries={fileMenu ?? []} onDone={() => setOpenMenu(null)} />
           </div>
         )}
       </div>
